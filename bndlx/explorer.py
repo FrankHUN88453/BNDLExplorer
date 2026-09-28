@@ -8,6 +8,7 @@ import time
 from imgui_bundle import hello_imgui, imgui
 
 from . import filedialog, ops, theme, winclip
+from . import names as N
 from .restypes import T_TEXTURE, name as type_name
 from .theme import I, icon_text
 
@@ -489,7 +490,7 @@ class ExplorerUI:
             self.clip_copy(d)
         if self.cmd(I.ICON_FA_PASTE, None, 'Paste (Ctrl+V)', d is not None and not ro):
             self.clip_paste(d)
-        if self.cmd(I.ICON_FA_PEN, None, 'Rename = change id (F2)', r is not None and not ro):
+        if self.cmd(I.ICON_FA_PEN, None, 'Change id (F2)', r is not None and not ro):
             self.start_rename(d, r)
         if self.cmd(I.ICON_FA_TRASH_CAN, None, 'Delete (Del)', bool(sel) and not ro):
             self.modal = {'kind': 'confirm_delete', 'doc': d.uid, 'ids': [x.id for x in sel]}
@@ -541,7 +542,7 @@ class ExplorerUI:
     def sort_items(self, d):
         if d is None:
             return
-        cols = ['Name (id)', 'Type', 'Description', 'Size', 'Imports']
+        cols = ['Name', 'Id', 'Type', 'Description', 'Size', 'Imports']
         for i, c in enumerate(cols):
             if imgui.menu_item(c, '', d.sort[0] == i)[0]:
                 d.sort = (i, d.sort[1])
@@ -605,6 +606,8 @@ class ExplorerUI:
         if imgui.menu_item('Import resources from folder...', '', False, d is not None and not d.b.truncated)[0]:
             self.action_import_folder(d)
         imgui.separator()
+        if imgui.menu_item('Find names (scan the game folders)...', '', False, self.job is None)[0]:
+            self.action_find_names()
         if imgui.menu_item('Find in all open bundles...', 'Ctrl+Shift+F', False, bool(self.docs))[0]:
             self.modal = {'kind': 'find', 'text': self.find_text}
         if imgui.menu_item('Go to id...', 'Ctrl+G', False, bool(self.docs))[0]:
@@ -782,6 +785,20 @@ class ExplorerUI:
             imgui.end_group()
         imgui.spacing()
         imgui.spacing()
+        imgui.text('Resource names')
+        imgui.separator()
+        st = self.names.stats
+        if st:
+            imgui.text(f'{st["named"]:,} of {st["resources"]:,} resources have names ({st["exact"]:,} exact names from the game data).'.replace(',', ' '))
+            imgui.text_disabled('Scanned: ' + '; '.join(self.names.scanned))
+        else:
+            imgui.text_wrapped('Bundles store resources by number only. "Find names" scans the game folders in the navigation pane '
+                               '(add the PS3 prototype folder too, if you have it: its debug data names many retail resources) '
+                               'and works out names for the Name column. It takes one or two minutes.')
+        if imgui.button(f'{I.ICON_FA_MAGNIFYING_GLASS}  Find names' if not st else f'{I.ICON_FA_ROTATE_RIGHT}  Scan again') and self.job is None:
+            self.action_find_names()
+        imgui.spacing()
+        imgui.spacing()
         imgui.text('Recent bundles')
         imgui.separator()
         rec = [p for p in self.cfg.get('recent', []) if os.path.exists(p) and (not t.search or t.search.lower() in p.lower())]
@@ -907,25 +924,35 @@ class ExplorerUI:
             imgui.text_disabled('Copy to another bundle, or drop outside the window to save as files')
             imgui.end_drag_drop_source()
 
+    def name_text(self, d, r, alpha=1.0):
+        """The display name, coloured by how sure it is; tooltip with the full name."""
+        nm, kind, tip = self.display_name(d, r)
+        a = alpha * (1.0 if kind == 'exact' else 0.82 if kind == 'derived' else 0.6)
+        self.faded_text(nm, a, dim=(kind == 'id'))
+        if imgui.is_item_hovered(imgui.HoveredFlags_.delay_normal):
+            src = {'exact': 'name from the game data', 'derived': 'name worked out from the data', 'id': ''}[kind]
+            imgui.set_tooltip(f'{tip}\n{ops.id_text(r.id)}' + (f'\n{src}' if src else ''))
+
     def details_view(self, d):
         rows = self.visible_rows(d)
         flags = (imgui.TableFlags_.resizable | imgui.TableFlags_.scroll_y | imgui.TableFlags_.sortable
                  | imgui.TableFlags_.hideable | imgui.TableFlags_.reorderable | imgui.TableFlags_.pad_outer_x)
-        if not imgui.begin_table('res', 5, flags):
+        if not imgui.begin_table('res2', 6, flags):
             return
         imgui.table_setup_scroll_freeze(0, 1)
-        imgui.table_setup_column('Name', imgui.TableColumnFlags_.width_fixed | imgui.TableColumnFlags_.default_sort
-                                 | imgui.TableColumnFlags_.no_hide, 190)
-        imgui.table_setup_column('Type', imgui.TableColumnFlags_.width_fixed, 130)
-        imgui.table_setup_column('Description', imgui.TableColumnFlags_.width_stretch)
-        imgui.table_setup_column('Size', imgui.TableColumnFlags_.width_fixed | imgui.TableColumnFlags_.prefer_sort_descending, 80)
-        imgui.table_setup_column('Imports', imgui.TableColumnFlags_.width_fixed, 60)
+        imgui.table_setup_column('Name', imgui.TableColumnFlags_.width_stretch | imgui.TableColumnFlags_.default_sort
+                                 | imgui.TableColumnFlags_.no_hide, 3.0)
+        imgui.table_setup_column('Id', imgui.TableColumnFlags_.width_fixed, 150)
+        imgui.table_setup_column('Type', imgui.TableColumnFlags_.width_fixed, 120)
+        imgui.table_setup_column('Description', imgui.TableColumnFlags_.width_stretch | imgui.TableColumnFlags_.default_hide, 1.5)
+        imgui.table_setup_column('Size', imgui.TableColumnFlags_.width_fixed | imgui.TableColumnFlags_.prefer_sort_descending, 70)
+        imgui.table_setup_column('Imports', imgui.TableColumnFlags_.width_fixed | imgui.TableColumnFlags_.default_hide, 55)
         imgui.table_headers_row()
         specs = imgui.table_get_sort_specs()
         if specs is not None and specs.specs_dirty:
             if specs.specs_count:
-                s = specs.get_specs(0)
-                d.sort = (s.column_index, s.sort_direction == imgui.SortDirection.ascending)
+                sp = specs.get_specs(0)
+                d.sort = (sp.column_index, sp.sort_direction == imgui.SortDirection.ascending)
             specs.specs_dirty = False
             rows = self.visible_rows(d)
         self.scroll_into_view(d, rows, imgui.get_frame_height())
@@ -950,19 +977,18 @@ class ExplorerUI:
                 ic, colr = theme.type_icon(r.type)
                 icon_text(ic, colr, alpha)
                 imgui.same_line()
+                self.name_text(d, r, alpha)
+                imgui.table_next_column()
                 if renaming:
                     self.rename_box(d, r)
                 else:
-                    self.faded_text(ops.id_text(r.id), alpha)
+                    self.faded_text(ops.id_text(r.id), alpha, dim=True)
                 imgui.table_next_column()
                 self.faded_text(type_name(r.type), alpha, dim=True)
                 imgui.table_next_column()
                 summ = self.summary(d, r)
-                if r.name:
-                    self.faded_text(r.name, alpha)
-                    if summ and summ != r.name:
-                        imgui.same_line()
-                        imgui.text_disabled(summ)
+                if r.name and N.GC_RE.match(r.name) is None and r.name != self.display_name(d, r)[2]:
+                    self.faded_text(r.name, alpha, dim=True)
                 else:
                     self.faded_text(summ, alpha, dim=True)
                 imgui.table_next_column()
@@ -1050,9 +1076,8 @@ class ExplorerUI:
                         icon_text(ic, colr, fade)
                         if big is not None:
                             imgui.pop_font()
-                    label = ops.id_text(r.id)
-                    y = pos.y + box + 12
-                    for ln in ([label] if len(label) <= 8 else [label[:8], label[8:]]):
+                    y = pos.y + box + 10
+                    for ln in wrap2(self.display_name(d, r)[0], tile_w - 8):
                         w = imgui.calc_text_size(ln).x
                         imgui.set_cursor_pos(imgui.ImVec2(pos.x + (tile_w - w) / 2, y))
                         self.faded_text(ln, fade)
@@ -1098,7 +1123,7 @@ class ExplorerUI:
             self.clip_copy(d, cut=True)
         if imgui.menu_item(f'{I.ICON_FA_COPY}  Copy', 'Ctrl+C', False)[0]:
             self.clip_copy(d)
-        if imgui.menu_item(f'{I.ICON_FA_PEN}  Rename (change id)', 'F2', False, not ro)[0]:
+        if imgui.menu_item(f'{I.ICON_FA_PEN}  Change id', 'F2', False, not ro)[0]:
             self.start_rename(d, r)
         if imgui.menu_item(f'{I.ICON_FA_TRASH_CAN}  Delete' + (f' ({len(sel)})' if len(sel) > 1 else ''), 'Del', False, not ro)[0]:
             self.modal = {'kind': 'confirm_delete', 'doc': d.uid, 'ids': [x.id for x in sel] or [r.id]}
@@ -1414,6 +1439,32 @@ class ExplorerUI:
             imgui.same_line(0, 2)
         imgui.new_line()
         imgui.pop_style_var(2)
+
+
+def wrap2(text, width):
+    """At most two lines that fit `width`, the second one shortened with an ellipsis."""
+    words = text.replace('_', '_\u200b').split(' ')
+    lines, cur = [], ''
+    for w in words:
+        cand = (cur + ' ' + w).strip()
+        if imgui.calc_text_size(cand.replace('\u200b', '')).x <= width or not cur:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    lines = [ln.replace('\u200b', '') for ln in lines]
+    out = []
+    for ln in lines[:2]:
+        while imgui.calc_text_size(ln).x > width and len(ln) > 2:
+            ln = ln[:-2] + '…'
+        out.append(ln)
+    if len(lines) > 2:
+        ln = out[1]
+        while imgui.calc_text_size(ln + '…').x > width and len(ln) > 1:
+            ln = ln[:-1]
+        out[1] = ln + '…'
+    return out
 
 
 def ellipsis(s, n):

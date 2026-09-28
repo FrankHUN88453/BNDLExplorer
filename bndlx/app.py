@@ -1,6 +1,7 @@
 """BNDL Explorer: view, edit, import / export and convert the .BNDL bundles of NFS Most Wanted (2012),
 PC retail and PS3 prototype. Dear ImGui (imgui-bundle) front end."""
 import itertools
+import re
 import json
 import os
 import shutil
@@ -20,10 +21,11 @@ from .bundle import FLAG_NAMES, Bundle, BundleError
 from .genesys import Node, Ref, TypeDB, leaf_kind
 from .labels import Labels, config_dir
 from .localised import StringTable
+from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.1'
+VERSION = '0.2'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -62,6 +64,8 @@ class Doc:
         self.rows = None
         self.rows_key = None
         self.summary = {}
+        self.dname = {}                     # id -> (display name, kind, tooltip)
+        self.users = None                   # id -> [(user id, offset)] (built in the background)
         self.undo = []
         self.redo = []
         self.back = []
@@ -152,6 +156,7 @@ class App(ExplorerUI):
         self.clip_dir = None
         self.renaming = None
         self.thumbs = Thumbs()
+        self.names = N.NameDB.load()
         self.folder_cache = {}
         self.addr_edit = None
         self.addr_focus = False
@@ -233,6 +238,8 @@ class App(ExplorerUI):
         d = Doc(b, path)
         self.docs.append(d)
         self.show_doc(d)
+        self.names.learn_bundle(b, path)
+        self.build_users(d)
         self.types.add_bundle(b)
         self.remember('last_bundle', path)
         extra = ' The file is truncated: read only.' if b.truncated else ''
@@ -287,6 +294,8 @@ class App(ExplorerUI):
 
     def changed(self, d, res=None):
         d.invalidate()
+        d.dname.clear()
+        self.build_users(d)
         if res is not None:
             d.summary.pop(res.id, None)
         if res is not None and res.type == T_GTYPE:
@@ -790,16 +799,219 @@ class App(ExplorerUI):
         for r in d.b.resources:
             if d.type_filter is not None and r.type != d.type_filter:
                 continue
-            if t and not (t in f'{r.id:016x}' or t in r.name.lower() or t in type_name(r.type).lower()
-                          or t in self.summary(d, r).lower()):
+            if t and not (t in f'{r.id:016x}' or t in self.display_name(d, r)[0].lower() or t in r.name.lower()
+                          or t in type_name(r.type).lower() or t in self.summary(d, r).lower()):
                 continue
             rows.append(r)
         col, asc = d.sort
-        keyf = [lambda r: r.id, lambda r: (type_name(r.type), r.id), lambda r: (r.name or self.summary(d, r)).lower(),
-                lambda r: r.size(0) + r.size(1) + r.size(2) + r.size(3), lambda r: r.import_count][col]
+        keyf = [lambda r: self.display_name(d, r)[0].lower(), lambda r: r.id, lambda r: (type_name(r.type), r.id),
+                lambda r: self.summary(d, r).lower(), lambda r: r.size(0) + r.size(1) + r.size(2) + r.size(3),
+                lambda r: r.import_count][min(col, 5)]
         rows.sort(key=keyf, reverse=not asc)
         d.rows, d.rows_key = rows, key
         return rows
+
+    # -- names ------------------------------------------------------------------------------------------------
+    def build_users(self, d):
+        """Reverse import map of a bundle (who uses each resource), for derived names, plus the names that can
+        be worked out inside the bundle; background thread."""
+        d.users = None
+        res = list(d.b.resources)
+        first = not getattr(d, 'names_done', False)
+        d.names_done = True
+
+        def work():
+            if first:
+                try:
+                    bn = N.bundle_names(d.b, self.types)
+                    self.names.learn_names(bn)
+                    if bn['car'] and d.path:
+                        self.names.cars.setdefault(os.path.basename(d.path).upper(), bn['car'])
+                except Exception:
+                    traceback.print_exc()
+            users = {}
+            for r in res:
+                if r.missing or not r.import_count:
+                    continue
+                try:
+                    for imp in r.imports():
+                        users.setdefault(imp.id, []).append((r.id, imp.offset))
+                except Exception:
+                    continue
+            d.users = users
+            d.dname.clear()
+            d.rows = None
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def display_name(self, d, r, depth=0):
+        """(name, kind, tooltip); kind 'exact' (a real name), 'derived' (from how it is used) or 'id'."""
+        hit = d.dname.get(r.id)
+        if hit is not None:
+            return hit
+        out = self._display_name(d, r, depth)
+        if depth == 0:
+            d.dname[r.id] = out
+        return out
+
+    def _display_name(self, d, r, depth):
+        full = self.names.exact.get(r.id)
+        if full is None and r.name and not N.GC_RE.match(r.name):
+            full = r.name
+        if full is None and r.type == T_GTYPE:
+            t = self.types.get(r.id)
+            full = t.name if t is not None and t.name else None
+        if full:
+            m = N.QUAD_RE.match(full)
+            if m and depth < 2:
+                tex = d.b.find((0x01000000 << 32) | int(m.group(2)))
+                if tex is not None:
+                    tname_, kind, _ = self.display_name(d, tex, depth + 1)
+                    flip = ' '.join(x for x in (m.group(3) and 'flipped H', m.group(4) and 'flipped V') if x)
+                    return (f'{tname_} quad' + (f' ({flip})' if flip else ''), 'exact', full)
+            return (N.short(full), 'exact', full)
+        gc = N.gc_number(r.id)
+        tn = type_name(r.type)
+        stored = self.names.objnames.get(r.id)
+        if stored and r.type != T_GOBJECT:
+            return (stored, 'derived', f'{stored}\n(name inside the resource)')
+        if r.type == T_GOBJECT:
+            nm = stored
+            if nm is None and not r.missing:
+                try:
+                    node = genesys.Reader(self.types, d.b.e).read_resource(r)
+                    nm = N.object_name(node, self.types)
+                except Exception:
+                    nm = None
+            if nm:
+                return (nm, 'derived', f'{nm}\n(name field of the object)')
+            s = self.summary(d, r)
+            if s:
+                return (f'{s} {gc}' if gc is not None else s, 'derived', f'{s} object (no name in the data)')
+        if r.type == 0x106:
+            car = self.doc_car(d)
+            if car:
+                return (f'{car} graphics spec', 'derived', f'{car} graphics spec\n(the car of this vehicle bundle)')
+        if depth < 3 and d.users:
+            users = d.users.get(r.id, [])
+            for uid, off in users[:8]:
+                u = d.b.find(uid)
+                if u is None:
+                    continue
+                if u.type == 0x106 and r.type == 0x51:
+                    car = self.doc_car(d) or 'vehicle'
+                    role = N.vgs_role(off)
+                    nm = f'{car} {role}'
+                    return (nm, 'derived', f'{nm}\n(part of the VehicleGraphicsSpec)')
+                un, kind, _ = self.display_name(d, u, depth + 1)
+                if kind == 'id':
+                    continue
+                base = re.sub(r' \(\+\d+\)$', '', un)
+                base = re.sub(r' (LOD\d|OCCLUSION)$', '', base)
+                if u.type == 0x02:
+                    base = re.sub(r' material$', '', base)
+                if r.type == 0x05 and u.type == 0x51:
+                    lod = self.model_lod(d, u, off)
+                    nm = f'{base} LOD{lod}' if lod is not None else f'{base} renderable'
+                elif r.type == T_TEXTURE and u.type == 0x02:
+                    nm = f'{base} {self.material_slot(d, u, off)}'
+                elif r.type == T_TEXTURE:
+                    nm = f'{base} texture'
+                else:
+                    nm = f'{base} {tn.lower()}'
+                more = len({x for x, _ in users}) - 1
+                if more > 0:
+                    nm += f' (+{more})'
+                return (nm, 'derived', f'{nm}\n(used by {type_name(u.type)} {un}' + (f' and {more} more)' if more else ')'))
+        car = self.doc_car(d)
+        if car:
+            nm = f'{car} {tn.lower()}' + (f' {gc}' if gc is not None else '')
+            return (nm, 'derived', f'{nm}\n(resource of the {car} vehicle bundle)')
+        return ((f'{tn} {gc}' if gc is not None else ops.id_text(r.id)), 'id', 'no name known')
+
+    def doc_car(self, d):
+        """Car name of a vehicle bundle (from its damage behaviour object), or None."""
+        car = getattr(d, 'car', False)
+        if car is not False:
+            return car
+        car = self.names.cars.get(os.path.basename(d.path or '').upper())
+        if car is None and os.path.basename(d.path or '').upper().startswith('VEH_'):
+            rd = genesys.Reader(self.types, d.b.e)
+            for r in d.b.resources:
+                if r.type != T_GOBJECT or r.missing:
+                    continue
+                try:
+                    nm = N.object_name(rd.read_resource(r), self.types)
+                except Exception:
+                    continue
+                if nm:
+                    for suf in N.VEH_SUFFIXES:
+                        if nm.endswith(suf):
+                            car = nm[:-len(suf)].strip()
+                            break
+                if car:
+                    break
+        d.car = car
+        return car
+
+    def model_lod(self, d, m, off):
+        """LOD index of a renderable import in a model's renderable table."""
+        try:
+            c = m.data(0)
+            table = struct.unpack_from(d.b.e + 'I', c, 0)[0]
+            k = (off - table) // 4
+            return k if 0 <= k < c[0x14] else None
+        except Exception:
+            return None
+
+    def material_slot(self, d, m, off):
+        """Texture slot name of a material import offset (Diffuse, Normal, ...)."""
+        try:
+            c = m.data(0)
+            e = d.b.e
+            ntex = c[0x20]
+            tp, sp, tip = struct.unpack_from(e + '3I', c, 0x24)
+            k = (off - tip) // 4
+            if 0 <= k < ntex:
+                h = struct.unpack_from(e + 'H', c, tp + 2 * k)[0]
+                return N.SLOTS.get(h, f'texture {k}')
+        except Exception:
+            pass
+        return 'texture'
+
+    def action_find_names(self):
+        folders = list(self.pinned())
+        for d in self.docs:
+            if d.path:
+                folders.append(os.path.dirname(d.path))
+        roots = []
+        for f in sorted(set(folders), key=len):
+            if not any(f.lower().startswith(r.lower().rstrip('\\/') + os.sep) for r in roots):
+                roots.append(f)
+        if not roots:
+            self.status = 'Add the game folder (and the PS3 prototype folder, if you have it) with "Add a folder" first.'
+            return
+        exes = []
+        for r in roots:
+            for n in ('NFS13.exe', 'EBOOT.BIN'):
+                p = os.path.join(r, n)
+                if os.path.exists(p):
+                    exes.append(p)
+        db = self.names
+
+        def done(st):
+            for d in self.docs:
+                d.dname.clear()
+                d.rows = None
+            self.modal = {'kind': 'message', 'title': 'Resource names',
+                          'text': f'Scanned {st["files"]} bundles in {st["seconds"]} s.\n\n'
+                                  f'{st["resources"]} different resources, {st["named"]} of them named '
+                                  f'({st["exact"]} exact names from the game data, the rest from object names).\n'
+                                  'Other resources get names from what uses them (models, materials, vehicles).'}
+            self.status = f'Names: {st["named"]} of {st["resources"]} resources.'
+
+        label = ', '.join(os.path.basename(r.rstrip('\\/')) or r for r in roots)
+        self.run_job(f'Finding names in {label}...', lambda pr: db.scan(roots, pr, exe_paths=exes), done)
 
     def summary(self, d, r):
         s = d.summary.get(r.id)
@@ -849,8 +1061,11 @@ class App(ExplorerUI):
             imgui.pop_font()
         imgui.same_line()
         imgui.begin_group()
-        imgui.text(ops.id_text(r.id))
-        imgui.text_disabled(f'{type_name(r.type)}  -  {human(sum(r.size(k) for k in range(4)))}' + (f'  -  {r.name}' if r.name else ''))
+        nm, kind, tip = self.display_name(d, r)
+        imgui.text(nm)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(tip)
+        imgui.text_disabled(f'{type_name(r.type)}  -  {ops.id_text(r.id)}  -  {human(sum(r.size(k) for k in range(4)))}')
         imgui.end_group()
         if r.missing:
             imgui.text_colored(imgui.ImVec4(1, 0.5, 0.3, 1), 'The data of this resource is not in the file (truncated file).')
@@ -988,7 +1203,7 @@ class App(ExplorerUI):
                 od, orr = self.where(imp.id)
                 if orr is not None:
                     where = '' if od is d else f'  in {od.name}'
-                    imgui.text(f'{type_name(orr.type)} {self.summary(od, orr)}{where}')
+                    imgui.text(f'{self.display_name(od, orr)[0]}  ({type_name(orr.type)}){where}')
                 else:
                     imgui.text_disabled('not in an open bundle')
                 imgui.table_next_column()
@@ -1072,7 +1287,7 @@ class App(ExplorerUI):
                 imgui.text('Uses:')
                 for imp in r.imports()[:64]:
                     od, orr = self.where(imp.id)
-                    lbl = f'{type_name(orr.type)} {imp.id:016X} {self.summary(od, orr)}' if orr else f'{imp.id:016X} (not open)'
+                    lbl = f'{self.display_name(od, orr)[0]}  ({type_name(orr.type)})' if orr else f'{imp.id:016X} (not open)'
                     if imgui.selectable(f'{lbl}##u{imp.offset}', False)[0] and orr is not None:
                         self.goto(imp.id, od)
 
@@ -1434,7 +1649,7 @@ class App(ExplorerUI):
     def leaf_widget(self, d, r, f, ft, v, loc, path):
         if isinstance(v, Ref):
             od, orr = self.where(v.id)
-            lbl = f'-> {v.id:016X}' + (f'  {type_name(orr.type)} {self.summary(od, orr)}' if orr else '  (not open)')
+            lbl = f'-> {self.display_name(od, orr)[0]}  ({type_name(orr.type)})' if orr else f'-> {v.id:016X}  (not open)'
             if imgui.selectable(f'{lbl}##{path}', False)[0] and orr is not None:
                 self.goto(v.id, od)
             return
@@ -1553,7 +1768,7 @@ class App(ExplorerUI):
                 if r is None:
                     continue
                 extra = f' (import at {off:#x})' if off is not None else ''
-                if imgui.selectable(f'{d.name}: {type_name(r.type)} {rid:016X} {r.name or self.summary(d, r)}{extra}##res{i}', False)[0]:
+                if imgui.selectable(f'{d.name}: {self.display_name(d, r)[0]}  ({type_name(r.type)} {ops.id_text(rid)}){extra}##res{i}', False)[0]:
                     self.goto(rid, d)
         imgui.end()
         if keep is False:
@@ -1799,6 +2014,11 @@ Open: the Open button (Ctrl+O), double click a bundle in a folder (add the game 
 with "Add a folder"), or drop .BNDL files on the window. PC (retail) and PS3 (prototype) bundles both work;
 every bundle gets its own tab, and the navigation pane lists its resource types as folders.
 
+Names: resources are stored by number; the Name column shows the real name where the game data has one
+(bright), or a name worked out from how the resource is used (dimmer, e.g. "Rock_01 Diffuse", "<car> body LOD0").
+Home > Find names (or ... > Find names) scans the game folders once to collect them; add the PS3 prototype
+folder too if you have it (its debug data names many retail resources). Hover a name for its source.
+
 Browse: Details or Large icons view (textures show thumbnails), search box, Sort, Back / Forward / Up
 (Alt+Left / Alt+Right / Alt+Up). The pane on the right shows the selected resource: textures (zoom, mips,
 channels), Genesys objects (every field, editable), Genesys types, text files, the game's strings, colour
@@ -1879,6 +2099,11 @@ def run(paths=(), screenshot=None, frames=12, select=None, tab=None, expand=Fals
 
     params.callbacks.show_gui = gui
     hello_imgui.run(params)
+    if app.names.dirty:
+        try:
+            app.names.save()
+        except OSError:
+            pass
     if screenshot:
         img = hello_imgui.final_app_window_screenshot()
         from PIL import Image

@@ -42,6 +42,33 @@ It is laid out like the Windows 11 File Explorer (dark theme by default; light t
   Imports and Hex tabs.
 - **Status bar**: item counts, selection size, messages, view switch.
 
+## Resource names
+
+Bundles store resources by number only. The **Name** column shows a name wherever one can be found; the **Id**
+column keeps the number. **Find names** (Home page or **…**) scans the game folders of the navigation pane
+once (about a minute) and keeps the result in `%APPDATA%\BNDLExplorer\names.json.gz`. Add the PS3 prototype
+folder too if you have it: its debug data names many resources that the retail game shares.
+
+*Exact names* (normal text) come from the game data:
+- the debug name tables of bundles that have them (`gamedb://hawaii/World/.../Rock_01.mb?ID=...`, `trk_unit1_list`);
+- 32-bit ids are the zlib CRC32 of the lower-case name, so any candidate can be checked exactly: strings in
+  Genesys objects and widget JSON, Genesys type names, asset paths in the executable, and name patterns
+  (`<script>.lua`, `<widget Name>_<object id>.json`, `<material>_<texture>[_fh][_fv]_renderable` for HUD
+  quads, `<id>_VEHICLESOUND`, `TRK_UNIT<n>_GCVR`, the `_LOD<n>` renderables of every model path found, ...);
+  candidates must also fit the resource type, which keeps random CRC matches out;
+- Genesys type names (stored in the types).
+
+*Worked-out names* (dimmer text; hover for how) come from the data around a resource:
+- Genesys objects: their name field (`Name`, behaviour and widget names), else `<type> <number>`;
+- widget JSON files: the `Name` inside them;
+- vehicle bundles: the car name (from the damage behaviour object), the graphics spec (body, wheel 1-4 tyre /
+  brake disc / rim / caliper) and the model's LOD table: `Porsche_911CarreraS_2012 wheel 1 tyre LOD0`;
+- textures and materials: the model that uses them and the material slot: `Rock_01 Diffuse` (`(+n)` = also
+  used by n other resources).
+
+Numbers are not guessed: with CRC32, `crc(name + "_LOD0")` follows from `crc(name)`, so a wrong asset number
+that happens to match a model id would also "match" its renderables; such names are never used.
+
 ## What it shows and edits
 
 | Resource | Preview / editor | Export / import |
