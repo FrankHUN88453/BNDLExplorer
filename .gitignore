@@ -1,0 +1,21 @@
+# Game data (EA / Criterion property) - never commit
+*.BNDL
+*.bndl
+*.BUNDLE
+*.bundle
+*.orig
+*.bres
+*.dds
+*.png
+*.jpg
+*.bin
+*.csv
+
+# work / Python / build output
+work/
+__pycache__/
+*.pyc
+build/
+dist/
+*.ini
+*.log
