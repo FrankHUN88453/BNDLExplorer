@@ -89,6 +89,8 @@ that happens to match a model id would also "match" its renderables; such names 
 | .SPS sound stream files | opened like a bundle with one sound: play, waveform, replace, save | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF / .SPS; a whole folder as WAV |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / pause / stop with a play head on the waveform; click or drag on it to jump; time, channels, rate, length; stops when another item is selected | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
+| AnimationList, Animation (retail PC) | a car's 8 damage animations played **on the car** (body skinned to the damage skeleton): bumpers fall off, bonnets pop up, doors swing; other animations on their skeleton with bone paths (camera shots); play / pause, time slider, loop, speed | |
+| Skeleton | the bones on their car (or alone), with a table: parent, position, name hash | |
 | ControlMesh (PS3 prototype cars) | the crash deformation lattice: up to 64 points on the body over the car, coloured by how deep each can dent, with the direction it moves; the car view has a **Control points** switch | max dent per point editable; glTF / FBX |
 | GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
@@ -150,6 +152,29 @@ InstanceList) writes an edited file back:
 
 The per-mesh bounds words (record 0x00-0x0F) are kept: centre = three s16 × 2^-14 (a scale code in the top
 bits of the first word selects 2^-10 for large meshes), the extents are packed in a way not solved yet.
+
+### Animations
+
+Retail PC animations (542 skeletons, 1297 animations and 379 animation lists, all read):
+
+- **Skeleton** (type 0xB2): `u16 version 2, u16 bones, u32 bone offset, u32 id offset`; per bone (0x30
+  bytes) the bind position and rotation (quaternion x y z w) in model space, then parent, previous sibling,
+  last child and own index; u32 name hashes.
+- **Animation** (0xB3): a 0x60-byte header (keys, bones, rotation / translation track counts, keys per
+  second at 0x30, rotation codec at 0x34, nine offsets from 0x38): a translation track for bone 0, the other
+  translation tracks, per-bone translation and rotation track indices (0xFF = none), and the rotation keys.
+  Translations are f32x4; rotations f32 quaternions or 32-bit **smallest three** (bits 30-31 the largest
+  component, three 10-bit components in x y z w order, ±1/√2). Keys are stored key after key (all tracks of a
+  key together) and are **added to the bind pose**: the translation to the bone's local position, the
+  rotation after its local rotation.
+- **AnimationList** (0xB0): the animations stored inside, with start / middle / end sound slots.
+
+Every car has an AnimationList of 8 damage animations used by its `DamageBehaviour`: 21 keys from whole to
+wrecked for one side of the car (front, rear, left, right, ...). Car body vertices are skinned to the damage
+skeleton (BLENDINDICES / BLENDWEIGHT), so BNDL Explorer plays them on the car; parts that come off (bumper
+covers, mirrors) are moved out of sight by their bones. The `EN_US` `FEEDBACKGROUPS` animations are camera
+shots in world coordinates and car rigs (body and four spinning wheels). The PS3 prototype's animations use an
+older layout that is not read yet.
 
 ### ControlMesh (PS3 prototype)
 
@@ -342,6 +367,7 @@ python tests\test_core.py                 :: library: saves, edits, conversion, 
 python tests\test_gui.py                  :: the real window: drops, copy between bundles, clipboard, undo, save
 python tests\test_audio_gui.py            :: sound preview: jump to a position, stop when another item is selected (silent)
 python tests\test_fbx_gui.py              :: FBX export with textures, import back, an edited object, undo
+python tests\test_anim_gui.py             :: damage animations on the car, a camera path, a skeleton
 python tests\roundtrip_all.py "%BNDLX_PC%" "%BNDLX_PS3%"   :: every bundle saves byte-identical
 ```
 

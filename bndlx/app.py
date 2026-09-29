@@ -20,6 +20,8 @@ from . import zonelist as ZL
 from . import spsfile
 from . import platetext
 from . import ginsu
+from . import anim
+from .anim_ui import AnimUI
 from . import fbx
 from . import meshimport
 from . import roots
@@ -35,7 +37,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.18'
+VERSION = '0.19'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -174,7 +176,7 @@ def waveform(audio, cols=1024):
             np.array([p.max() if len(p) else 0 for p in parts]))
 
 
-class App(ExplorerUI, SoundtrackUI):
+class App(ExplorerUI, SoundtrackUI, AnimUI):
     def __init__(self, paths=(), select=None):
         self.docs = []
         self.tabs = [Browser()]
@@ -1544,6 +1546,8 @@ class App(ExplorerUI, SoundtrackUI):
             self.wave_view(d, r)
         elif t == ginsu.T_GINSU:
             self.ginsu_view(d, r)
+        elif t in (anim.T_ANIMLIST, anim.T_ANIMATION, anim.T_SKELETON):
+            self.anim_view(d, r)
         elif t in mesh.MODEL_TYPES:
             self.model_view(d, r)
         elif t == 0x02:
@@ -2212,6 +2216,9 @@ class App(ExplorerUI, SoundtrackUI):
             return True
         if f.type == T_TEXTURE:
             return self.tex.get('img') is not None or self.tex.get('err') is not None
+        if f.type in (anim.T_ANIMLIST, anim.T_ANIMATION, anim.T_SKELETON):
+            st = getattr(self, 'anim_st', None)
+            return st is not None and st.get('base', (None,))[1] == f.id and st.get('posed') is not None
         if f.type in mesh.MODEL_TYPES:
             res = self.model['result']
             return res is not None and (res[0] == 'error' or self.model['uploaded'] == (self.model['key'], id(res)))
@@ -3443,6 +3450,13 @@ bundle that has it (known after Find names).
 Cars: select the VehicleGraphicsSpec of a VEH_* bundle to see the assembled car (body + wheels) in 3D; drag the
 wheel positions / scales below the view (track width, wheelbase, ride height, wheel size; Mirror keeps it
 symmetric), then Save.
+
+Animations (Animation, AnimationList, Skeleton): a car's damage animations (its AnimationList, used by the
+DamageBehaviour) play on the car itself: its body is skinned to the damage skeleton, so bumpers fall off,
+bonnets pop up and doors swing as the damage grows. Other animations play on their skeleton (joints and bones)
+with the paths the moving bones follow and a line for their forward axis (camera shots in EN_US FEEDBACKGROUPS).
+Play / Pause, the time slider, Loop and speed; lists have a choice of their animations (front, rear left, ...).
+A skeleton shows its bones on its car and lists them.
 
 ControlMesh (PS3 prototype cars): the crash deformation lattice, up to 64 points on the body drawn over the car
 (grey = rigid, yellow .. red = how deep it can dent, the line = the way it moves); the max dent of each point

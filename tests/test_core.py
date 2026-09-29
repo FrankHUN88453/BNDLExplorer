@@ -643,6 +643,50 @@ def test_control_mesh(folder):
           f"control points shown over the car ({st['moving']} can dent), a dent edit lands on its point")
 
 
+def test_animations(pc_root):
+    """Skeletons and animations: every one of a car and of a feedback bundle reads; the bind pose rebuilds the
+    skeleton; packed rotations decode to wheel spins about the axle; a damage animation leaves the car as it is at
+    its start and crumples it at its end."""
+    from bndlx import anim, mesh
+    car = os.path.join(pc_root, 'VEHICLES', 'VEH_1085007_HI.BNDL')
+    fb = os.path.join(pc_root, 'EN_US', 'FEEDBACKGROUPS', '1264936.BNDL')
+    count = 0
+    for p in (car, fb):
+        b = Bundle.open(p)
+        for r in b.resources:
+            if r.type in (anim.T_ANIMATION, anim.T_ANIMLIST):
+                count += len(anim.animations_of(r, b.e))
+            elif r.type == anim.T_SKELETON:
+                anim.read_skeleton(r.data(0), b.e)
+    b = Bundle.open(fb)
+    a = anim.read_animation(b.find(0x10000000012ab99).data(0))
+    q = a.rots[:, 1:5]                                  # the four wheels of the car rig: spins about x
+    check(count > 10 and a.codec == 1 and np.abs(q[..., 1:3]).mean() < 0.03 and np.abs(q[..., 0]).mean() > 0.3
+          and np.allclose(np.linalg.norm(q, axis=-1), 1, atol=1e-3),
+          f'{count} animations read; packed rotations decode to wheel spins about the axle')
+    b = Bundle.open(car)
+    skr = next(x for x in b.resources if x.type == anim.T_SKELETON)
+    sk = anim.read_skeleton(skr.data(0), b.e)
+    wt, wr = anim.pose(sk)
+    lst = next(x for x in b.resources if x.type == anim.T_ANIMLIST and len(x.data(0)) > 4000)
+    anims = anim.animations_of(lst, b.e)
+    meshes, _ = mesh.decode_vgs(b, next(x for x in b.resources if x.type == mesh.T_VGS), mesh.Library(), [], car)
+    body = [m for m in meshes if m.joints is not None]
+    bind, start, moved = 0.0, 0.0, 0.0
+    w0, r0 = anim.pose(sk, anims[0], 0.0)
+    w1, r1 = anim.pose(sk, anims[0], anims[0].duration)
+    for m in body:
+        pb, _ = anim.skin(m.pos.astype(np.float64), None, m.joints, m.weights, sk, wt, wr)
+        p0, _ = anim.skin(m.pos.astype(np.float64), None, m.joints, m.weights, sk, w0, r0)
+        p1, _ = anim.skin(m.pos.astype(np.float64), None, m.joints, m.weights, sk, w1, r1)
+        bind = max(bind, float(np.abs(pb - m.pos).max()))
+        start = max(start, float(np.abs(p0 - m.pos).max()))
+        moved = max(moved, float(np.linalg.norm(p1 - p0, axis=1).max()))
+    check(np.allclose(wt, sk.pos) and len(anims) == 8 and body and bind < 1e-4 and start < 0.01 and moved > 0.3,
+          f'car damage animation: {len(body)} skinned meshes, whole at its start ({start * 100:.1f} cm), '
+          f'parts moved up to {moved:.2f} m at its end')
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -688,6 +732,7 @@ def main():
         test_car(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
+        test_animations(PC)
         test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
         test_sps(PC)
         test_zones(os.path.join(PC, 'HAWAII'))

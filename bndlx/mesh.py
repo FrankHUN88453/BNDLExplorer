@@ -69,6 +69,8 @@ class MeshData:
     xform: np.ndarray = None   # 4x4 row-vector matrix from the renderable's space to this mesh's (None = same)
     uvs: list = None           # further UV sets [(N, 2)] after `uv` (lightmap, AO, ...), for export
     overlay: bool = False      # drawn over everything else (markers that must stay visible)
+    joints: np.ndarray = None  # (N, 4) skeleton bone of each vertex's blend weights (PC cars: the damage skeleton)
+    weights: np.ndarray = None  # (N, 4) blend weights, summing to 1
 
     def placed(self, m, flip=False):
         """This mesh moved by the 4x4 row-vector matrix m (normals follow; flip reverses the triangles)."""
@@ -79,7 +81,8 @@ class MeshData:
         tris = self.tris[:, ::-1].copy() if flip else self.tris
         x = m if self.xform is None else self.xform @ m
         return MeshData(pos, self.uv, tris, self.material, self.texture, self.shader, self.tint,
-                        nrm.astype(np.float32), self.alpha_test, self.wire, self.src, x, self.uvs)
+                        nrm.astype(np.float32), self.alpha_test, self.wire, self.src, x, self.uvs, self.overlay,
+                        self.joints, self.weights)
 
     def normals(self):
         if self.nrm is None:
@@ -452,12 +455,28 @@ def decode_renderable(b, res, lib, bundles, root, parts=None):
                       alpha_test=any(x in sname for x in ALPHA_TEST_WORDS), src=(res.id, k))
         md.nrm = stored_normals(raw, e, layout, md)
         md.uvs = [x for x in (_read(raw, e, u[1], u[2], u[3]) for u in uv_sets(layout)[1:]) if x is not None] or None
+        md.joints, md.weights = blend_weights(raw, layout)
         out.append(md)
         if parts is not None:
             parts[k] = (mr, layout, stride, raw)
     if not out and problems:
         raise MeshError('; '.join(sorted(set(problems))) + '. Open the bundles that hold them, or the game folder.')
     return out
+
+
+def blend_weights(raw, layout):
+    """(bone indices (N, 4), weights (N, 4)) of a PC skinned vertex format (BLENDINDICES u8 x4 + BLENDWEIGHT
+    u8n x4: the car damage skeleton), else (None, None)."""
+    ji = next((x for x in layout if x[0] == 'u13' and x[1] == 'u8' and x[2] == 4), None)
+    wi = next((x for x in layout if x[0] == 'u14' and x[1] == 'u8n' and x[2] == 4), None)
+    if ji is None or wi is None:
+        return None, None
+    j = np.ascontiguousarray(raw[:, ji[3]:ji[3] + 4]).astype(np.int64)
+    w = raw[:, wi[3]:wi[3] + 4].astype(np.float32) / 255.0
+    s = w.sum(1, keepdims=True)
+    w = np.where(s > 0, w / np.maximum(s, 1e-6), np.array([1, 0, 0, 0], np.float32))
+    j = np.where(w > 0, j, 0)
+    return j, w
 
 
 def uv_sets(layout):

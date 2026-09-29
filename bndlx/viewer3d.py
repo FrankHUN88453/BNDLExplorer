@@ -70,6 +70,7 @@ class Viewer:
         self.fbo = self.color = self.depth = None
         self.size = (0, 0)
         self.meshes = []            # [(vao, vbo, ibo, count, tex, tint, alpha test, wire, overlay)]
+        self.uvs = []               # UVs of each mesh (for update_vertices)
         self.textures = {}          # texture key -> gl id
         self.key = None
         self.yaw, self.pitch, self.dist = 0.6, 0.35, 1.0
@@ -157,11 +158,26 @@ class Viewer:
             GL.glDeleteVertexArrays(1, [vao])
             GL.glDeleteBuffers(2, [vbo, ibo])
         self.meshes = []
+        self.uvs = []
         self.key = None
 
-    def set_meshes(self, key, meshes, texture_images, fit=2.6, keep_view=False):
+    def update_vertices(self, changes):
+        """New positions / normals for meshes already on the GPU (animation): {mesh index: (pos, nrm)}, the vertex
+        counts unchanged."""
+        if self.gl is None:
+            return
+        GL = self.gl
+        for i, (pos, nrm) in changes.items():
+            if i >= len(self.meshes):
+                continue
+            data = np.ascontiguousarray(np.concatenate([pos, nrm, self.uvs[i]], 1), np.float32)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.meshes[i][1])
+            GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, data.nbytes, data)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+
+    def set_meshes(self, key, meshes, texture_images, fit=2.6, keep_view=False, bounds=None):
         """meshes: [MeshData]; texture_images: {texture id: RGBA array or None}; fit: start distance in radii;
-        keep_view: the same object changed (keep the camera)."""
+        keep_view: the same object changed (keep the camera); bounds: (lo, hi) to frame instead of every mesh."""
         if self.gl is None:
             self._init()
         GL = self.gl
@@ -169,6 +185,8 @@ class Viewer:
         self.key = key
         lo = np.min([m.pos.min(0) for m in meshes], 0) if meshes else np.zeros(3)
         hi = np.max([m.pos.max(0) for m in meshes], 0) if meshes else np.ones(3)
+        if bounds is not None:
+            lo, hi = np.asarray(bounds[0], np.float64), np.asarray(bounds[1], np.float64)
         if not keep_view:
             self.center = ((lo + hi) / 2).astype(np.float32)
             self.radius = float(max(np.linalg.norm(hi - lo) / 2, 1e-3))
@@ -198,6 +216,7 @@ class Viewer:
             self.meshes.append((vao, vbo, ibo, len(idx), self.textures.get(m.texture), m.tint,
                                 getattr(m, 'alpha_test', False), getattr(m, 'wire', False),
                                 getattr(m, 'overlay', False)))
+            self.uvs.append(uv)
 
     # -- drawing ----------------------------------------------------------------------------------------------
     def render(self, w, h):
