@@ -348,6 +348,20 @@ def test_zones(hawaii):
     check(nb and all(os.path.isfile(p) for p in nb), f'TRK_UNIT1 borders {[os.path.basename(p) for p in nb]}')
 
 
+def test_car(path):
+    """VehicleGraphicsSpec: the body and 4 wheels x 4 parts assemble into a car of plausible, symmetric size."""
+    from bndlx import mesh
+    b = Bundle.open(path)
+    r = next(x for x in b.resources if x.type == mesh.T_VGS)
+    meshes, st = mesh.decode_vgs(b, r, mesh.Library(), [], path)
+    lo = np.min([m.pos.min(0) for m in meshes], 0)
+    hi = np.max([m.pos.max(0) for m in meshes], 0)
+    size = hi - lo
+    check(st['wheels'] == 4 and st['parts'] == 16 and not st['missing'] and 3.5 < size[2] < 5.5
+          and abs(lo[0] + hi[0]) < 0.05, f"car assembled: {st['wheels']} wheels, {st['parts']} parts, "
+          f"{size.round(2).tolist()} m ({os.path.basename(path)})")
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -390,6 +404,7 @@ def main():
         test_models(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_materials(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_vehiclelist(os.path.join(PC, 'VEHICLES', 'VEHICLELIST.BNDL'))
+        test_car(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
         test_sps(PC)
         test_zones(os.path.join(PC, 'HAWAII'))
@@ -403,6 +418,7 @@ def main():
         test_models(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
         test_materials(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
         test_vehiclelist(os.path.join(PS3, 'VEHICLES', 'VEHICLELIST.BNDL'))
+        test_car(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2

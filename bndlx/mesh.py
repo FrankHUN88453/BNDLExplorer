@@ -418,6 +418,8 @@ def decode_resource(b, res, lib, bundles, path, lod=0):
         return decode_instances(b, res, lib, bundles, path, lod)[0], 1
     if res.type == T_POLYSOUP:
         return decode_polysoup(b, res)[0], 1
+    if res.type == T_VGS:
+        return decode_vgs(b, res, lib, bundles, path, lod)[0], 1
     return decode_renderable(b, res, lib, [b] + list(bundles), root), 1
 
 
@@ -583,3 +585,98 @@ def decode_polysoup(b, res):
         out.append(MeshData(pos[used], None, inv.reshape(-1, 3).astype(np.uint32), int(tg), None,
                             f'collision {int(tg):#x}', tag_colour(int(tg))))
     return out, {'soups': n, 'polygons': npolys, 'tags': counts}
+
+
+T_VGS = 0x106
+
+
+def _quat_matrix(q):
+    x, y, z, w = q
+    n = (x * x + y * y + z * z + w * w) ** 0.5 or 1.0
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w)],
+                     [2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w)],
+                     [2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def vgs_layout(b, res):
+    """VehicleGraphicsSpec (0x106): (body model id, [wheel dict: name, pos, quat, scale, parts (model ids)]).
+    PC: wheels offset at 0x0C, count at byte 0x13, 0x90-byte wheel records (position f32x4, rotation quaternion,
+    scale, 18 texture imports, u32 part table offset at +0x78, u16 part count at +0x80, name at +0x82).
+    PS3 prototype: wheels offset at 0x10, count at byte 0x17, 0x50-byte records (u32 part table offset, u32 7,
+    u32 part count, name at +0x0C, position at +0x20, rotation +0x30, scale +0x40). The body model is the
+    import at 0x30; a part table holds one Model import per part (tyre, disc, rim, caliper)."""
+    e = b.e
+    c = res.data(0)
+    imps = {i.offset: i.id for i in res.imports()}
+    wheels = []
+    if b.platform == 'PC':
+        wo, n, stride = struct.unpack_from(e + 'I', c, 0x0C)[0], c[0x13], 0x90
+    else:
+        wo, n, stride = struct.unpack_from(e + 'I', c, 0x10)[0], c[0x17], 0x50
+    for i in range(n):
+        o = wo + stride * i
+        if o + stride > len(c):
+            break
+        if b.platform == 'PC':
+            pos, quat, scale = (struct.unpack_from(e + '3f', c, o), struct.unpack_from(e + '4f', c, o + 0x10),
+                                struct.unpack_from(e + '3f', c, o + 0x20))
+            tbl = struct.unpack_from(e + 'I', c, o + 0x78)[0]
+            cnt = struct.unpack_from(e + 'H', c, o + 0x80)[0]
+            name = bytes(c[o + 0x82:o + 0x90])
+        else:
+            tbl, _, cnt = struct.unpack_from(e + '3I', c, o)
+            name = bytes(c[o + 0x0C:o + 0x20])
+            pos, quat, scale = (struct.unpack_from(e + '3f', c, o + 0x20), struct.unpack_from(e + '4f', c, o + 0x30),
+                                struct.unpack_from(e + '3f', c, o + 0x40))
+        if cnt > 8:
+            break
+        wheels.append({'name': name.split(b'\0')[0].decode('latin1', 'replace'), 'pos': pos, 'quat': quat,
+                       'scale': scale, 'parts': [imps.get(tbl + 4 * k) for k in range(cnt)]})
+    return imps.get(0x30), wheels
+
+
+def decode_vgs(b, res, lib, bundles, path, lod=0):
+    """The assembled car: body model + every wheel part at its wheel's place. Right-hand wheels (negative x) use
+    the same models mirrored, as the game does. Returns (meshes, {'wheels', 'parts', 'missing'})."""
+    root = game_root(path)
+    look = [b] + list(bundles)
+    body, wheels = vgs_layout(b, res)
+    out = []
+    missing = []
+    cache = {}
+
+    def model(mid):
+        if mid not in cache:
+            cache[mid] = None
+            mb, mr = lib.find(mid, look, root, deep=True)
+            if mr is not None and mr.type in (T_MODEL, T_RENDERABLE):
+                try:
+                    cache[mid] = decode_resource(mb, mr, lib, [mb] + look, path, lod)[0]
+                except (MeshError, struct.error, ValueError, IndexError):
+                    cache[mid] = None
+            if cache[mid] is None:
+                missing.append(mid)
+        return cache[mid]
+
+    if body:
+        out += model(body) or []
+    parts = 0
+    for w in wheels:
+        a = _quat_matrix(w['quat']) * np.array(w['scale'], np.float64)[:, None]
+        if w['pos'][0] < 0:
+            a = np.diag([-1.0, 1.0, 1.0]) @ a          # right-hand side: mirrored left wheel
+        t = np.array(w['pos'], np.float64)
+        na = np.linalg.inv(a).T
+        for mid in w['parts']:
+            for md in model(mid) or []:
+                pos = (md.pos.astype(np.float64) @ a + t).astype(np.float32)
+                nrm = md.normals().astype(np.float64) @ na
+                nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+                tris = md.tris[:, ::-1].copy() if np.linalg.det(a) < 0 else md.tris
+                out.append(MeshData(pos, md.uv, tris, md.material, md.texture, md.shader, md.tint,
+                                    nrm.astype(np.float32), md.alpha_test))
+            parts += 1
+    if not out:
+        raise MeshError('neither the body nor the wheels of this car could be found')
+    return out, {'wheels': len(wheels), 'parts': parts, 'missing': missing}

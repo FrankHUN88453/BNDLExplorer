@@ -28,7 +28,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.8'
+VERSION = '0.9'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -1388,7 +1388,7 @@ class App(ExplorerUI):
             self.cube_view(d, r)
         elif t == 0x81:
             self.wave_view(d, r)
-        elif t in (0x05, 0x51, 0x50, 0x60):
+        elif t in (0x05, 0x51, 0x50, 0x60, 0x106):
             self.model_view(d, r)
         elif t == 0x02:
             self.material_view(d, r)
@@ -1694,6 +1694,9 @@ class App(ExplorerUI):
                     elif r.type == mesh.T_POLYSOUP:
                         meshes, cst = mesh.decode_polysoup(d.b, r)
                         stats, nlod, size = {'collision': cst}, 1, 256
+                    elif r.type == mesh.T_VGS:
+                        meshes, vst = mesh.decode_vgs(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
+                        stats, nlod, size = {'car': vst}, 4, 1024
                     else:
                         meshes, nlod = mesh.decode_resource(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
                         stats, size = None, 1024
@@ -1730,13 +1733,18 @@ class App(ExplorerUI):
         v = self.viewer
         ntri = sum(len(m.tris) for m in meshes)
         nvert = sum(len(m.pos) for m in meshes)
-        stats = st.get('stats') if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP) else None
+        stats = st.get('stats') if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP, mesh.T_VGS) else None
         cst = (stats or {}).get('collision')
         if r.type == mesh.T_POLYSOUP and cst:
             imgui.text(f'{cst["soups"]} soups, {cst["polygons"]:,} polygons, {len(cst["tags"])} surface tags'.replace(',', ' '))
             if imgui.is_item_hovered():
                 imgui.set_tooltip('Triangles per collision tag (colour in the view):' + chr(10) + chr(10).join(
                     f'{t:#010x}  {n}' for t, n in sorted(cst['tags'].items(), key=lambda x: -x[1])[:24]))
+        elif stats and 'car' in stats:
+            cs = stats['car']
+            imgui.text(f'Body + {cs["wheels"]} wheels ({cs["parts"]} wheel parts), {ntri:,} triangles'.replace(',', ' '))
+            if cs['missing'] and imgui.is_item_hovered():
+                imgui.set_tooltip('Models not found: ' + ', '.join(ops.id_text(x) for x in cs['missing'][:12]))
         elif stats and 'instances' in stats:
             units = f'{stats["units"]} units, ' if stats.get('units', 1) > 1 else ''
             imgui.text(f'{units}{stats["shown"]} of {stats["instances"]} instances ({stats["models"]} models), '
@@ -1759,7 +1767,7 @@ class App(ExplorerUI):
             if imgui.is_item_hovered():
                 imgui.set_tooltip('Also show the track units that share a border with this one (from HAWAII' + chr(92)
                                   + 'PVS.BNDL)')
-        if nlod > 1 or r.type == 0x51:
+        if nlod > 1 or r.type in (0x51, mesh.T_VGS):
             imgui.same_line()
             imgui.set_next_item_width(90)
             ch, lod = imgui.combo('##lod', st['lod'], [f'LOD {k}' for k in range(max(nlod, 1))])
@@ -1793,7 +1801,7 @@ class App(ExplorerUI):
             return True
         if f.type == T_TEXTURE:
             return self.tex.get('img') is not None or self.tex.get('err') is not None
-        if f.type in (0x05, 0x51, 0x50, 0x60):
+        if f.type in (0x05, 0x51, 0x50, 0x60, 0x106):
             res = self.model['result']
             return res is not None and (res[0] == 'error' or self.model['uploaded'] == self.model['key'])
         if f.type == 0x81:
@@ -2929,6 +2937,8 @@ found in the open bundles and in the game's global bundles (SHADERS, GLOBALMATER
 Materials: the shader, the textures by slot (Diffuse, Normal, Specular, ...) with thumbnails, and the shader
 constants by name (PbrMaterialDiffuseColour, ...), editable. Go jumps to an open resource; Open opens the
 bundle that has it (known after Find names).
+
+Cars: select the VehicleGraphicsSpec of a VEH_* bundle to see the assembled car (body + wheels) in 3D.
 
 Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece of the city in 3D with its props
 (World / Collision / World + collision, Neighbours); the PolygonSoupList is the collision, coloured by surface tag.
