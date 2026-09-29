@@ -13,6 +13,7 @@ in vec3 aNrm;
 in vec2 aUV;
 in vec4 aTan;
 in float aAO;
+in vec2 aUV2;
 uniform mat4 uMVP;
 uniform mat4 uMV;
 out vec3 vN;
@@ -20,7 +21,9 @@ out vec2 vUV;
 out vec3 vPos;
 out vec4 vT;
 out float vAO;
+out vec2 vUV2;
 void main() {
+    vUV2 = aUV2;
     gl_Position = uMVP * vec4(aPos, 1.0);
     vN = mat3(uMV) * aNrm;
     vT = vec4(mat3(uMV) * aTan.xyz, aTan.w);
@@ -39,9 +42,18 @@ in vec2 vUV;
 in vec3 vPos;
 in vec4 vT;
 in float vAO;
+in vec2 vUV2;
 uniform sampler2D uTex;
 uniform sampler2D uNormal;
 uniform sampler2D uSpec;
+uniform sampler2D uLights;
+uniform int uUseLights;
+uniform vec4 uLightsOn;
+uniform mat4 uLightColours;
+uniform int uLightsEmit;
+uniform int uBlend;
+uniform float uOpacity;
+uniform vec3 uGlassTint;
 uniform int uUseTex;
 uniform int uAlphaTest;
 uniform int uShaded;
@@ -76,6 +88,10 @@ void main() {
     if (uShaded == 0) {
         float l = 0.35 + 0.65 * abs(n.z);
         frag = vec4(c.rgb * l, 1.0);
+        return;
+    }
+    if (uBlend == 2) {                                  // colouring glass: multiplies what is behind
+        frag = vec4(pow(uGlassTint, vec3(1.0 / 2.2)), 1.0);
         return;
     }
     vec3 v = normalize(-vPos);
@@ -133,6 +149,22 @@ void main() {
         float cd = 0.0025 / (PI * pow(nh * nh * (0.0025 - 1.0) + 1.0, 2.0));
         col = col * (1.0 - cf) + (sky(r) * cf + cd * cf * light * nl * 0.25) * ao;
     }
+    if (uUseLights == 1) {                              // the light masks in their material colours
+        vec4 lm = texture(uLights, vUV2) * uLightsOn;
+        vec3 e = uLightColours[0].rgb * lm.r + uLightColours[1].rgb * lm.g + uLightColours[2].rgb * lm.b
+                 + uLightColours[3].rgb * lm.a;
+        col += uLightsEmit == 1 ? e : e * albedo;       // Lightmap shaders: lit by the lamp, not glowing
+    }
+    if (uBlend == 1) {                                  // glass: its own colour over what is behind + reflections
+        float fg = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+        float op = uUseTex == 1 ? max(uOpacity, c.a) : uOpacity;
+        vec3 tint = uUseTex == 1 ? albedo : uGlassTint;
+        float gd = 0.0004 / (PI * pow(nh * nh * (0.0004 - 1.0) + 1.0, 2.0));
+        vec3 rgb = tint * op * (sky(n) * 0.9 + light * nl / PI) + (sky(r) + gd * light * nl * 0.1) * fg;
+        float alpha = clamp(op + fg * (1.0 - op), 0.0, 1.0);
+        frag = vec4(pow(aces(rgb * 1.1), vec3(1.0 / 2.2)), alpha);
+        return;
+    }
     frag = vec4(pow(aces(col * 1.1), vec3(1.0 / 2.2)), 1.0);
 }
 '''
@@ -172,6 +204,7 @@ class Viewer:
         self.shaded = True          # the materials look (normal / specular maps, paint); False: texture x head light
         self.paint = (0.55, 0.05, 0.05)
         self.flip_y = -1.0          # normal map green: DirectX convention
+        self.lights_on = [0.0, 0.0, 0.0, 0.0]    # light mask channels lit: R brake, G running, B head, A tail
         self.textures = {}          # texture key -> gl id
         self.key = None
         self.yaw, self.pitch, self.dist = 0.6, 0.35, 1.0
@@ -202,7 +235,7 @@ class Viewer:
             if not GL.glGetShaderiv(sh, GL.GL_COMPILE_STATUS):
                 raise RuntimeError(GL.glGetShaderInfoLog(sh).decode('latin1', 'replace'))
             GL.glAttachShader(prog, sh)
-        for i, name in enumerate(('aPos', 'aNrm', 'aUV', 'aTan', 'aAO')):
+        for i, name in enumerate(('aPos', 'aNrm', 'aUV', 'aTan', 'aAO', 'aUV2')):
             GL.glBindAttribLocation(prog, i, name)
         GL.glLinkProgram(prog)
         if not GL.glGetProgramiv(prog, GL.GL_LINK_STATUS):
@@ -271,8 +304,8 @@ class Viewer:
         for i, (pos, nrm) in changes.items():
             if i >= len(self.meshes):
                 continue
-            uv, tan, ao = self.uvs[i]
-            data = np.ascontiguousarray(np.concatenate([pos, nrm, uv, tan, ao[:, None]], 1), np.float32)
+            uv, tan, ao, uv2 = self.uvs[i]
+            data = np.ascontiguousarray(np.concatenate([pos, nrm, uv, tan, ao[:, None], uv2], 1), np.float32)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.meshes[i][1])
             GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, data.nbytes, data)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
@@ -304,7 +337,9 @@ class Viewer:
             material = getattr(m, 'normal_tex', None) or getattr(m, 'spec_tex', None) or getattr(m, 'paint', False)
             tan = m.tangents() if getattr(m, 'normal_tex', None) else np.tile(np.float32([1, 0, 0, 1]), (len(m.pos), 1))
             ao = m.ao if getattr(m, 'ao', None) is not None else np.ones(len(m.pos), np.float32)
-            data = np.ascontiguousarray(np.concatenate([m.pos, nrm, uv, tan, ao[:, None]], 1), np.float32)
+            uv2 = getattr(m, 'lights_uv', None)
+            uv2 = uv2 if uv2 is not None else uv
+            data = np.ascontiguousarray(np.concatenate([m.pos, nrm, uv, tan, ao[:, None], uv2], 1), np.float32)
             idx = np.ascontiguousarray(m.tris.ravel(), np.uint32)
             vao = GL.glGenVertexArrays(1)
             GL.glBindVertexArray(vao)
@@ -313,9 +348,9 @@ class Viewer:
             GL.glBufferData(GL.GL_ARRAY_BUFFER, data.nbytes, data, GL.GL_STATIC_DRAW)
             GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, ibo)
             GL.glBufferData(GL.GL_ELEMENT_ARRAY_BUFFER, idx.nbytes, idx, GL.GL_STATIC_DRAW)
-            for loc, (n, off) in enumerate(((3, 0), (3, 12), (2, 24), (4, 32), (1, 48))):
+            for loc, (n, off) in enumerate(((3, 0), (3, 12), (2, 24), (4, 32), (1, 48), (2, 52))):
                 GL.glEnableVertexAttribArray(loc)
-                GL.glVertexAttribPointer(loc, n, GL.GL_FLOAT, GL.GL_FALSE, 52, ctypes.c_void_p(off))
+                GL.glVertexAttribPointer(loc, n, GL.GL_FLOAT, GL.GL_FALSE, 60, ctypes.c_void_p(off))
             GL.glBindVertexArray(0)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
             mat = {'normal': self.textures.get(getattr(m, 'normal_tex', None)),
@@ -323,11 +358,17 @@ class Viewer:
                    'f0': getattr(m, 'spec', None) or (0.04, 0.04, 0.04),
                    'rough': getattr(m, 'rough', None) or (0.25 if getattr(m, 'paint', False) else 0.55),
                    'paint': bool(getattr(m, 'paint', False)), 'spec_mode': int(getattr(m, 'spec_mode', 0)),
-                   'lit': not (getattr(m, 'wire', False) or getattr(m, 'overlay', False)), 'has': bool(material)}
+                   'lit': not (getattr(m, 'wire', False) or getattr(m, 'overlay', False)), 'has': bool(material),
+                   'blend': int(getattr(m, 'blend', 0)), 'opacity': float(getattr(m, 'opacity', 1.0)),
+                   'glass': tuple(getattr(m, 'glass_tint', None) or (0.012, 0.014, 0.016)),
+                   'lights': self.textures.get(getattr(m, 'lights_tex', None)),
+                   'light_colours': np.array(getattr(m, 'light_colours', None) or ((0, 0, 0),) * 4, np.float32),
+                   'emit': bool(getattr(m, 'lights_emit', True)),
+                   'centre': m.pos.mean(0) if len(m.pos) else np.zeros(3)}
             self.meshes.append((vao, vbo, ibo, len(idx), self.textures.get(m.texture), m.tint,
                                 getattr(m, 'alpha_test', False), getattr(m, 'wire', False),
                                 getattr(m, 'overlay', False), mat))
-            self.uvs.append((uv, tan, ao))
+            self.uvs.append((uv, tan, ao, uv2))
 
     # -- drawing ----------------------------------------------------------------------------------------------
     def render(self, w, h):
@@ -358,18 +399,50 @@ class Viewer:
         GL.glUniformMatrix4fv(GL.glGetUniformLocation(self.prog, 'uMV'), 1, GL.GL_TRUE, mv)
         loc = {n: GL.glGetUniformLocation(self.prog, n) for n in (
             'uTex', 'uNormal', 'uSpec', 'uUseTex', 'uTint', 'uAlphaTest', 'uShaded', 'uUseNormal', 'uUseSpec',
-            'uPaint', 'uSpecColour', 'uRough', 'uPaintColour', 'uUp', 'uFlipY', 'uSpecMode')}
+            'uPaint', 'uSpecColour', 'uRough', 'uPaintColour', 'uUp', 'uFlipY', 'uSpecMode', 'uLights', 'uUseLights',
+            'uLightsOn', 'uBlend', 'uOpacity', 'uGlassTint', 'uLightColours', 'uLightsEmit')}
         GL.glUniform1i(loc['uTex'], 0)
         GL.glUniform1i(loc['uNormal'], 1)
         GL.glUniform1i(loc['uSpec'], 2)
         GL.glUniform3f(loc['uPaintColour'], *self.paint)
         GL.glUniform3f(loc['uUp'], *(mv[:3, :3] @ up))
         GL.glUniform1f(loc['uFlipY'], self.flip_y)
+        GL.glUniform1i(loc['uLights'], 3)
+        GL.glUniform4f(loc['uLightsOn'], *self.lights_on)
         cleared = False
-        for vao, _, _, count, tex, tint, alpha, wire, over, mat in sorted(self.meshes, key=lambda x: x[8]):
+        see_through = self.shaded and not self.wire
+
+        def order(x):
+            # opaque first, then glass from far to near (blending), then the overlays
+            if x[8]:
+                return (2, 0.0)
+            if see_through and x[9]['blend']:
+                c = x[9]['centre']
+                return (1, float(mv[2, :3] @ c + mv[2, 3]))
+            return (0, 0.0)
+
+        blending = False
+        for vao, _, _, count, tex, tint, alpha, wire, over, mat in sorted(self.meshes, key=order):
             if over and not cleared:          # overlays last, over the rest (markers inside a car stay visible)
                 GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
                 cleared = True
+            glass = see_through and mat['blend'] and not over and not wire
+            if glass != blending:
+                if glass:
+                    GL.glEnable(GL.GL_BLEND)
+                    GL.glDepthMask(GL.GL_FALSE)
+                else:
+                    GL.glDisable(GL.GL_BLEND)
+                    GL.glDepthMask(GL.GL_TRUE)
+                blending = glass
+            if glass:
+                if mat['blend'] == 2:
+                    GL.glBlendFunc(GL.GL_DST_COLOR, GL.GL_ZERO)
+                else:
+                    GL.glBlendFunc(GL.GL_ONE, GL.GL_ONE_MINUS_SRC_ALPHA)
+            GL.glUniform1i(loc['uBlend'], mat['blend'] if glass else 0)
+            GL.glUniform1f(loc['uOpacity'], mat['opacity'])
+            GL.glUniform3f(loc['uGlassTint'], *mat['glass'])
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE if self.wire or wire else GL.GL_FILL)
             use = bool(tex) and self.use_tex and not self.wire and not wire
             shaded = self.shaded and mat['lit'] and not self.wire
@@ -384,15 +457,25 @@ class Viewer:
             GL.glUniform3f(loc['uSpecColour'], *mat['f0'])
             GL.glUniform1f(loc['uRough'], mat['rough'])
             GL.glUniform1i(loc['uSpecMode'], mat['spec_mode'])
+            lights = shaded and mat['lights'] and any(self.lights_on)
+            GL.glUniform1i(loc['uUseLights'], 1 if lights else 0)
+            if lights:
+                lc = np.zeros((4, 4), np.float32)
+                lc[:, :3] = mat['light_colours']
+                GL.glUniformMatrix4fv(loc['uLightColours'], 1, GL.GL_FALSE, lc)
+                GL.glUniform1i(loc['uLightsEmit'], 1 if mat['emit'] else 0)
             for unit, t in ((0, tex if use else self.white), (1, mat['normal'] if maps and mat['normal'] else
                                                                self.white), (2, mat['spec'] if maps and mat['spec']
-                                                                             else self.white)):
+                                                                             else self.white),
+                            (3, mat['lights'] if lights else self.white)):
                 GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
                 GL.glBindTexture(GL.GL_TEXTURE_2D, t)
             GL.glBindVertexArray(vao)
             GL.glDrawElements(GL.GL_TRIANGLES, count, GL.GL_UNSIGNED_INT, None)
         GL.glBindVertexArray(0)
-        for unit in (2, 1, 0):
+        GL.glDisable(GL.GL_BLEND)
+        GL.glDepthMask(GL.GL_TRUE)
+        for unit in (3, 2, 1, 0):
             GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
             GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
         GL.glUseProgram(0)

@@ -37,7 +37,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.21'
+VERSION = '0.22'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -2127,6 +2127,19 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             imgui.same_line()
             imgui.text('Paint')
             imgui.same_line()
+        if any(m.lights_tex for m in meshes):
+            on = v.lights_on                               # mask channels: R brake, G running, B head, A tail
+            ch, lit = imgui.checkbox('Lights', bool(on[2]))
+            if ch:
+                on[1] = on[2] = on[3] = 1.0 if lit else 0.0
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Headlights, running and tail lights on: the car\'s light masks (LightmapLights) in '
+                                  'the colours of its materials')
+            imgui.same_line()
+            ch, br = imgui.checkbox('Brake', bool(on[0]))
+            if ch:
+                on[0] = 1.0 if br else 0.0
+            imgui.same_line()
         if imgui.button('Export glTF...'):             # own row: the view toolbar above is full
             self.action_export(d, r, 'glb')
         imgui.same_line()
@@ -2791,7 +2804,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             return os.path.basename(folder) + '/' + fn
 
         for m in meshes:
-            if not m.material or m.material in out or not (m.texture or m.normal_tex or m.spec_tex or m.paint):
+            if not m.material or m.material in out or not (m.texture or m.normal_tex or m.spec_tex or m.paint
+                                                            or m.blend or m.lights_tex):
                 continue
             if m.uv is None:
                 continue
@@ -2830,7 +2844,24 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 maps['ShininessExponent'] = save(np.repeat(r, 3, -1), f'{key}_rough.png')
                 rough = 1.0
             colour = tuple(paint) if m.paint else (1.0, 1.0, 1.0) if 'DiffuseColor' in maps else m.tint
-            out[m.material] = {'colour': colour, 'rough': rough, 'metal': metal, 'maps': maps}
+            entry = {'colour': colour, 'rough': rough, 'metal': metal, 'maps': maps}
+            if m.blend == 1:                           # see-through glass: Blender's alpha
+                entry.update(opacity=max(m.opacity, 0.12), rough=0.05)
+                if 'DiffuseColor' not in maps:
+                    entry['colour'] = tuple(x ** (1 / 2.2) for x in (m.glass_tint or (0.012, 0.014, 0.016)))
+            elif m.blend == 2:                         # colouring glass (tail lights): its colour, half see-through
+                entry.update(opacity=0.6, rough=0.05, colour=tuple(x ** (1 / 2.2) for x in (m.glass_tint or (1, 0, 0))))
+            lit = self.viewer.lights_on if self.viewer is not None else [0, 0, 0, 0]
+            if m.lights_tex and m.lights_emit and m.lights_uv is m.uv and any(lit):
+                lm = img(m.lights_tex)                 # the lit light masks in their colours, as an emission map
+                if lm is not None:
+                    e = sum(lm[..., k:k + 1].astype(np.float32) / 255.0 * np.array(m.light_colours[k]) * lit[k]
+                            for k in range(4))
+                    peak = float(e.max())
+                    if peak > 0:
+                        maps['EmissiveColor'] = save((e / peak * 255).clip(0, 255), f'{key}_emission.png')
+                        entry['emission'] = min(peak, 50.0)
+            out[m.material] = entry
         return out
 
     def fbx_texture_files(self, d, meshes, path, size):
@@ -3561,7 +3592,9 @@ Copy and paste, drag and drop (like Explorer):
 
 Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms), LOD
 choice for models; Shaded shows the materials as the game shades them (normal and specular maps, roughness,
-metal, ambient occlusion, clear-coated car paint in the colour chosen next to Export), Export glTF (.glb with textures, opens in Blender) and Export FBX (the full materials as PNG maps in
+metal, ambient occlusion, clear-coated car paint in the colour chosen next to Export, see-through glass with
+reflections, tinted tail-light glass, and the lamps: Lights / Brake light the car's light masks in the colours
+of its materials), Export glTF (.glb with textures, opens in Blender) and Export FBX (the full materials as PNG maps in
 <name>_textures: base colour with the paint, normal, roughness, metal; Blender links them to its material). Import FBX (or Replace with an .fbx) writes an edited FBX back: keep the object names Export
 FBX gave (R<id>_<n>); join new parts into an existing object. Positions, UV sets and normals are replaced, the
 rest (tangents, colours, damage weights) comes from the nearest original vertex. Works for renderables, models,

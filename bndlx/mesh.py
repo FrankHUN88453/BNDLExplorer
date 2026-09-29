@@ -83,6 +83,14 @@ class MeshData:
     paint: bool = False
     ao: np.ndarray = None
     spec_mode: int = 0         # 0 vehicle (RGB F0, A metal), 1 world packed (R reflectance, G gloss), 2 RGB F0
+    blend: int = 0             # 0 opaque, 1 glass (see-through with reflections), 2 colouring glass (multiplies)
+    opacity: float = 1.0       # glass: how much of its own colour covers what is behind (OpacityMin)
+    glass_tint: tuple = None   # glass: its colour (linear RGB)
+    lights_tex: int = None     # LightmapLights: channel masks lit in light_colours (R brake, A tail lights, ...)
+    light_colours: tuple = None  # the colour of each channel R G B A when lit (material constants, HDR)
+    lights_emit: bool = True   # Emissive shaders glow; Lightmap shaders are lit by the car's own lights
+    lights_uv: np.ndarray = None  # the UV set that texture uses (the first one on Emissive shaders, set 3 on
+    #                               Lightmap shaders)
 
     def placed(self, m, flip=False):
         """This mesh moved by the 4x4 row-vector matrix m (normals follow; flip reverses the triangles)."""
@@ -370,6 +378,14 @@ DIFFUSE_COLOUR = 0x067923B3          # ~crc32('PbrMaterialDiffuseColour')
 NORMAL_SLOT, SPECULAR_SLOT = 0x0D9C, 0x31F2
 SPECULAR_COLOUR, ROUGHNESS = 0x58ED4287, 0x90BA1E21      # ~crc32('PbrMaterialSpecularColour'), roughness (likely)
 SPECULAR_SETTINGS = 0x202D5108                           # PbrMaterialSpecularSettings: x = roughness (PS3)
+LIGHTS_SLOT = 0x84E0                                     # LightmapLights
+OPACITY_MIN, GLASS_COLOUR, MULTIPLY_COLOUR = 0x76918B85, 0xAD52CD0A, 0x085A4C0B   # ~crc32 of the names:
+#   OpacityMin, DebugOverride_GlassVolumeColour, MaterialColour_SimpleMultiply
+PBR_FRESNEL = 0x0E008CBB                                                           # PbrMaterialFresnel
+LIGHT_CHANNELS = (0xF2408BD9, 0x7FC931EF, 0xC6618C11, 0x1124C9F3)   # LightmappedLights{Red,Green,Blue,Alpha}ChannelColour
+SELF_ILLUMINATION = 0x32465D76                                      # mSelfIlluminationMultiplier
+# a channel without a colour constant stays dark (the cabin's mask has no brake colour, for one)
+LIGHT_DEFAULTS = ((0.0, 0.0, 0.0),) * 4
 
 
 def material_pbr(b, mat, shader_name=''):
@@ -381,12 +397,33 @@ def material_pbr(b, mat, shader_name=''):
     out = {'normal': None, 'spec_tex': None, 'spec': None, 'rough': None, 'paint': 'paint' in low,
            # vehicle maps are verified; the world shaders pack their specular map (R reflectance, G / B gloss),
            # except the ColouredSpecular ones (RGB)
-           'spec_mode': 0 if low.startswith('vehicle') else 2 if 'colouredspecular' in low else 1}
+           'spec_mode': 0 if low.startswith('vehicle') else 2 if 'colouredspecular' in low else 1,
+           # glass: see-through with reflections (OpacityMin of its colour), or tinting what is behind it
+           'blend': 2 if 'colourise' in low else 1 if ('glass' in low or 'refraction' in low) else 0,
+           'opacity': 0.08 if 'refraction' in low else 0.15, 'glass_tint': None, 'lights': None}
     try:
         info = material_info(b, mat)
     except (struct.error, IndexError, ValueError):
         return out
     have = {slot: tid for slot, tid, _, _ in info['textures'] if tid}
+    out['lights'] = have.get(LIGHTS_SLOT)
+    colours = list(LIGHT_DEFAULTS)
+    illum = 1.0
+    for h, v, _ in info['constants']:
+        if h in LIGHT_CHANNELS:
+            colours[LIGHT_CHANNELS.index(h)] = tuple(float(max(0.0, x)) for x in v[:3])
+        elif h == SELF_ILLUMINATION:
+            illum = float(max(0.0, v[0]))
+    out['light_colours'] = tuple(tuple(c * illum for c in col) for col in colours)
+    for h, v, _ in info['constants']:
+        if h == OPACITY_MIN:
+            out['opacity'] = float(min(1.0, max(0.02, v[0])))
+        elif h == GLASS_COLOUR and max(v[:3]) > 0:
+            out['glass_tint'] = tuple(float(min(1.0, x)) for x in v[:3])
+        elif h == MULTIPLY_COLOUR:
+            out['glass_tint'] = tuple(float(min(1.0, max(0.0, x))) for x in v[:3])
+        elif h == DIFFUSE_COLOUR and out['blend'] == 1 and out['glass_tint'] is None:
+            out['glass_tint'] = tuple(float(min(1.0, max(0.0, x))) for x in v[:3])
     if 'tyre' in shader_name.lower():
         out['rough'] = 0.85
     out['normal'] = have.get(NORMAL_SLOT)
@@ -403,7 +440,7 @@ def texture_ids(meshes, maps=True):
     """The textures the meshes show: diffuse, and with maps their normal and specular maps."""
     ids = {m.texture for m in meshes if m.texture}
     if maps:
-        ids |= {t for m in meshes for t in (m.normal_tex, m.spec_tex) if t}
+        ids |= {t for m in meshes for t in (m.normal_tex, m.spec_tex, m.lights_tex) if t}
     return ids
 
 
@@ -542,7 +579,7 @@ def decode_renderable(b, res, lib, bundles, root, parts=None):
         tris = strips_to_tris(ib) if strip else ib[:len(ib) // 3 * 3].astype(np.uint32).reshape(-1, 3)
         tex, tint = material_look(mb, mat, sname)
         md = MeshData(pos.astype(np.float32), uv, tris, mat_id, tex, sname, tint,
-                      alpha_test=any(x in sname for x in ALPHA_TEST_WORDS), src=(res.id, k))
+                      alpha_test=any(x.lower() in sname.lower() for x in ALPHA_TEST_WORDS), src=(res.id, k))
         md.nrm = stored_normals(raw, e, layout, md)
         md.uvs = [x for x in (_read(raw, e, u[1], u[2], u[3]) for u in uv_sets(layout)[1:]) if x is not None] or None
         md.joints, md.weights = blend_weights(raw, layout)
@@ -551,6 +588,17 @@ def decode_renderable(b, res, lib, bundles, root, parts=None):
         md.normal_tex, md.spec_tex, md.spec, md.rough, md.paint = (pbr['normal'], pbr['spec_tex'], pbr['spec'],
                                                                    pbr['rough'], pbr['paint'])
         md.spec_mode = pbr['spec_mode']
+        md.blend, md.opacity, md.glass_tint, md.lights_tex = pbr['blend'], pbr['opacity'], pbr['glass_tint'], \
+            pbr['lights']
+        md.light_colours = pbr['light_colours']
+        if md.lights_tex:
+            low = sname.lower()
+            md.lights_emit = 'emissive' in low
+            el = next((x for x in layout if x[0] == 'uv3' and x[2] == 2), None)
+            md.lights_uv = (_read(raw, e, el[1], el[2], el[3])[:, :2] if el is not None and 'lightmap' in low
+                            else uv if 'emissive' in low else None)
+            if md.lights_uv is None:
+                md.lights_tex = None
         md.ao = vertex_ao(raw, e, layout)
         out.append(md)
         if parts is not None:

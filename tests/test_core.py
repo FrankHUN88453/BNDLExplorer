@@ -710,6 +710,16 @@ def test_shading(pc_root):
     check(len(nm) > 10 and any(m.spec_tex for m in meshes) and any(m.paint for m in meshes)
           and all(m.ao is not None for m in meshes) and tan_ok and all(m.spec_mode == 0 for m in meshes),
           f'car materials: {len(nm)} normal-mapped meshes, specular maps, paint, vertex AO, tangents')
+    windows = [m for m in meshes if m.shader == 'VehicleNFS13_Glass' and len(m.pos) > 500]
+    tail = [m for m in meshes if 'Colourise' in m.shader]
+    lamps = [m for m in meshes if 'EmissiveFourChannel' in m.shader]
+    cabin = [m for m in meshes if 'Emissive_NoDamage' in m.shader]
+    check(windows and all(m.blend == 1 and abs(m.opacity - 0.09) < 1e-3 for m in windows)
+          and tail and tail[0].blend == 2 and tail[0].glass_tint[0] > 0.5 > tail[0].glass_tint[1]
+          and lamps and lamps[0].light_colours[0][0] > 10 and lamps[0].lights_tex
+          and cabin and cabin[0].light_colours[0] == (0.0, 0.0, 0.0),
+          'glass: windows see-through (OpacityMin 0.09), tail-light glass tints red; lamps light in their '
+          'material colours, the cabin has no brake colour')
     unit = os.path.join(pc_root, 'HAWAII', 'TRK_UNIT1.BNDL')
     b = Bundle.open(unit)
     modes = set()

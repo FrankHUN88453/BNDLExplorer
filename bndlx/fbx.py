@@ -470,7 +470,8 @@ def _write_rig(objects, conns, counts, ids, rig, skinned, name):
 def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None, materials=None):
     """meshes: [MeshData]; texture_files: {texture id: relative file name of the PNG next to the .fbx};
     materials: {material id: {'colour', 'rough', 'metal', 'maps': {FBX channel (DiffuseColor, NormalMap,
-    ShininessExponent, ReflectionFactor): relative PNG file}}} for the full look instead of the diffuse only; rig:
+    ShininessExponent, ReflectionFactor, EmissiveColor): relative PNG file}, optional 'opacity' (glass) and
+    'emission' (strength)}} for the full look instead of the diffuse only; rig:
     {'skeleton': anim.Skeleton, 'animations': [(name, anim.Animation)]} adds the bones, skins the meshes that have
     blend weights to them, and writes the animations as takes.
     Returns the .fbx bytes (binary FBX 7.4, metres, Y up)."""
@@ -583,6 +584,12 @@ def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None, ma
                 props += [('Shininess', 'double', 'Number', '', float(((1.0 - mdef['rough']) * 10) ** 2)),
                           ('ReflectionFactor', 'Number', '', 'A', float(mdef['metal'])),
                           ('BumpFactor', 'double', 'Number', '', 1.0)]
+                if 'opacity' in mdef:                  # glass
+                    props += [('Opacity', 'double', 'Number', '', float(mdef['opacity'])),
+                              ('TransparencyFactor', 'Number', '', 'A', float(1.0 - mdef['opacity']))]
+                if 'emission' in mdef:                 # lit lights
+                    props += [('EmissiveColor', 'Color', '', 'A', 1.0, 1.0, 1.0),
+                              ('EmissiveFactor', 'Number', '', 'A', float(mdef['emission']))]
             _p70(mat, props)
             counts['Material'] += 1
             links = dict(mdef['maps']) if mdef else {}

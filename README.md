@@ -135,13 +135,23 @@ and the ColouredSpecular ones are RGB), vertex ambient occlusion, a key light, s
 reflections, GGX with Fresnel and a clear coat on paint. The world's packing is read from the data and
 approximate; tyres have no colour map (the rubber colour is in the shader). Off: the texture under a head light.
 
+Glass and lamps: `Glass` / `Refraction` shaders are see-through (their `OpacityMin` share of their own colour,
+0.09 for a windscreen, plus Fresnel reflections; drawn after everything else, far to near), `Glass_Colourise`
+tints what is behind it (`MaterialColour_SimpleMultiply`, the red tail-light glass), so cabins, headlight
+reflectors and projectors show through. **Lights** and **Brake** light the `LightmapLights` masks: every
+channel in its material's `LightmappedLights{Red,Green,Blue,Alpha}ChannelColour` times
+`mSelfIlluminationMultiplier` (R brake, G running / plate lights, B headlights, A tail lights; a channel without
+a colour stays dark): `Emissive` shaders glow (UV set 0), `Lightmap` shaders are lit by the lamps (UV set 3).
+`Alpha1bit` shaders cut out by the alpha test (the wheels' crest).
+
 **Export glTF** writes a `.glb` (positions, normals, UVs, indices, diffuse textures as PNG, base colours).
 
 **Export FBX** writes a binary FBX 7.4 (metres, Y up; Blender, 3ds Max, Maya, Unity) with every UV set,
 the mesh's own normals and a material per game material with its maps as PNG files in `<name>_textures`:
 base colour (the paint under the livery, the specular colour on metal), normal map, roughness and metalness,
 linked as DiffuseColor / NormalMap / ShininessExponent / ReflectionFactor, which Blender turns into a Principled
-material with those textures. Each object is named `R<renderable id>_<mesh index>`; further uses of the same
+material with those textures. Glass gets its opacity (Blender's alpha), tinting glass its colour, and with Lights
+on, the glowing lamp masks are baked into an emission map (EmissiveColor / EmissiveFactor). Each object is named `R<renderable id>_<mesh index>`; further uses of the same
 mesh (the other wheels) get `~1`, `~2`. An extra UV layer `bndlx_id` (leave it in place) keeps each vertex's
 index in the game mesh.
 
