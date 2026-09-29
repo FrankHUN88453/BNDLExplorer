@@ -362,6 +362,27 @@ def test_car(path):
           f"{size.round(2).tolist()} m ({os.path.basename(path)})")
 
 
+def test_proto_world(seacrest):
+    """PS3 prototype world (SEACREST): old ZoneList layout, version 2 instance lists, WorldObject model at 0x8."""
+    from bndlx import mesh, zonelist as ZL
+    ZL._CACHE.clear()
+    zones = ZL.zones_in(seacrest)
+    exist = sum(os.path.isfile(os.path.join(seacrest, ZL.unit_file(z.unit))) for z in zones)
+    check(len(zones) > 100 and exist == len(zones), f'prototype zone list: {len(zones)} zones, {exist} units')
+    p = os.path.join(seacrest, 'TRK_UNIT100.BNDL')
+    b = Bundle.open(p)
+    r = next(x for x in b.resources if x.type == mesh.T_INSTANCELIST)
+    meshes, st = mesh.decode_instances(b, r, mesh.Library(), [], p)
+    lo = np.min([m.pos.min(0) for m in meshes], 0)
+    hi = np.max([m.pos.max(0) for m in meshes], 0)
+    check(st['shown'] >= 0.95 * st['instances'] and st['kinds'].get('dynamic') and (hi - lo).max() < 2000,
+          f"prototype track unit: {st['shown']}/{st['instances']} instances {st['kinds']}, "
+          f"{(hi - lo).round().tolist()} m")
+    soup = next(x for x in b.resources if x.type == mesh.T_POLYSOUP)
+    cm, cst = mesh.decode_polysoup(b, soup)
+    check(cst['polygons'] > 1000, f"prototype collision: {cst['soups']} soups, {cst['polygons']} polygons")
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -419,6 +440,7 @@ def main():
         test_materials(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
         test_vehiclelist(os.path.join(PS3, 'VEHICLES', 'VEHICLELIST.BNDL'))
         test_car(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
+        test_proto_world(os.path.join(PS3, 'SEACREST'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2

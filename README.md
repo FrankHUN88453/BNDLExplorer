@@ -152,8 +152,11 @@ The **PolygonSoupList** of a unit is its collision: shown in 3D with one colour 
 buildings, terrain, invisible walls, ...); hover the summary line for the tags and their triangle counts.
 
 Roads and ground use blend shaders without a Diffuse slot; the view uses their first colour layer (roads:
-the asphalt colour), so ground looks plainer than in the game. The PS3 prototype's track units are empty
-(its world is stored elsewhere).
+the asphalt colour), so ground looks plainer than in the game.
+
+The PS3 prototype's `HAWAII` track units are empty: its playable world is **`SEACREST`** (Seacrest County, 215
+track units in 5 districts, 1.5 GB). Its `PVS.BNDL` map, its units in 3D (with Neighbours and collision) and its
+older list layouts all work the same way.
 
 ## Sound stream files (.SPS)
 

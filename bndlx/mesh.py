@@ -11,13 +11,14 @@ The vertex layout comes from the material's shader (import at 0x8) -> its first 
 VertexDescriptor (import at 0x9C). Shaders, and many materials and textures, live in the game's global
 bundles (SHADERS*.BNDL, GLOBALMATERIALDICTIONARY.BNDL, ...), which are loaded from the game folder.
 Model chunk 0: u32 offset of the renderable table (imports, one per LOD), renderable count at byte 0x14.
-InstanceList (0x50, the static world of a TRK_UNIT bundle), PC: u32 instances offset (0x10), u32 capacity,
-u32 count, u32 version (3); 0x60-byte instances: model import at +0, f32 at +4, u32 instance id at +8, a 4x4
-row-vector matrix at +0x20 (translation in the 4th row; the 4th column is not used). Shared world models are
+InstanceList (0x50, the static world of a TRK_UNIT bundle): u32 instances offset (0x10), u32 capacity,
+u32 count, u32 version; version 3 (retail): 0x60-byte instances: model import at +0, f32 at +4, u32 instance id at
++8, a 4x4 row-vector matrix at +0x20 (version 2, PS3 prototype: 0x50 bytes, matrix at +0x10) (translation in the 4th row; the 4th column is not used). Shared world models are
 in HAWAII\\GLOBALRESOURCES.BNDL and HAWAII\\DISTRICT_*.BNDL.
 Prop / Dynamic / Compound instance lists (0x218 / 0x204 / 0x216): u32 version, u32 instances offset (0x10),
 u32 count, u32 0; 0x60-byte instances: 4x4 matrix at +0, object import at +0x40 (PropObject / WorldObject /
-CompoundObject), u32 id at +0x48. The object's model is its import at 0x4.
+CompoundObject), u32 id at +0x48. The object's model is its import at 0x4 (0x8 in the PS3 prototype's
+WorldObject); the record size is 0x60 or 0x50 (taken from the import spacing).
 PolygonSoupList (0x60, collision of a TRK_UNIT bundle), PC: f32x3 min, pad, f32x3 max, pad, u32 soup table
 offset, u32 bounding box offset, i32 soup count, u32 data size; soup header (0x10): u32 polygon offset, u32
 vertex offset, u16, i8 x3 vertex offset in 500 m steps, u8 quad count, u8 polygon count, u8 vertex count;
@@ -118,10 +119,20 @@ class Library:
         return b
 
     @staticmethod
-    def world_paths(root):
-        out = [os.path.join(root, 'HAWAII', 'GLOBALRESOURCES.BNDL'), os.path.join(root, 'GLOBALRESOURCES.BNDL')]
-        out += sorted(glob.glob(os.path.join(root, 'HAWAII', 'DISTRICT_*.BNDL')))
-        return [p for p in out if os.path.isfile(p)]
+    def world_paths(root, folder=None):
+        """GLOBALRESOURCES and DISTRICT_* bundles of a world folder (the unit's own folder, e.g. SEACREST on the
+        PS3 prototype; HAWAII by default)."""
+        out = []
+        for f in ([folder] if folder else []) + [os.path.join(root, 'HAWAII')]:
+            out += [os.path.join(f, 'GLOBALRESOURCES.BNDL')] + sorted(glob.glob(os.path.join(f, 'DISTRICT_*.BNDL')))
+        out.append(os.path.join(root, 'GLOBALRESOURCES.BNDL'))
+        seen, res = set(), []
+        for p in out:
+            k = os.path.normcase(p)
+            if k not in seen and os.path.isfile(p):
+                seen.add(k)
+                res.append(p)
+        return res
 
     def global_bundles(self, root):
         if root is None:
@@ -160,7 +171,8 @@ class Library:
         return self.globals[key]
 
     def find(self, rid, bundles, root, deep=False):
-        """(bundle, resource) or (None, None). deep: also search the world bundles (slow the first time)."""
+        """(bundle, resource) or (None, None). deep: also search the world bundles (slow the first time); a folder
+        name searches that world folder first."""
         if not rid:
             return None, None
         for b in list(bundles) + self.global_bundles(root) + [x for x in self.extra.values() if x is not None]:
@@ -174,7 +186,7 @@ class Library:
             nroot = os.path.normcase(os.path.abspath(root))
             paths = [p for p in (self.locator(rid) or ()) if os.path.normcase(os.path.abspath(p)).startswith(nroot)]
         if deep:
-            paths += [p for p in self.world_paths(root) if p not in paths]
+            paths += [p for p in self.world_paths(root, deep if isinstance(deep, str) else None) if p not in paths]
         for p in paths:
             b = self.open_extra(p)
             r = _index(b).get(rid) if b is not None else None
@@ -423,6 +435,15 @@ def decode_resource(b, res, lib, bundles, path, lod=0):
     return decode_renderable(b, res, lib, [b] + list(bundles), root), 1
 
 
+def _stride(res, default):
+    """Instance record size from the spacing of the per-instance imports (0x60 retail, 0x50 in some lists)."""
+    offs = sorted(i.offset for i in res.imports())
+    for a, b_ in zip(offs, offs[1:]):
+        if b_ - a in (0x50, 0x60):
+            return b_ - a
+    return default
+
+
 def instance_list(b, res):
     """[(model id, 4x4 row-vector matrix as float64)] of an InstanceList."""
     e = b.e
@@ -430,13 +451,15 @@ def instance_list(b, res):
     if len(c) < 16:
         return []
     off, cap, n, ver = struct.unpack_from(e + '4I', c, 0)
+    stride = _stride(res, 0x60 if ver >= 3 else 0x50)      # version 2 (PS3 prototype): 0x50, no padding
+    mo = stride - 0x40
     imps = {i.offset: i.id for i in res.imports()}
     out = []
     for i in range(n):
-        o = off + 0x60 * i
-        if o + 0x60 > len(c):
+        o = off + stride * i
+        if o + stride > len(c):
             break
-        m = np.array(struct.unpack_from(e + '16f', c, o + 0x20), np.float64).reshape(4, 4)
+        m = np.array(struct.unpack_from(e + '16f', c, o + mo), np.float64).reshape(4, 4)
         out.append((imps.get(o), m))
     return out
 
@@ -444,7 +467,7 @@ def instance_list(b, res):
 OBJECT_LISTS = {0x218: 'props', 0x204: 'dynamic', 0x216: 'compound'}
 
 
-def object_instances(b, res, lib, look, root):
+def object_instances(b, res, lib, look, root, res_path=None):
     """[(model id, 4x4 matrix)] of a Prop / Dynamic / Compound instance list."""
     e = b.e
     c = res.data(0)
@@ -452,17 +475,27 @@ def object_instances(b, res, lib, look, root):
         return []
     ver, off, n, _ = struct.unpack_from(e + '4I', c, 0)
     imps = {i.offset: i.id for i in res.imports()}
+    stride = _stride(res, 0x60)
     models = {}
     out = []
     for i in range(n):
-        o = off + 0x60 * i
-        if o + 0x60 > len(c):
+        o = off + stride * i
+        if o + stride > len(c):
             break
         m = np.array(struct.unpack_from(e + '16f', c, o), np.float64).reshape(4, 4)
         oid = imps.get(o + 0x40)
         if oid not in models:
-            ob, obj = lib.find(oid, look, root, deep=True)
-            models[oid] = {x.offset: x.id for x in obj.imports()}.get(0x4) if obj is not None else None
+            deep = os.path.dirname(os.path.abspath(res_path)) if res_path else True
+            ob, obj = lib.find(oid, look, root, deep=deep)
+            models[oid] = None
+            if obj is not None:
+                imps4 = {x.offset: x.id for x in obj.imports()}
+                models[oid] = imps4.get(0x4)                   # retail: the model is the import at 0x4
+                for io in sorted(imps4)[:3]:                  # PS3 prototype WorldObject: at 0x8
+                    mb, mr = lib.find(imps4[io], [ob] + list(look), root, deep=deep)
+                    if mr is not None and mr.type == T_MODEL:
+                        models[oid] = imps4[io]
+                        break
         out.append((models[oid], m))
     return out
 
@@ -475,7 +508,7 @@ def unit_instances(b, res, lib, look, root, objects=True):
         for r in b.resources:
             kind = OBJECT_LISTS.get(r.type)
             if kind:
-                out += [(mid, m, kind) for mid, m in object_instances(b, r, lib, look, root)]
+                out += [(mid, m, kind) for mid, m in object_instances(b, r, lib, look, root, b.path)]
     return out
 
 
@@ -487,7 +520,7 @@ def decode_instances(b, res, lib, bundles, path, lod=0, progress=None, objects=T
     look = [b] + list(bundles)
     insts = unit_instances(b, res, lib, look, root, objects)
     if not insts:
-        raise MeshError('this instance list is empty (the PS3 prototype keeps its world elsewhere)')
+        raise MeshError('this instance list is empty (the PS3 prototype world is in SEACREST, not HAWAII)')
     kinds = collections.Counter(k for _, _, k in insts)
     cache = {}
     out = []
@@ -498,7 +531,7 @@ def decode_instances(b, res, lib, bundles, path, lod=0, progress=None, objects=T
             progress(i, len(insts))
         if mid not in cache:
             cache[mid] = None
-            mb, mr = lib.find(mid, look, root, deep=True)
+            mb, mr = lib.find(mid, look, root, deep=os.path.dirname(os.path.abspath(path)))
             if mr is not None and mr.type in (T_MODEL, T_RENDERABLE):
                 try:
                     cache[mid] = decode_resource(mb, mr, lib, [mb] + look, path, lod)[0]
@@ -546,7 +579,7 @@ def decode_polysoup(b, res):
         raise MeshError('this collision list is empty')
     po, bo, n, size = struct.unpack_from(e + 'IIiI', d, 0x20)
     if n <= 0:
-        raise MeshError('this collision list is empty (the PS3 prototype keeps its world elsewhere)')
+        raise MeshError('this collision list is empty (the PS3 prototype world is in SEACREST, not HAWAII)')
     offs = struct.unpack_from(e + f'{n}I', d, po)
     poly_t = np.dtype([('tag', e + 'u4'), ('idx', 'u1', 4), ('edge', 'u1', 4)])
     verts, tris, tags = [], [], []

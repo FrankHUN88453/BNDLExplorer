@@ -28,7 +28,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.9'
+VERSION = '0.10'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
