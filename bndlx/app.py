@@ -18,6 +18,7 @@ from . import convert, dragdrop, eal3, filedialog, genesys, gltf, mesh, ops, ras
 from . import vehiclelist as VL
 from . import zonelist as ZL
 from . import spsfile
+from . import platetext
 from .audioplay import Player
 from .soundtrack_ui import SoundtrackUI
 from .explorer import Browser, ExplorerUI
@@ -30,7 +31,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.15'
+VERSION = '0.16'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -452,7 +453,111 @@ class App(ExplorerUI, SoundtrackUI):
             root = filedialog.pick_folder('The game folder (PC)')
             if not root:
                 return
-        self.modal = {'kind': 'plate', 'root': root, 'state': ops.plate_editing_state(root)}
+        m = {'kind': 'plate', 'root': root, 'state': ops.plate_editing_state(root), 'gl': {}, 'atlas': None, 'texts': None}
+        try:
+            m['exe'] = platetext.current(root)
+            m['texts'] = {orig: cur for _, orig, cur, _ in m['exe']}
+        except (OSError, platetext.PlateError, struct.error) as ex:
+            m['exe'] = []
+            m['exe_error'] = str(ex)
+        try:
+            vb = Bundle.open(os.path.join(root, 'VEHICLES', 'VEHICLETEX.BNDL'))
+            m['atlas'] = raster.decode(vb.find(platetext.ATLAS_ID), vb.platform)
+        except Exception:
+            m['atlas'] = None
+        self.modal = m
+
+    def plate_dialog(self, m):
+        """The License plates dialog: the car packs' plate texts (NFS13.exe) and the in-game registration editor.
+        Returns True to close."""
+        root = m['root']
+        imgui.text('Plate texts of the car packs')
+        imgui.text_wrapped('Every car shows the text of its content pack (the BMW M3 GTR of the NFS Heroes pack: NFS HERO). '
+                           'Type up to 8 characters: A-Z, 1-9, - and space (0 is shown as O). They are written into '
+                           'NFS13.exe (every copy of the table); the original exe is kept once as NFS13.exe.orig.')
+        if m.get('exe_error'):
+            imgui.text_colored(imgui.ImVec4(1, 0.5, 0.4, 1), m['exe_error'])
+        elif m['texts'] is not None:
+            flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v
+            if imgui.begin_table('plates', 3, flags):
+                imgui.table_setup_column('Pack', imgui.TableColumnFlags_.width_fixed, 190)
+                imgui.table_setup_column('Text', imgui.TableColumnFlags_.width_fixed, 120)
+                imgui.table_setup_column('Preview', imgui.TableColumnFlags_.width_fixed, 230)
+                for name, orig, cur, copies in m['exe']:
+                    imgui.table_next_row()
+                    imgui.table_next_column()
+                    imgui.text(name)
+                    imgui.text_disabled(f'original: {orig}  ({copies} copies)')
+                    imgui.table_next_column()
+                    imgui.set_next_item_width(-1)
+                    ch, txt = imgui.input_text(f'##pt{orig}', m['texts'][orig].strip(), imgui.InputTextFlags_.chars_uppercase)
+                    if ch:
+                        m['texts'][orig] = txt[:platetext.LETTERS]
+                    try:
+                        shown = platetext.clean(m['texts'][orig])
+                        err = None
+                    except platetext.PlateError as ex:
+                        shown, err = None, str(ex)
+                    imgui.table_next_column()
+                    if err:
+                        imgui.text_colored(imgui.ImVec4(1, 0.5, 0.4, 1), err)
+                    elif m['atlas'] is not None:
+                        gl = m['gl'].get(shown)
+                        if gl is None:
+                            gl = m['gl'][shown] = immvision.GlTexture(platetext.preview(m['atlas'], shown))
+                        imgui.image(imgui.ImTextureRef(gl.texture_id), imgui.ImVec2(224, 56))
+                    else:
+                        imgui.text(shown)
+                imgui.end_table()
+            if imgui.button('Write the plate texts', imgui.ImVec2(200, 0)):
+                try:
+                    n = platetext.write(root, dict(m['texts']))
+                    m['exe'] = platetext.current(root)
+                    self.status = (f'Plate texts written into NFS13.exe ({n} places); the original is NFS13.exe.orig.'
+                                   if n else 'The plate texts are already like that.')
+                except (OSError, platetext.PlateError) as ex:
+                    self.status = f'Plate texts not written: {ex}'
+            imgui.same_line()
+            imgui.begin_disabled(not os.path.isfile(platetext.exe_path(root) + '.orig'))
+            if imgui.button('Restore the original exe', imgui.ImVec2(200, 0)):
+                try:
+                    platetext.restore(root)
+                    m['exe'] = platetext.current(root)
+                    m['texts'] = {orig: cur for _, orig, cur, _ in m['exe']}
+                    self.status = 'NFS13.exe restored from NFS13.exe.orig.'
+                except (OSError, platetext.PlateError) as ex:
+                    self.status = str(ex)
+            imgui.end_disabled()
+        imgui.spacing()
+        imgui.separator()
+        imgui.text("The player's own plate text (registration)")
+        imgui.text_wrapped('The game also has an editor for your own plate text: Easydrive > EDIT LICENSE PLATE > '
+                           'REGISTRATION, typed with the keyboard, unlocked at Speed Level 15 in multiplayer. Enabling it '
+                           'here makes the menu offer it right away. The bundles are kept once as .orig.')
+        for p, state in m['state']:
+            col = {'enabled': imgui.ImVec4(0.4, 0.85, 0.4, 1), 'locked': imgui.ImVec4(0.9, 0.75, 0.35, 1)}.get(
+                state, imgui.ImVec4(0.6, 0.6, 0.6, 1))
+            imgui.text_colored(col, {'enabled': 'enabled', 'locked': 'locked (Speed Level 15)'}.get(state, 'not found'))
+            imgui.same_line()
+            imgui.text_disabled(os.path.relpath(p, root))
+        if imgui.button('Enable registration editing', imgui.ImVec2(210, 0)):
+            try:
+                w = ops.set_plate_editing(root, True)
+                self.status = f'Plate registration editing enabled ({len(w)} bundle(s) changed).'
+            except Exception as ex:
+                self.status = f'Failed: {ex}'
+            m['state'] = ops.plate_editing_state(root)
+        imgui.same_line()
+        if imgui.button('Restore (locked)', imgui.ImVec2(150, 0)):
+            try:
+                w = ops.set_plate_editing(root, False)
+                self.status = f'Plate registration editing restored to the game\'s rule ({len(w)} bundle(s) changed).'
+            except Exception as ex:
+                self.status = f'Failed: {ex}'
+            m['state'] = ops.plate_editing_state(root)
+        imgui.spacing()
+        imgui.separator()
+        return imgui.button('Close', imgui.ImVec2(100, 0))
 
     def action_export_sps(self, src=None):
         """Every .SPS file of a folder (and its sub folders) as WAV files."""
@@ -2797,7 +2902,7 @@ class App(ExplorerUI, SoundtrackUI):
                  'confirm_replace': 'Replace resources', 'change_id': 'Duplicate resource' if m.get('dup') else 'Change id',
                  'texture_options': 'Replace texture', 'wave_options': 'Replace sound', 'open_path': 'Open by path', 'find': 'Find', 'goto': 'Go to id',
                  'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties',
-                 'plate': 'License plate registration'}.get(m['kind'], 'Message')
+                 'plate': 'License plates'}.get(m['kind'], 'Message')
         popup = f'{title}###modal'
         if not imgui.is_popup_open(popup):
             imgui.open_popup(popup)
@@ -2985,37 +3090,7 @@ class App(ExplorerUI, SoundtrackUI):
             if imgui.button('Cancel', imgui.ImVec2(120, 0)):
                 close = True
         elif k == 'plate':
-            root = m['root']
-            imgui.text_wrapped('The plate text ("registration") has its own editor in the game: Easydrive > EDIT LICENSE '
-                               'PLATE > REGISTRATION, typed with the keyboard. The game unlocks it at Speed Level 15 in '
-                               'multiplayer. Enabling it here makes the menu offer it right away (the locked menu list gets '
-                               'the unlocked one\'s items). The bundles are kept once as .orig.')
-            imgui.spacing()
-            for p, state in m['state']:
-                col = {'enabled': imgui.ImVec4(0.4, 0.85, 0.4, 1), 'locked': imgui.ImVec4(0.9, 0.75, 0.35, 1)}.get(
-                    state, imgui.ImVec4(0.6, 0.6, 0.6, 1))
-                imgui.text_colored(col, {'enabled': 'enabled', 'locked': 'locked (Speed Level 15)'}.get(state, 'not found'))
-                imgui.same_line()
-                imgui.text_disabled(os.path.relpath(p, root))
-            imgui.spacing()
-            if imgui.button('Enable plate text editing', imgui.ImVec2(210, 0)):
-                try:
-                    w = ops.set_plate_editing(root, True)
-                    self.status = f'Plate registration editing enabled ({len(w)} bundle(s) changed).'
-                except Exception as ex:
-                    self.status = f'Failed: {ex}'
-                m['state'] = ops.plate_editing_state(root)
-            imgui.same_line()
-            if imgui.button('Restore (locked)', imgui.ImVec2(150, 0)):
-                try:
-                    w = ops.set_plate_editing(root, False)
-                    self.status = f'Plate registration editing restored to the game\'s rule ({len(w)} bundle(s) changed).'
-                except Exception as ex:
-                    self.status = f'Failed: {ex}'
-                m['state'] = ops.plate_editing_state(root)
-            imgui.same_line()
-            if imgui.button('Close', imgui.ImVec2(100, 0)):
-                close = True
+            close = self.plate_dialog(m) or close
         elif k == 'properties':
             d = self.doc_by_uid(m['doc'])
             if d is None:

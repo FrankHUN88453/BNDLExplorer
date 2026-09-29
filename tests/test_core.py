@@ -488,6 +488,38 @@ def test_plate(pc_root):
           and same, 'plate registration editing: enable on 2 menus, nothing else changes, restore is identical')
 
 
+def test_plate_texts(pc_root):
+    """Plate texts of the car packs on a copy of NFS13.exe: every copy of the table changes, nothing outside
+    .rdata, the size stays, restore gives the original back; the preview uses the game's plate font."""
+    from bndlx import platetext as PT
+    root = os.path.join(TMP, 'exe_game')
+    os.makedirs(root, exist_ok=True)
+    exe = os.path.join(pc_root, 'NFS13.exe')
+    shutil.copy2(exe + '.orig' if os.path.exists(exe + '.orig') else exe, os.path.join(root, 'NFS13.exe'))
+    orig = open(os.path.join(root, 'NFS13.exe'), 'rb').read()
+    found = PT.current(root)
+    n = PT.write(root, {'NFS HERO': 'M3 GTR', 'NEED4SPD': 'MOST WTD'})
+    new = open(os.path.join(root, 'NFS13.exe'), 'rb').read()
+    lo, hi = PT._rdata(orig)
+    diff = np.nonzero(np.frombuffer(orig, np.uint8) != np.frombuffer(new, np.uint8))[0] if len(orig) == len(new) else None
+    now = {o: c for _, o, c, _ in PT.current(root)}
+    PT.restore(root)
+    back = open(os.path.join(root, 'NFS13.exe'), 'rb').read() == orig
+    check(all(k >= 40 for _, _, _, k in found) and n == found[0][3] + found[4][3] and diff is not None
+          and len(diff) and lo <= diff.min() and diff.max() < hi and now['NFS HERO'] == ' M3 GTR '
+          and now['NEED4SPD'] == 'MOST WTD' and back,
+          f'plate texts: {n} copies written, {len(diff)} bytes all in .rdata, restore identical')
+    try:
+        PT.clean('TOO LONG!')
+        rejected = False
+    except PT.PlateError:
+        rejected = True
+    b = Bundle.open(os.path.join(pc_root, 'VEHICLES', 'VEHICLETEX.BNDL'))
+    img = PT.preview(raster.decode(b.find(PT.ATLAS_ID), 'PC'), PT.clean('m3 gtr'))
+    check(rejected and PT.clean('bmw 2012') == 'BMW 2O12' and img.shape[1] > img.shape[0] * 3,
+          'plate text checks (8 characters, the font\'s letters) and the preview image')
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -536,6 +568,7 @@ def main():
         test_zones(os.path.join(PC, 'HAWAII'))
         test_soundtrack(PC)
         test_plate(PC)
+        test_plate_texts(PC)
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))

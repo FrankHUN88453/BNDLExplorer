@@ -196,9 +196,17 @@ GAMEMODES) contain the whole licensed soundtrack; the 12-song list is also used 
 by scripted sequences. New objects get ids from 0x0FA00000 up, far from the game's own. Whether a list plays
 in races, pursuits or menus is not known yet: test in the game.
 
-## License plate text
+## License plates
 
-The plate text ("registration") has its own editor in the game (Easydrive > EDIT LICENSE PLATE > REGISTRATION,
+Every car's number plate shows the text of its content pack: `NEED4SPD` (base game), `ULTIMATE`, `VELOCITY`,
+`MOVILGND` (Movie Legends), `NFS HERO` (NFS Heroes pack, e.g. the BMW M3 GTR). The plate is 8 letter quads whose
+UVs point at the cells of a font atlas (`VEHICLETEX.BNDL`, texture `0x0100000000138805`: A-Z, `-`, 1-9); the
+letters come from an 8-character text that NFS13.exe holds in a table of five 12-byte slots, copied about fifty
+times into its `.rdata`. **... > License plates...** shows the five texts with a preview drawn in the game's plate
+font; type new ones (up to 8 characters: A-Z, 1-9, `-`, space; `0` is shown as `O`) and **Write the plate texts**
+changes every copy in NFS13.exe (kept once as `NFS13.exe.orig`; **Restore the original exe** puts it back).
+
+The player's own plate text ("registration") has its own editor in the game (Easydrive > EDIT LICENSE PLATE > REGISTRATION,
 typed with the keyboard), unlocked at Speed Level 15 in multiplayer. The garage menu shows one of two item
 lists depending on `Players.LocalPlayer.CustomiseLicensePlateAvailable`; in the locked list the REGISTRATION item
 is inactive. **... > License plate text (registration) editing...** copies the unlocked list's items into the
