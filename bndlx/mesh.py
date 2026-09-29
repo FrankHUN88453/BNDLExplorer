@@ -69,8 +69,10 @@ class MeshData:
     xform: np.ndarray = None   # 4x4 row-vector matrix from the renderable's space to this mesh's (None = same)
     uvs: list = None           # further UV sets [(N, 2)] after `uv` (lightmap, AO, ...), for export
     overlay: bool = False      # drawn over everything else (markers that must stay visible)
-    joints: np.ndarray = None  # (N, 4) skeleton bone of each vertex's blend weights (PC cars: the damage skeleton)
-    weights: np.ndarray = None  # (N, 4) blend weights, summing to 1
+    joints: np.ndarray = None  # (N, k) skeleton bone of each vertex's blend weights (cars: the damage skeleton)
+    weights: np.ndarray = None  # (N, k) blend weights, summing to 1
+    dent_points: np.ndarray = None   # (N, 2) PS3 prototype cars: the ControlMesh points a vertex follows
+    dent_weights: np.ndarray = None  # (N, 2) their weights
 
     def placed(self, m, flip=False):
         """This mesh moved by the 4x4 row-vector matrix m (normals follow; flip reverses the triangles)."""
@@ -82,7 +84,7 @@ class MeshData:
         x = m if self.xform is None else self.xform @ m
         return MeshData(pos, self.uv, tris, self.material, self.texture, self.shader, self.tint,
                         nrm.astype(np.float32), self.alpha_test, self.wire, self.src, x, self.uvs, self.overlay,
-                        self.joints, self.weights)
+                        self.joints, self.weights, self.dent_points, self.dent_weights)
 
     def normals(self):
         if self.nrm is None:
@@ -456,6 +458,7 @@ def decode_renderable(b, res, lib, bundles, root, parts=None):
         md.nrm = stored_normals(raw, e, layout, md)
         md.uvs = [x for x in (_read(raw, e, u[1], u[2], u[3]) for u in uv_sets(layout)[1:]) if x is not None] or None
         md.joints, md.weights = blend_weights(raw, layout)
+        md.dent_points, md.dent_weights = dent_weights(raw, layout)
         out.append(md)
         if parts is not None:
             parts[k] = (mr, layout, stride, raw)
@@ -464,17 +467,44 @@ def decode_renderable(b, res, lib, bundles, root, parts=None):
     return out
 
 
+def _ps3_blend(raw, layout):
+    """PS3 car vertex blend data: (indices (N, 4), weights (N, 4)) from attributes 7 (u8 x4) and 1 (u8n x4),
+    else None. Slots 0-1 are skeleton bones (weights summing to 1, or 0 = held by the root), slots 2-3 ControlMesh
+    points (weights summing to 1)."""
+    ji = next((x for x in layout if x[0] == 'a7' and x[1] == 'u8' and x[2] == 4), None)
+    wi = next((x for x in layout if x[0] == 'a1' and x[1] == 'u8n' and x[2] == 4), None)
+    if ji is None or wi is None:
+        return None
+    return (np.ascontiguousarray(raw[:, ji[3]:ji[3] + 4]).astype(np.int64),
+            raw[:, wi[3]:wi[3] + 4].astype(np.float32) / 255.0)
+
+
+def dent_weights(raw, layout):
+    """(ControlMesh point indices (N, 2), weights (N, 2)) of a PS3 prototype car vertex, else (None, None)."""
+    ps3 = _ps3_blend(raw, layout)
+    if ps3 is None:
+        return None, None
+    j, w = ps3
+    return j[:, 2:4], w[:, 2:4]
+
+
 def blend_weights(raw, layout):
-    """(bone indices (N, 4), weights (N, 4)) of a PC skinned vertex format (BLENDINDICES u8 x4 + BLENDWEIGHT
-    u8n x4: the car damage skeleton), else (None, None)."""
+    """(bone indices (N, k), weights (N, k)) of a skinned vertex format, else (None, None): PC BLENDINDICES u8 x4
+    + BLENDWEIGHT u8n x4 (the car damage skeleton); PS3 prototype cars the first two of attributes 7 / 1."""
     ji = next((x for x in layout if x[0] == 'u13' and x[1] == 'u8' and x[2] == 4), None)
     wi = next((x for x in layout if x[0] == 'u14' and x[1] == 'u8n' and x[2] == 4), None)
     if ji is None or wi is None:
-        return None, None
-    j = np.ascontiguousarray(raw[:, ji[3]:ji[3] + 4]).astype(np.int64)
-    w = raw[:, wi[3]:wi[3] + 4].astype(np.float32) / 255.0
+        ps3 = _ps3_blend(raw, layout)
+        if ps3 is None:
+            return None, None
+        j, w = ps3[0][:, :2], ps3[1][:, :2]
+    else:
+        j = np.ascontiguousarray(raw[:, ji[3]:ji[3] + 4]).astype(np.int64)
+        w = raw[:, wi[3]:wi[3] + 4].astype(np.float32) / 255.0
     s = w.sum(1, keepdims=True)
-    w = np.where(s > 0, w / np.maximum(s, 1e-6), np.array([1, 0, 0, 0], np.float32))
+    root = np.zeros(w.shape[1], np.float32)
+    root[0] = 1                                  # no weight at all: held by the root (bone 0)
+    w = np.where(s > 0, w / np.maximum(s, 1e-6), root)
     j = np.where(w > 0, j, 0)
     return j, w
 
@@ -785,6 +815,16 @@ def read_control_mesh(b, res):
     n = (len(c) - 16) // 48
     v = np.frombuffer(c, b.e + 'f4', n * 12, 16).reshape(3, n, 4).astype(np.float64)
     return v[0, :, :3], v[1, :, :3], v[2, :, 0], 16 + 32 * n
+
+
+def dented(m, pos, dirs, disp, amount):
+    """Positions of a PS3 prototype car mesh dented by its ControlMesh: every vertex follows its two points along
+    their directions, `amount` (0..1) of their maximum displacement."""
+    if m.dent_points is None or amount <= 0:
+        return m.pos
+    k = np.clip(m.dent_points, 0, len(pos) - 1)
+    move = dirs[k] * (disp[k] * amount)[..., None]                 # (N, 2, 3)
+    return (m.pos + (m.dent_weights[..., None] * move).sum(1)).astype(np.float32)
 
 
 def control_points_used(pos, dirs):

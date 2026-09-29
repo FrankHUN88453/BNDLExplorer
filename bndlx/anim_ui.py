@@ -236,6 +236,13 @@ class AnimUI:
             v.pan[:] = 0
             v.dist = v.radius * v.fit
             v.yaw, v.pitch = 0.6, 0.35
+        imgui.same_line()
+        if imgui.button('Export FBX...##anim'):
+            self.action_export(d, r, 'fbx')
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('The bones' + (' with the car (its body skinned to them)' if sc['car'] else '')
+                              + (' and every animation of this resource as a take' if anims else '')
+                              + '; opens in Blender, 3ds Max, Maya, Unity')
         # --- pose
         pk = (st['t'], st['sel'], st['bones'])
         if st['posed'] != pk:
@@ -264,6 +271,22 @@ class AnimUI:
         imgui.text_disabled('Left drag: turn, right / middle drag: move, wheel: zoom, double click: fit')
         if r.type == anim.T_SKELETON:
             self.bone_table(skel)
+
+    def anim_export_scene(self, d, r, name):
+        """(meshes, rig) for an FBX of an animation, list or skeleton: the car (when it is the car's skeleton, its
+        body skinned) and the bones with every animation of the resource as a take."""
+        sc = self.anim_scene(d, r, {'sel': 0})
+        skel = sc['skel']
+        if skel is None:
+            raise anim.AnimError(f'no skeleton with {sc["anims"][0].bones} bones in the open bundles: open the '
+                                 'bundle that has it')
+        meshes = sc['meshes'][:sc['sk_at']]              # the car, without the bone markers
+        takes = []
+        for k, a in enumerate(sc['anims']):
+            where = where_label(skel, a) if sc['car'] else ''
+            takes.append((f'{k}_{where.replace(" ", "_")}' if where else f'anim_{k}', a))
+        safe = ''.join(c if c.isalnum() or c in '_-' else '_' for c in name)[:40] or 'skeleton'
+        return meshes, {'skeleton': skel, 'animations': takes, 'name': safe + '_skeleton'}
 
     def viewer_for(self, sc, st, key):
         """The 3D viewer holding this scene (uploaded again when another view used it)."""

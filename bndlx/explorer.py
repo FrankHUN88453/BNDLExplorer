@@ -1197,6 +1197,10 @@ class ExplorerUI:
             self.action_export(d, r, 'text')
         if r.type in mesh.MODEL_TYPES and imgui.menu_item('As glTF (.glb) with textures...', '', False)[0]:
             self.action_export(d, r, 'glb')
+        if r.type in (0xB0, 0xB3) and imgui.menu_item('As FBX with skeleton and animation...', '', False)[0]:
+            self.action_export(d, r, 'fbx')
+        if r.type == 0xB2 and imgui.menu_item('As FBX (skeleton)...', '', False)[0]:
+            self.action_export(d, r, 'fbx')
         if r.type in mesh.MODEL_TYPES and imgui.menu_item('As FBX with textures...', '', False)[0]:
             self.action_export(d, r, 'fbx')
         if r.type in (0x80, 0x81) and imgui.menu_item('As WAV...', '', False)[0]:

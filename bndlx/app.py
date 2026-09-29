@@ -37,7 +37,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.19'
+VERSION = '0.20'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -189,7 +189,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         self.mesh_lib = mesh.Library(lambda rid: self.names.where.get(rid))
         self.viewer = None
         self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0, 'show': 0, 'stats': None,
-                      'nb': False, 'progress': '', 'cm': False}
+                      'nb': False, 'progress': '', 'cm': False, 'dent': 0.0, 'dented': None}
         self.zmap = {'key': None}
         self.player = Player()
         self.st_ui = None                # soundtrack editor window state
@@ -2065,6 +2065,14 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             cs = stats['control']
             imgui.text(f'{cs["points"]} control points, {cs["moving"]} can dent (deepest {cs["deepest"] * 100:.0f} cm)'
                        + (' (shown over the car)' if cs['car'] else ''))
+            if cs['car']:
+                imgui.set_next_item_width(200)
+                _, st['dent'] = imgui.slider_float('Dent (x max)', st['dent'], 0.0, 5.0, '%.2f')
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip('Dents the car the prototype\'s way: every vertex follows its two control points '
+                                      'along their directions, this many times their maximum displacement (1 = the '
+                                      'deepest the game allows; more exaggerates to show the areas)')
+                self.dent_car(d, r, meshes, st)
         elif stats and 'instances' in stats:
             units = f'{stats["units"]} units, ' if stats.get('units', 1) > 1 else ''
             imgui.text(f'{units}{stats["shown"]} of {stats["instances"]} instances ({stats["models"]} models), '
@@ -2129,6 +2137,28 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             self.wheel_editor(d, r)
         elif r.type == mesh.T_CONTROLMESH:
             self.control_point_table(d, r)
+
+    def dent_car(self, d, r, meshes, st):
+        """Move the car's vertices (and the markers) of the ControlMesh view to the Dent amount."""
+        dk = (st['uploaded'], st['dent'])
+        if st['dented'] == dk or self.viewer is None:
+            return
+        st['dented'] = dk
+        pos, dirs, disp, _ = mesh.read_control_mesh(d.b, r)
+        changes = {}
+        first = None
+        for i, m in enumerate(meshes):
+            if m.overlay:
+                first = i if first is None else first
+                continue
+            if m.dent_points is not None:
+                changes[i] = (mesh.dented(m, pos, dirs, disp, st['dent']), m.normals())
+        if first is not None:                      # the markers move with their points
+            moved = pos + dirs * (disp * st['dent'])[:, None]
+            for k, mk in enumerate(mesh.control_mesh_meshes(moved, dirs, disp)):
+                if first + k < len(meshes):
+                    changes[first + k] = (mk.pos, mk.normals())
+        self.viewer.update_vertices(changes)
 
     def control_point_table(self, d, r):
         """The points of a ControlMesh; the max displacement (how deep the body can dent there) is editable."""
@@ -2706,10 +2736,21 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
 
     def export_fbx(self, d, res, path):
         """FBX with every mesh named after its renderable mesh (for Import FBX), the textures as PNG files in
-        <name>_textures next to it. Returns (meshes, textures)."""
-        meshes = self.model_meshes(d, res)
+        <name>_textures next to it; animations and skeletons with their bones (and their car, skinned) and every
+        animation as a take. Returns (meshes, textures)."""
         name = self.display_name(d, res)[0]
+        rig = None
+        if res.type in (anim.T_ANIMLIST, anim.T_ANIMATION, anim.T_SKELETON):
+            meshes, rig = self.anim_export_scene(d, res, name)
+        else:
+            meshes = self.model_meshes(d, res)
         size = 1024 if res.type == mesh.T_INSTANCELIST else 1 << 14
+        files = self.fbx_texture_files(d, meshes, path, size)
+        ops.write_file(path, fbx.write_fbx(meshes, files, name, meshimport.export_names(meshes, 'mesh'), rig))
+        return len(meshes), len(files)
+
+    def fbx_texture_files(self, d, meshes, path, size):
+        """The meshes' diffuse textures as PNG files in <name>_textures next to the FBX: {texture id: path}."""
         folder = os.path.splitext(path)[0] + '_textures'
         files = {}
         for t in sorted({m.texture for m in meshes if m.texture and m.uv is not None}):
@@ -2720,8 +2761,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             fn = f'{t:016X}.png'
             ops.save_png(img, os.path.join(folder, fn))
             files[t] = os.path.basename(folder) + '/' + fn
-        ops.write_file(path, fbx.write_fbx(meshes, files, name, meshimport.export_names(meshes, 'mesh')))
-        return len(meshes), len(files)
+        return files
 
     def import_targets(self, d, res):
         """The meshes of every LOD of a model, for finding where an imported object belongs."""
@@ -3456,11 +3496,14 @@ DamageBehaviour) play on the car itself: its body is skinned to the damage skele
 bonnets pop up and doors swing as the damage grows. Other animations play on their skeleton (joints and bones)
 with the paths the moving bones follow and a line for their forward axis (camera shots in EN_US FEEDBACKGROUPS).
 Play / Pause, the time slider, Loop and speed; lists have a choice of their animations (front, rear left, ...).
-A skeleton shows its bones on its car and lists them.
+A skeleton shows its bones on its car and lists them. Export FBX writes the bones, the car skinned to them and
+every animation as a take (Blender: an armature with one action per animation). PS3 prototype animations and
+cars work too.
 
 ControlMesh (PS3 prototype cars): the crash deformation lattice, up to 64 points on the body drawn over the car
 (grey = rigid, yellow .. red = how deep it can dent, the line = the way it moves); the max dent of each point
-is editable in the table. The car view has a Control points switch for the same.
+is editable in the table, and Dent crushes the car the prototype's way (every vertex follows its two control
+points). The car view has a Control points switch for the same.
 
 Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece of the city in 3D with its props
 (World / Collision / World + collision, Neighbours); the PolygonSoupList is the collision, coloured by surface tag.

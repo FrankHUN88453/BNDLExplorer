@@ -163,6 +163,56 @@ class Animation:
 
 
 def read_animation(data, base=0, e='<'):
+    """An animation in the retail layout (version 2) or the PS3 prototype's older one, told apart by their
+    structure."""
+    first = None
+    # offsets inside an animation are from its own start; inside the prototype's lists they may be from the
+    # list's start, so both are tried
+    for reader, rel in ((_read_v2, True), (_read_proto, True), (_read_v2, False), (_read_proto, False)):
+        if not rel and not base:
+            continue
+        try:
+            return reader(data, base, e, rel)
+        except (AnimError, struct.error, ValueError) as ex:
+            first = first or ex
+    raise first
+
+
+def _read_proto(data, base, e, rel=True):
+    """PS3 prototype layout, 0x40-byte header: u32 keys, bones, translation tracks, 0, rotation bytes per key
+    (every bone has a rotation track), translation bytes per key, 0, size; f32 keys per second (0x20); u16 codec
+    (0x24); six offsets (0x28): bone 0 translation track, translation tracks, -, per-bone scale (f32x4),
+    per-bone translation track index, rotation keys (key after key, one per bone)."""
+    if base + 0x40 > len(data):
+        raise AnimError('animation too short')
+    keys, bones, ntr, _, rstride, tstride, _, size = struct.unpack_from(e + '8I', data, base)
+    rate = struct.unpack_from(e + 'f', data, base + 0x20)[0]
+    codec = struct.unpack_from(e + 'H', data, base + 0x24)[0]
+    o = [(base if rel else 0) + x for x in struct.unpack_from(e + '6I', data, base + 0x28)]
+    if not any(struct.unpack_from(e + '6I', data, base + 0x28)):
+        # inside the prototype's lists the offsets are filled in when loading: they follow from the counts
+        o = [base + 0x40, base + 0x40 + keys * 16]
+        o += [o[1] + ntr * keys * 16] * 2
+        o += [o[3] + bones * 16]
+        o += [o[4] + (bones + 15) // 16 * 16]
+    if (codec not in (0, 1) or o[1] - o[0] != keys * 16 or o[2] - o[1] != ntr * keys * 16 or tstride != ntr * 16
+            or rstride != bones * (16 if codec == 0 else 4) or o[5] + keys * rstride != base + size
+            or base + size > len(data)):
+        raise AnimError('not the prototype animation layout')
+    root = np.frombuffer(data, e + 'f4', keys * 4, o[0]).reshape(keys, 4)[:, :3].astype(np.float64)
+    trans = np.frombuffer(data, e + 'f4', ntr * keys * 4, o[1]).reshape(keys, ntr, 4)[:, :, :3]
+    trans = trans.transpose(1, 0, 2).astype(np.float64)
+    ti = np.frombuffer(data, np.uint8, bones, o[4]).astype(np.int64)
+    if codec == 0:
+        rots = np.frombuffer(data, e + 'f4', keys * bones * 4, o[5]).reshape(keys, bones, 4).astype(np.float64)
+    else:
+        rots = unpack_smallest3(np.frombuffer(data, e + 'u4', keys * bones, o[5])).reshape(keys, bones, 4)
+    if (ti[ti != 255] >= max(ntr, 1)).any():
+        raise AnimError('track index out of range')
+    return Animation(keys, bones, float(rate), codec, root, trans, ti, rots, np.arange(bones), base)
+
+
+def _read_v2(data, base, e, rel=True):
     if base + 0x60 > len(data):
         raise AnimError('animation too short')
     h = struct.unpack_from(e + '12I', data, base)
@@ -170,7 +220,7 @@ def read_animation(data, base=0, e='<'):
     stride = h[7]
     rate = struct.unpack_from(e + 'f', data, base + 0x30)[0]
     codec = struct.unpack_from(e + 'H', data, base + 0x34)[0]
-    o = [base + x for x in struct.unpack_from(e + '9I', data, base + 0x38)]
+    o = [(base if rel else 0) + x for x in struct.unpack_from(e + '9I', data, base + 0x38)]
     if ver != 2 or codec not in (0, 1) or not (o[0] <= o[1] <= o[2] <= o[8] <= len(data)):
         raise AnimError('this animation layout is not supported (the PS3 prototype uses an older one)')
     if stride != nrot * (16 if codec == 0 else 4) or o[1] - o[0] != keys * 16 or o[2] - o[1] != ntr * keys * 16:

@@ -295,8 +295,182 @@ def _split_duplicates(tris, nverts):
     return tris, np.concatenate([vmap, extra])
 
 
-def write_fbx(meshes, texture_files, name='model', mesh_names=None):
-    """meshes: [MeshData]; texture_files: {texture id: relative file name of the PNG next to the .fbx}.
+KTIME = 46186158000                  # FBX time units per second
+
+
+def euler_xyz(q):
+    """FBX rotation (degrees, order XYZ: R = Rz Ry Rx) of unit quaternions (N, 4) x y z w."""
+    x, y, z, w = np.asarray(q, np.float64).T
+    r00 = 1 - 2 * (y * y + z * z)
+    r10 = 2 * (x * y + z * w)
+    r20 = 2 * (x * z - y * w)
+    r21 = 2 * (y * z + x * w)
+    r22 = 1 - 2 * (x * x + y * y)
+    r11 = 1 - 2 * (x * x + z * z)
+    r12 = 2 * (y * z - x * w)
+    ry = np.arcsin(np.clip(-r20, -1, 1))
+    lock = np.abs(r20) > 0.999999
+    rx = np.where(lock, np.arctan2(-r12, r11), np.arctan2(r21, r22))
+    rz = np.where(lock, 0.0, np.arctan2(r10, r00))
+    return np.degrees(np.stack([rx, ry, rz], -1))
+
+
+def _matrix(t, q):
+    """FBX matrix (16 doubles, column-major) of a translation and a rotation quaternion."""
+    x, y, z, w = q
+    m = np.eye(4)
+    m[:3, :3] = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                 [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                 [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
+    m[:3, 3] = t
+    return m.T.ravel()
+
+
+def _curve(objects, conns, ids, node_id, channel, times, values):
+    cid = next(ids)
+    cv = objects.add('AnimationCurve', cid, _fbx_name('', 'AnimCurve'), '')
+    cv.add('Default', float(values[0]))
+    cv.add('KeyVer', 4008)
+    cv.add('KeyTime', np.asarray(times, '<i8'))
+    cv.add('KeyValueFloat', np.asarray(values, '<f4'))
+    cv.add('KeyAttrFlags', np.array([1 << 2 | 1 << 8 | 1 << 13 | 1 << 14], '<i4'))    # linear keys
+    cv.add('KeyAttrDataFloat', np.array([0.0, 0.0, 9.419963346924634e-30, 0.0], '<f4'))
+    cv.add('KeyAttrRefCount', np.array([len(times)], '<i4'))
+    conns.add('C', 'OP', cid, node_id, channel)
+
+
+def _write_rig(objects, conns, counts, ids, rig, skinned, name):
+    """Bones (LimbNode models under a Null), a Skin with one Cluster per bone for every skinned mesh, the bind
+    pose, and one AnimationStack per animation with the bones' local translation / rotation curves."""
+    from . import anim as A
+    skel = rig['skeleton']
+    n = skel.count
+    lt, lr = skel.local_bind()
+    names = rig.get('bone_names') or [f'bone_{i:02d}' for i in range(n)]
+    arm_id = next(ids)
+    arm = objects.add('Model', arm_id, _fbx_name(rig.get('name', name + '_skeleton'), 'Model'), 'Null')
+    arm.add('Version', 232)
+    _p70(arm, [('DefaultAttributeIndex', 'int', 'Integer', '', 0)])
+    arm.add('Shading', True)
+    arm.add('Culling', 'CullingOff')
+    attr = objects.add('NodeAttribute', next(ids), _fbx_name(rig.get('name', name + '_skeleton'), 'NodeAttribute'),
+                       'Null')
+    attr.add('TypeFlags', 'Null')
+    conns.add('C', 'OO', arm_id, Long(0))
+    conns.add('C', 'OO', attr.props[0], arm_id)
+    counts['Model'] += 1
+    counts['NodeAttribute'] = counts.get('NodeAttribute', 0) + 1 + n
+    bone_ids = []
+    for i in range(n):
+        bid = next(ids)
+        bone_ids.append(bid)
+        rot = euler_xyz(lr[i:i + 1])[0]
+        bo = objects.add('Model', bid, _fbx_name(names[i], 'Model'), 'LimbNode')
+        bo.add('Version', 232)
+        _p70(bo, [('Lcl Translation', 'Lcl Translation', '', 'A', *(float(v) for v in lt[i])),
+                  ('Lcl Rotation', 'Lcl Rotation', '', 'A', *(float(v) for v in rot)),
+                  ('Lcl Scaling', 'Lcl Scaling', '', 'A', 1.0, 1.0, 1.0),
+                  ('DefaultAttributeIndex', 'int', 'Integer', '', 0)])
+        bo.add('Shading', True)
+        bo.add('Culling', 'CullingOff')
+        ba = objects.add('NodeAttribute', next(ids), _fbx_name(names[i], 'NodeAttribute'), 'LimbNode')
+        _p70(ba, [('Size', 'double', 'Number', '', 1.0)])
+        ba.add('TypeFlags', 'Skeleton')
+        conns.add('C', 'OO', ba.props[0], bid)
+        p = skel.parents[i]
+        conns.add('C', 'OO', bid, bone_ids[p] if p >= 0 else arm_id)
+    counts['Model'] += n
+    world = [_matrix(skel.pos[i], skel.rot[i]) for i in range(n)]
+    ident = np.eye(4).ravel()
+    # skins and the bind pose
+    if skinned:
+        pose_id = next(ids)
+        pose = objects.add('Pose', pose_id, _fbx_name(name, 'Pose'), 'BindPose')
+        pose.add('Type', 'BindPose')
+        pose.add('Version', 100)
+        pose.add('NbPoseNodes', len(skinned) + 1 + n)
+        for model_id, _, _, _ in skinned:
+            pn = pose.add('PoseNode')
+            pn.add('Node', model_id)
+            pn.add('Matrix', ident)
+        pn = pose.add('PoseNode')
+        pn.add('Node', arm_id)
+        pn.add('Matrix', ident)
+        for i in range(n):
+            pn = pose.add('PoseNode')
+            pn.add('Node', bone_ids[i])
+            pn.add('Matrix', world[i])
+        counts['Pose'] = 1
+        for model_id, geo_id, joints, weights in skinned:
+            skin_id = next(ids)
+            sk = objects.add('Deformer', skin_id, _fbx_name(name + '_skin', 'Deformer'), 'Skin')
+            sk.add('Version', 101)
+            sk.add('Link_DeformAcuracy', 50.0)
+            conns.add('C', 'OO', skin_id, geo_id)
+            counts['Deformer'] = counts.get('Deformer', 0) + 1
+            for i in range(n):
+                sel = (joints == i) & (weights > 0)
+                rows = np.nonzero(sel.any(1))[0]
+                cl_id = next(ids)
+                cl = objects.add('Deformer', cl_id, _fbx_name(names[i], 'SubDeformer'), 'Cluster')
+                cl.add('Version', 100)
+                cl.add('UserData', '', '')
+                if len(rows):
+                    cl.add('Indexes', rows.astype('<i4'))
+                    cl.add('Weights', (weights * sel).sum(1)[rows].astype('<f8'))
+                inv = np.linalg.inv(world[i].reshape(4, 4).T)       # bone space
+                cl.add('Transform', inv.T.ravel())
+                cl.add('TransformLink', world[i])
+                cl.add('TransformAssociateModel', ident)
+                conns.add('C', 'OO', cl_id, skin_id)
+                conns.add('C', 'OO', bone_ids[i], cl_id)
+                counts['Deformer'] += 1
+    # animations
+    for aname, a in rig.get('animations', []):
+        if a.bones != n:
+            continue
+        st_id, ly_id = next(ids), next(ids)
+        end = int(round(a.duration * KTIME))
+        stack = objects.add('AnimationStack', st_id, _fbx_name(aname, 'AnimStack'), '')
+        _p70(stack, [('LocalStop', 'KTime', 'Time', '', Long(end)), ('ReferenceStop', 'KTime', 'Time', '', Long(end))])
+        objects.add('AnimationLayer', ly_id, _fbx_name(aname, 'AnimLayer'), '')
+        conns.add('C', 'OO', ly_id, st_id)
+        counts['AnimationStack'] = counts.get('AnimationStack', 0) + 1
+        counts['AnimationLayer'] = counts.get('AnimationLayer', 0) + 1
+        keys = max(a.keys, 1)
+        times = [Long(int(round(k / a.rate * KTIME))) if a.rate > 0 else Long(k) for k in range(keys)]
+        dts, drs = zip(*(a.sample(k / a.rate if a.rate > 0 else 0.0) for k in range(keys)))
+        dts, drs = np.array(dts), np.array(drs)             # (keys, bones, 3), (keys, bones, 4)
+        for i in range(n):
+            moves = i == 0 or a.trans_index[i] != 255
+            turns = a.rot_index[i] != 255
+            if not (moves or turns):
+                continue
+            for prop, short, vals in (('Lcl Translation', 'T', lt[i] + dts[:, i] if moves else None),
+                                      ('Lcl Rotation', 'R', None)):
+                if short == 'R':
+                    if not turns:
+                        continue
+                    vals = np.unwrap(np.radians(euler_xyz(A.qmul(np.broadcast_to(lr[i], drs[:, i].shape),
+                                                                  drs[:, i]))), axis=0)
+                    vals = np.degrees(vals)
+                if vals is None:
+                    continue
+                cn_id = next(ids)
+                cn = objects.add('AnimationCurveNode', cn_id, _fbx_name(short, 'AnimCurveNode'), '')
+                _p70(cn, [(f'd|{c}', 'Number', '', 'A', float(vals[0, j])) for j, c in enumerate('XYZ')])
+                conns.add('C', 'OO', cn_id, ly_id)
+                conns.add('C', 'OP', cn_id, bone_ids[i], prop)
+                counts['AnimationCurveNode'] = counts.get('AnimationCurveNode', 0) + 1
+                for j, c in enumerate('XYZ'):
+                    _curve(objects, conns, ids, cn_id, f'd|{c}', times, vals[:, j])
+                    counts['AnimationCurve'] = counts.get('AnimationCurve', 0) + 1
+
+
+def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None):
+    """meshes: [MeshData]; texture_files: {texture id: relative file name of the PNG next to the .fbx}; rig:
+    {'skeleton': anim.Skeleton, 'animations': [(name, anim.Animation)]} adds the bones, skins the meshes that have
+    blend weights to them, and writes the animations as takes.
     Returns the .fbx bytes (binary FBX 7.4, metres, Y up)."""
     ids = (Long(x) for x in range(1000000, 10 ** 9, 7))
     head = Node('FBXHeaderExtension')
@@ -330,6 +504,7 @@ def write_fbx(meshes, texture_files, name='model', mesh_names=None):
     counts = {'Model': 0, 'Geometry': 0, 'Material': 0, 'Texture': 0, 'Video': 0}
     mat_ids = {}
     tex_ids = {}
+    skinned = []
     for i, m in enumerate(meshes):
         mname = (mesh_names[i] if mesh_names else f'{name}_{i}')
         tris, vmap = _split_duplicates(np.asarray(m.tris, np.int64), len(m.pos))
@@ -387,6 +562,8 @@ def write_fbx(meshes, texture_files, name='model', mesh_names=None):
         counts['Geometry'] += 1
         conns.add('C', 'OO', model_id, Long(0))
         conns.add('C', 'OO', geo_id, model_id)
+        if rig is not None and getattr(m, 'joints', None) is not None and m.joints.max() < rig['skeleton'].count:
+            skinned.append((model_id, geo_id, np.asarray(m.joints)[vmap], np.asarray(m.weights)[vmap]))
         mkey = (m.material, m.texture)
         if mkey not in mat_ids:
             mid = mat_ids[mkey] = next(ids)
@@ -421,6 +598,8 @@ def write_fbx(meshes, texture_files, name='model', mesh_names=None):
                     counts['Video'] += 1
                 conns.add('C', 'OP', tex_ids[tfile], mid, 'DiffuseColor')
         conns.add('C', 'OO', mat_ids[mkey], model_id)
+    if rig is not None:
+        _write_rig(objects, conns, counts, ids, rig, skinned, name)
     defs = Node('Definitions')
     defs.add('Version', 100)
     defs.add('Count', sum(counts.values()) + 1)

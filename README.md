@@ -89,9 +89,9 @@ that happens to match a model id would also "match" its renderables; such names 
 | .SPS sound stream files | opened like a bundle with one sound: play, waveform, replace, save | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF / .SPS; a whole folder as WAV |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / pause / stop with a play head on the waveform; click or drag on it to jump; time, channels, rate, length; stops when another item is selected | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
-| AnimationList, Animation (retail PC) | a car's 8 damage animations played **on the car** (body skinned to the damage skeleton): bumpers fall off, bonnets pop up, doors swing; other animations on their skeleton with bone paths (camera shots); play / pause, time slider, loop, speed | |
+| AnimationList, Animation (PC and PS3 prototype) | a car's damage animations played **on the car** (body skinned to the damage skeleton): bumpers fall off, bonnets pop up, doors swing; other animations on their skeleton with bone paths (camera shots); play / pause, time slider, loop, speed | FBX: bones, the car skinned, every animation as a take |
 | Skeleton | the bones on their car (or alone), with a table: parent, position, name hash | |
-| ControlMesh (PS3 prototype cars) | the crash deformation lattice: up to 64 points on the body over the car, coloured by how deep each can dent, with the direction it moves; the car view has a **Control points** switch | max dent per point editable; glTF / FBX |
+| ControlMesh (PS3 prototype cars) | the crash deformation lattice: up to 64 points on the body over the car, coloured by how deep each can dent, with the direction it moves; **Dent** crushes the car with it; the car view has a **Control points** switch | max dent per point editable; glTF / FBX |
 | GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
 
@@ -173,8 +173,19 @@ Every car has an AnimationList of 8 damage animations used by its `DamageBehavio
 wrecked for one side of the car (front, rear, left, right, ...). Car body vertices are skinned to the damage
 skeleton (BLENDINDICES / BLENDWEIGHT), so BNDL Explorer plays them on the car; parts that come off (bumper
 covers, mirrors) are moved out of sight by their bones. The `EN_US` `FEEDBACKGROUPS` animations are camera
-shots in world coordinates and car rigs (body and four spinning wheels). The PS3 prototype's animations use an
-older layout that is not read yet.
+shots in world coordinates and car rigs (body and four spinning wheels).
+
+**PS3 prototype** animations (731, all read) use an older layout: no version, a 0x40-byte header (keys, bones,
+translation tracks, rotation and translation bytes per key, size, keys per second at 0x20, codec at 0x24, six
+offsets at 0x28), every bone has a rotation track, per-bone scale; inside lists the offsets are zero (filled
+in when loading) and follow from the counts. Prototype car vertices carry two skeleton bones (attribute 7 / 1,
+slots 0-1; no weight = the root) and two ControlMesh points (slots 2-3): the damage animations move the body
+through the bones, and the ControlMesh view's **Dent** moves every vertex along its points' directions.
+
+**Export FBX** (animation view, or Export > As FBX with skeleton and animation) writes the bones as LimbNodes,
+the car skinned to them (one cluster per bone, bind pose) and every animation of the resource as a take of local
+translation / rotation curves. Checked in Blender: an armature with one action per animation, bones and
+deformed vertices where BNDL Explorer puts them (0.0 mm apart).
 
 ### ControlMesh (PS3 prototype)
 

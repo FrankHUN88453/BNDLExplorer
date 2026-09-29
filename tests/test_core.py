@@ -685,6 +685,49 @@ def test_animations(pc_root):
     check(np.allclose(wt, sk.pos) and len(anims) == 8 and body and bind < 1e-4 and start < 0.01 and moved > 0.3,
           f'car damage animation: {len(body)} skinned meshes, whole at its start ({start * 100:.1f} cm), '
           f'parts moved up to {moved:.2f} m at its end')
+    from bndlx import fbx
+    data = fbx.write_fbx(meshes, {}, 'car', None, {'skeleton': sk, 'animations': [(f'a{k}', x)
+                                                                                 for k, x in enumerate(anims)]})
+    _, nodes = fbx.read_binary(data)
+    objs = next(n for n in nodes if n.name == 'Objects')
+    bones = [m for m in objs.findall('Model') if m.props[2] == 'LimbNode']
+    clusters = [x for x in objs.findall('Deformer') if x.props[2] == 'Cluster']
+    stacks = objs.findall('AnimationStack')
+    curves = objs.findall('AnimationCurve')
+    check(len(bones) == sk.count and len(clusters) == sk.count * len(body) and len(stacks) == 8 and curves,
+          f'FBX with the rig: {len(bones)} bones, {len(clusters)} clusters, {len(stacks)} takes, {len(curves)} curves')
+
+
+def test_ps3_animations(ps3_root):
+    """PS3 prototype: its older animation layout reads (also inside lists, whose offsets are only filled in when
+    loading); car bodies follow their skeleton (vertex slots 0-1) and dent by their ControlMesh (slots 2-3)."""
+    from bndlx import anim, mesh
+    count = 0
+    for sub in ('VEHICLES', os.path.join('EN_US', 'FEEDBACKGROUPS')):
+        folder = os.path.join(ps3_root, sub)
+        for f in sorted(os.listdir(folder))[:40]:
+            b = Bundle.open(os.path.join(folder, f))
+            for r in b.resources:
+                if r.type in (anim.T_ANIMATION, anim.T_ANIMLIST) and len(r.data(0)) >= 0x40:
+                    count += len(anim.animations_of(r, b.e))
+    p = os.path.join(ps3_root, 'VEHICLES', 'VEH_122672_MS.BNDL')
+    b = Bundle.open(p)
+    vgs = next(x for x in b.resources if x.type == mesh.T_VGS)
+    imps = {i.offset: i.id for i in vgs.imports()}
+    sk = anim.read_skeleton(b.find(imps[0x4]).data(0), b.e)
+    cpos, cdir, cdisp, _ = mesh.read_control_mesh(b, b.find(imps[0x8]))
+    meshes, _ = mesh.decode_vgs(b, vgs, mesh.Library(), [], p)
+    body = [m for m in meshes if m.joints is not None and m.dent_points is not None]
+    dent = max(float(np.linalg.norm(mesh.dented(m, cpos, cdir, cdisp, 1.0) - m.pos, axis=1).max()) for m in body)
+    lst = next(x for x in b.resources if x.type == anim.T_ANIMLIST and anim.animations_of(x, b.e)[0].bones == sk.count)
+    a = anim.animations_of(lst, b.e)[0]
+    wt, wr = anim.pose(sk, a, a.duration)
+    moved = max(float(np.linalg.norm(anim.skin(m.pos.astype(np.float64), None, m.joints, m.weights, sk, wt, wr)[0]
+                                     - m.pos, axis=1).max()) for m in body)
+    check(count > 100 and body and all(m.joints.max() < sk.count for m in body) and 0.05 < dent <= cdisp.max() + 1e-4
+          and moved > 0.02,
+          f'{count} prototype animations read; car body: {len(body)} meshes on {sk.count} bones and 64 control points '
+          f'(dent up to {dent * 100:.0f} cm, damage animation moves it {moved * 100:.0f} cm)')
 
 
 def test_vehiclelist(path):
@@ -754,6 +797,7 @@ def main():
         test_fbx(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'), PS3)
         test_proto_world(os.path.join(PS3, 'SEACREST'))
         test_control_mesh(os.path.join(PS3, 'VEHICLES'))
+        test_ps3_animations(PS3)
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2
