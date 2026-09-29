@@ -37,7 +37,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.22'
+VERSION = '0.23'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -722,6 +722,9 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             data = f.read()
         if ext == '.fbx' and res.type in MODEL_IMPORT_TYPES:
             return self.import_fbx(d, res, path)
+        if res.type == ginsu.T_GINSU and ext in eal3.AUDIO_EXT:
+            self.ginsu_replace_dialog(d, res, path)
+            return False
         d.checkpoint(f'replace {res.id:#x}', [res.id])
         try:
             if resfile.is_resfile(data):
@@ -782,6 +785,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             return
         flt = {T_TEXTURE: filedialog.IMAGES, T_CUBE: filedialog.PNG, T_TEXT: filedialog.TEXT,
                T_STRINGS: filedialog.CSV, 0x81: filedialog.AUDIO, VL.T_VEHICLELIST: filedialog.CSV,
+               ginsu.T_GINSU: filedialog.AUDIO,
                **{t: filedialog.FBX + filedialog.RES for t in MODEL_IMPORT_TYPES}}.get(res.type, filedialog.RES)
         p = filedialog.open_file(f'Replace {type_name(res.type)} {res.id:#x}', self.cfg.get('last_import', ''), flt)
         if not p:
@@ -791,6 +795,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             inf = raster.info(res, d.b.platform)
             self.modal = {'kind': 'texture_options', 'doc': d.uid, 'rid': res.id, 'path': p,
                           'fmt': 0, 'mips': 0, 'srgb': inf.srgb}
+        elif res.type == ginsu.T_GINSU and os.path.splitext(p)[1].lower() in eal3.AUDIO_EXT:
+            self.ginsu_replace_dialog(d, res, p)
         elif res.type == 0x81 and os.path.splitext(p)[1].lower() in eal3.AUDIO_EXT:
             try:
                 _, rate, head, _ = self.wave_audio(d, res)
@@ -1876,6 +1882,49 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         imgui.text_disabled('Plays the few grains at that RPM in turn for 3 s (a rough preview; the game blends and '
                             'pitches them).')
         imgui.pop_text_wrap_pos()
+        imgui.separator()
+        if imgui.button('Replace with a recording...') and not d.b.truncated:
+            self.action_replace(d, r)
+        imgui.same_line()
+        imgui.text_disabled('a WAV / FLAC / OGG / MP3 of an engine sweeping through its revs')
+
+    def ginsu_replace_dialog(self, d, r, path):
+        """Options for turning a recording into this engine sound (defaults from the sound now)."""
+        try:
+            g = ginsu.read(r, d.b.e)
+            cyl, _ = ginsu.cylinders_of(g)
+            src, rate = eal3.read_audio(path)
+        except Exception as e:
+            self.modal = {'kind': 'message', 'title': 'Replace engine sound', 'text': str(e)}
+            return
+        self.modal = {'kind': 'ginsu_options', 'doc': d.uid, 'rid': r.id, 'path': path, 'decel': g.decel,
+                      'mode': 1 if g.decel else 0, 'cyl': int(cyl), 'start': float(g.max_rpm if g.decel else g.min_rpm),
+                      'lo': float(g.min_rpm), 'hi': float(g.max_rpm),
+                      'src': f'{src.shape[1]} channel(s), {rate} Hz, {len(src) / rate:.2f} s'}
+
+    def ginsu_replace(self, d, r, m):
+        """Encode the recording into the engine sound (undoable) and report what came out."""
+        try:
+            audio, rate = eal3.read_audio(m['path'])
+            g = ginsu.read(r, d.b.e)
+            curve = m.get('curve') if m.get('curve_key') == (m['cyl'], m['start']) else None
+            data, info = ginsu.from_recording(g, audio, rate, 'linear' if m['mode'] else 'track', m['cyl'],
+                                              m['start'], (min(m['lo'], m['hi']), max(m['lo'], m['hi'])), curve)
+        except Exception as e:
+            traceback.print_exc()
+            self.modal = {'kind': 'message', 'title': 'Replace engine sound failed', 'text': str(e)}
+            return
+        d.checkpoint(f'replace engine sound {r.id:#x}', [r.id])
+        r.set_data(0, data)
+        self.changed(d, r)
+        text = (f"New engine sound: {info['min']:.0f} - {info['max']:.0f} RPM, {info['grains']} grains of one engine "
+                f"cycle, {info['seconds']:.2f} s at {info['rate']} Hz (Ctrl+Z to undo, Save to keep).")
+        if info['weak'] > 0.3:
+            text += (f"\n\nNo clear engine pitch in {info['weak'] * 100:.0f} % of the recording: the RPM found may be "
+                     "off. Check the cylinders and the start RPM (Analyse shows the curve), or use a steady sweep "
+                     "with the recording's RPM range.")
+        self.modal = {'kind': 'message', 'title': 'Replace engine sound', 'text': text}
+        self.status = f'Engine sound {r.id:#x} replaced (Ctrl+Z to undo).'
 
     def wave_seek(self, key, audio, rate, target):
         """Move the play position of a sound; if it is playing (or paused) it continues from there."""
@@ -2781,7 +2830,9 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
 
     def fbx_materials(self, d, meshes, path, size):
         """Per material the look as PNG maps for an FBX: base colour (the car paint under the livery, the specular
-        colour on metal), normal (RGB), roughness and metalness, and their constants."""
+        colour on metal), normal (RGB), roughness and metalness, and their constants. The game has no metalness:
+        metal-like parts have a dark albedo and a bright specular colour (F0), which becomes Blender's metallic here;
+        the specular A of the Alpha badge / wheel shaders (a mirror coat) too."""
         from PIL import Image
         folder = os.path.splitext(path)[0] + '_textures'
         paint = np.array(self.viewer.paint if self.viewer is not None else self.cfg.get('paint', (0.55, 0.05, 0.05)))
@@ -2826,19 +2877,35 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 if base is None:
                     base = np.tile(np.append(np.array(m.tint) * 255.0, 255.0), (4, 4, 1)).astype(np.float32)
                 s = fit(spec, base.shape[:2]).astype(np.float32)
-                mt = s[..., 3:4] / 255.0
+                f0 = (s[..., :3] / 255.0) ** 2.2                # linear F0: 0.04 plastic .. 0.3+ metal
+                mt = ((f0.max(-1, keepdims=True) - 0.04) / 0.26).clip(0, 1)
+                if m.spec_alpha in (1, 2):                     # mirror coat / (PS3) metalness in A
+                    mt = np.maximum(mt, s[..., 3:4] / 255.0)
+                    s[..., :3] = np.maximum(s[..., :3], (s[..., 3:4] * 0.9) if m.spec_alpha == 1 else 0)
                 base[..., :3] = base[..., :3] * (1 - mt) + s[..., :3] * mt
-                maps['ReflectionFactor'] = save(np.repeat(spec[..., 3:4], 3, -1), f'{key}_metal.png')
+                maps['ReflectionFactor'] = save(np.repeat(mt * 255.0, 3, -1).clip(0, 255), f'{key}_metal.png')
                 metal = 1.0
             if base is not None:
+                if not (m.alpha_test or m.blend or 'alpha' in (m.shader or '').lower()):
+                    base[..., 3] = 255                         # Blender takes A as opacity; the shader ignores it
                 maps['DiffuseColor'] = save(np.clip(base, 0, 255), f'{key}_base.png')
             if nrm is not None:
-                n = nrm.copy()
-                n[..., 3] = 255
-                maps['NormalMap'] = save(n, f'{key}_normal.png')
-                if m.spec_mode == 0:
-                    maps['ShininessExponent'] = save(np.repeat(nrm[..., 3:4], 3, -1), f'{key}_rough.png')
+                if m.normal_mode in (0, 3, 4):                 # 1, 2: the map holds only a roughness
+                    n = nrm.copy()
+                    n[..., 3] = 255
+                    maps['NormalMap'] = save(n, f'{key}_normal.png')
+                if m.spec_mode == 0 and m.normal_mode < 3:
+                    ch = 1 if m.normal_mode == 1 else 3
+                    maps['ShininessExponent'] = save(np.repeat(nrm[..., ch:ch + 1], 3, -1), f'{key}_rough.png')
                     rough = 1.0
+                if m.normal_mode == 4 and m.alpha_test and 'DiffuseColor' in maps:
+                    b = np.asarray(Image.open(os.path.join(folder, os.path.basename(maps['DiffuseColor']))))
+                    b = np.array(fit(b, nrm.shape[:2]))
+                    b[..., 3] = nrm[..., 3]                    # the cut-out lives in the normal map's A
+                    maps['DiffuseColor'] = save(b, f'{key}_base.png')
+            if spec is not None and m.spec_mode == 0 and m.spec_alpha == 3:
+                maps['ShininessExponent'] = save(np.repeat(spec[..., 3:4], 3, -1), f'{key}_rough.png')
+                rough = 1.0
             if spec is not None and m.spec_mode == 1:
                 r = (255 - 0.85 * spec[..., 1:2].astype(np.float32)).clip(0, 255)
                 maps['ShininessExponent'] = save(np.repeat(r, 3, -1), f'{key}_rough.png')
@@ -3311,7 +3378,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                  'confirm_replace': 'Replace resources', 'change_id': 'Duplicate resource' if m.get('dup') else 'Change id',
                  'texture_options': 'Replace texture', 'wave_options': 'Replace sound', 'open_path': 'Open by path', 'find': 'Find', 'goto': 'Go to id',
                  'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties',
-                 'plate': 'License plates'}.get(m['kind'], 'Message')
+                 'plate': 'License plates', 'ginsu_options': 'Replace engine sound'}.get(m['kind'], 'Message')
         popup = f'{title}###modal'
         if not imgui.is_popup_open(popup):
             imgui.open_popup(popup)
@@ -3454,6 +3521,69 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             imgui.same_line()
             if imgui.button('Cancel', imgui.ImVec2(120, 0)):
                 close = True
+        elif k == 'ginsu_options':
+            d = self.doc_by_uid(m['doc'])
+            r = d.b.find(m['rid']) if d else None
+            imgui.text(os.path.basename(m['path']) + ':  ' + m['src'])
+            imgui.text_disabled('The sound now is ' + ('an off-load (engine braking) sweep, high to low RPM.'
+                                                       if m['decel'] else 'an on-load sweep, low to high RPM.'))
+            imgui.set_next_item_width(300)
+            _, m['mode'] = imgui.combo('RPM', m['mode'], ['follow the pitch of the recording',
+                                                           'a steady sweep between two RPMs'])
+            if m['mode'] == 0:
+                imgui.set_next_item_width(140)
+                _, m['cyl'] = imgui.input_int('cylinders', m['cyl'])
+                m['cyl'] = max(2, min(16, m['cyl']))
+                imgui.set_next_item_width(140)
+                _, m['start'] = imgui.input_float('RPM at the start', m['start'], 100.0, 500.0, '%.0f')
+                imgui.push_text_wrap_pos(520)
+                imgui.text_disabled('The engine fires cylinders / 2 times a revolution: the pitch gives the RPM, so '
+                                    'the cylinders must be those of the recorded engine (V8: 8, flat six: 6). Set the RPM '
+                                    'the recording starts at (idle for a rising sweep, the top for a falling one; '
+                                    'within 30 %).')
+                imgui.pop_text_wrap_pos()
+                if imgui.button('Analyse'):
+                    try:
+                        g = ginsu.read(r, d.b.e)
+                        audio, rate = eal3.read_audio(m['path'])
+                        x = ginsu.recording_mono(audio, rate, g)
+                        m['curve'] = ginsu.track_rpm(x, g.rate, m['cyl'], m['start'], g.decel)
+                        m['curve_key'] = (m['cyl'], m['start'])
+                    except Exception as e:
+                        m['curve'], m['curve_key'] = None, None
+                        self.status = f'Analysis failed: {e}'
+                if m.get('curve') is not None:
+                    t, rpm, strength = m['curve']
+                    imgui.same_line()
+                    stale = m.get('curve_key') != (m['cyl'], m['start'])
+                    imgui.text(f'{rpm.min():.0f} - {rpm.max():.0f} RPM' + (' (settings changed: Analyse again)'
+                                                                          if stale else ''))
+                    weak = ginsu.weak_share(strength)
+                    if weak > 0.3:
+                        imgui.text_colored(imgui.ImVec4(1.0, 0.6, 0.2, 1.0),
+                                           f'No clear engine pitch in {weak * 100:.0f} % of it: other cylinders or '
+                                           f'start RPM, or a steady sweep?')
+                    imgui.plot_lines('##rpmcurve', np.asarray(rpm, np.float32), 0, 'RPM through the recording',
+                                     float(rpm.min()) * 0.95, float(rpm.max()) * 1.05, imgui.ImVec2(520, 90))
+            else:
+                imgui.set_next_item_width(140)
+                _, m['lo'] = imgui.input_float('low RPM', m['lo'], 100.0, 500.0, '%.0f')
+                imgui.set_next_item_width(140)
+                _, m['hi'] = imgui.input_float('high RPM', m['hi'], 100.0, 500.0, '%.0f')
+                imgui.text_disabled('The RPM rises (falls) evenly over the whole recording.')
+            imgui.push_text_wrap_pos(520)
+            imgui.text_disabled('The recording is cut into grains of one engine cycle (120 / RPM s) and encoded as '
+                                'EA-XAS like the game\'s own; the sample rate stays as the sound now.')
+            imgui.pop_text_wrap_pos()
+            if imgui.button('Replace', imgui.ImVec2(120, 0)) and r is not None:
+                self.modal = None
+                imgui.close_current_popup()
+                imgui.end_popup()
+                self.ginsu_replace(d, r, m)
+                return
+            imgui.same_line()
+            if imgui.button('Cancel', imgui.ImVec2(120, 0)):
+                close = True
         elif k == 'pick_chunk':
             d = self.doc_by_uid(m['doc'])
             r = d.b.find(m['rid']) if d else None
@@ -3592,7 +3722,7 @@ Copy and paste, drag and drop (like Explorer):
 
 Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms), LOD
 choice for models; Shaded shows the materials as the game shades them (normal and specular maps, roughness,
-metal, ambient occlusion, clear-coated car paint in the colour chosen next to Export, see-through glass with
+the channels each shader reads, ambient occlusion, clear-coated car paint in the colour chosen next to Export, see-through glass with
 reflections, tinted tail-light glass, and the lamps: Lights / Brake light the car's light masks in the colours
 of its materials), Export glTF (.glb with textures, opens in Blender) and Export FBX (the full materials as PNG maps in
 <name>_textures: base colour with the paint, normal, roughness, metal; Blender links them to its material). Import FBX (or Replace with an .fbx) writes an edited FBX back: keep the object names Export
@@ -3641,7 +3771,10 @@ car to edit its fields; Duplicate / Delete / arrows change the rows. Export / Im
 decimal commas works too).
 
 Engine sounds (GinsuEngineSound, in car bundles): the rev sweep with its RPM range and grains; play it,
-Export WAV, or hold the engine at an RPM chosen with the slider.
+Export WAV, or hold the engine at an RPM chosen with the slider. Replace with a recording (or drop a WAV / FLAC /
+OGG / MP3 on it): a recording of an engine sweeping through its revs becomes the new sound; its RPM is followed
+from the pitch (give the recorded engine's cylinders and start RPM; Analyse shows the curve) or taken as a steady
+sweep between two RPMs.
 
 Sounds (Wave): Play / Pause / Stop and a waveform with the play position (click it to jump); Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
 AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound

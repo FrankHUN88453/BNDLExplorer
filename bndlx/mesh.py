@@ -82,7 +82,11 @@ class MeshData:
     rough: float = None
     paint: bool = False
     ao: np.ndarray = None
-    spec_mode: int = 0         # 0 vehicle (RGB F0, A metal), 1 world packed (R reflectance, G gloss), 2 RGB F0
+    spec_mode: int = 0         # 0 vehicle (RGB F0), 1 world packed (R reflectance, G gloss), 2 RGB F0
+    spec_alpha: int = 0        # vehicle specular map A: 0 unused, 1 mirror coat (A = 1 reflects like a mirror),
+    #                            2 metalness (PS3 prototype, not checked), 3 roughness
+    normal_mode: int = 0       # vehicle normal map: 0 RGB normal + A roughness, 1 only G = roughness, 2 only
+    #                            A = roughness, 3 only the RGB normal, 4 RGB normal + A alpha test (see VEHICLE_CHANNELS)
     blend: int = 0             # 0 opaque, 1 glass (see-through with reflections), 2 colouring glass (multiplies)
     opacity: float = 1.0       # glass: how much of its own colour covers what is behind (OpacityMin)
     glass_tint: tuple = None   # glass: its colour (linear RGB)
@@ -388,11 +392,39 @@ SELF_ILLUMINATION = 0x32465D76                                      # mSelfIllum
 LIGHT_DEFAULTS = ((0.0, 0.0, 0.0),) * 4
 
 
+# Which channels of the normal and specular maps the retail PC vehicle shaders read (data flow of their DXBC
+# G-buffer pixel programs; docs 07): VehicleNFS13_<name> -> (normal_mode, spec_alpha). The rest read the RGB normal
+# and A roughness, and only RGB of the specular map (its A is unused: there is no metalness).
+VEHICLE_CHANNELS = {
+    'body_textured_normalmap_emissive_nodamage_noeffects': (1, 0),   # 'normal' map: only G = roughness
+    'wheel_textured_roughness': (2, 0),                              # 'normal' map: only A = roughness
+    'body_textured_normalmap_lightmap': (3, 0), 'body_textured_normalmap_lightmap_licenseplate': (3, 0),
+    'bodypaint_normalmap_nodamage': (3, 0), 'body_alpha_normalmap_doublesided': (3, 0),
+    'body_alpha1bit_normalmap': (4, 0),                              # normal A: alpha test
+    'wheel_alpha1bit_normalmap': (4, 3),                             # ... and specular A = roughness
+    'body_alpha1bit_normalmap_textured_nodamage': (0, 1),            # specular A: mirror coat
+    'body_alpha_normalmap_textured_nodamage': (0, 1),
+    'wheel_alpha1bit_textured_normalmap': (0, 1), 'wheel_alpha_textured_normalmap': (0, 1),
+    'wheel_alpha_textured_normalmap_blurfade': (0, 1),
+}
+
+
+def vehicle_channels(shader_name, platform='PC'):
+    """(normal_mode, spec_alpha) of a vehicle shader (VEHICLE_CHANNELS); PS3 prototype cars keep the older reading
+    (RGB normal + A roughness, specular A as metalness)."""
+    low = shader_name.lower()
+    if not low.startswith('vehicle'):
+        return 0, 0
+    if platform != 'PC':
+        return 0, 2
+    return VEHICLE_CHANNELS.get(low.split('_', 1)[1] if '_' in low else low, (0, 0))
+
+
 def material_pbr(b, mat, shader_name=''):
     """{'normal': texture id, 'spec_tex': texture id, 'spec': F0 (linear RGB) or None, 'rough': float or None,
-    'paint': bool} of a material: the normal map (RGB tangent-space normal, A roughness) and specular map (RGB F0,
-    A metalness) of the physically based shaders, the constants used when a map is missing, and whether the car
-    paint colour shows through (BodyPaint / PaintGloss shaders)."""
+    'paint': bool, ...} of a material: the normal map and specular map (RGB F0) of the physically based shaders
+    and which of their channels the shader reads (vehicle_channels), the constants used when a map is missing,
+    and whether the car paint colour shows through (BodyPaint / PaintGloss shaders)."""
     low = shader_name.lower()
     out = {'normal': None, 'spec_tex': None, 'spec': None, 'rough': None, 'paint': 'paint' in low,
            # vehicle maps are verified; the world shaders pack their specular map (R reflectance, G / B gloss),
@@ -401,6 +433,7 @@ def material_pbr(b, mat, shader_name=''):
            # glass: see-through with reflections (OpacityMin of its colour), or tinting what is behind it
            'blend': 2 if 'colourise' in low else 1 if ('glass' in low or 'refraction' in low) else 0,
            'opacity': 0.08 if 'refraction' in low else 0.15, 'glass_tint': None, 'lights': None}
+    out['normal_mode'], out['spec_alpha'] = vehicle_channels(shader_name, getattr(b, 'platform', 'PC'))
     try:
         info = material_info(b, mat)
     except (struct.error, IndexError, ValueError):
@@ -588,6 +621,7 @@ def decode_renderable(b, res, lib, bundles, root, parts=None):
         md.normal_tex, md.spec_tex, md.spec, md.rough, md.paint = (pbr['normal'], pbr['spec_tex'], pbr['spec'],
                                                                    pbr['rough'], pbr['paint'])
         md.spec_mode = pbr['spec_mode']
+        md.normal_mode, md.spec_alpha = pbr['normal_mode'], pbr['spec_alpha']
         md.blend, md.opacity, md.glass_tint, md.lights_tex = pbr['blend'], pbr['opacity'], pbr['glass_tint'], \
             pbr['lights']
         md.light_colours = pbr['light_colours']

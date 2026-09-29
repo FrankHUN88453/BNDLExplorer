@@ -92,7 +92,7 @@ that happens to match a model id would also "match" its renderables; such names 
 | AnimationList, Animation (PC and PS3 prototype) | a car's damage animations played **on the car** (body skinned to the damage skeleton): bumpers fall off, bonnets pop up, doors swing; other animations on their skeleton with bone paths (camera shots); play / pause, time slider, loop, speed | FBX: bones, the car skinned, every animation as a take |
 | Skeleton | the bones on their car (or alone), with a table: parent, position, name hash | |
 | ControlMesh (PS3 prototype cars) | the crash deformation lattice: up to 64 points on the body over the car, coloured by how deep each can dent, with the direction it moves; **Dent** crushes the car with it; the car view has a **Control points** switch | max dent per point editable; glTF / FBX |
-| GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV |
+| GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV; replace from a recording (WAV / FLAC / OGG / MP3): RPM tracked from its pitch or a steady sweep |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
 
 Field names of Genesys data are hashes; short names are stored as text, a few are known, and any field can be
@@ -130,10 +130,18 @@ triangle strips with 0xFFFF restarts (topology field in the mesh record; every r
 **Shaded** (on by default) draws the materials the way the game's physically based shaders use them:
 albedo (car paint, chosen with the colour button, mixed under the livery by the diffuse alpha), the normal map
 (RGB tangent-space normal in the DirectX convention: the stored bitangents of the cars point to -v, verified;
-A = roughness), the specular map (vehicles: RGB F0, A metalness; world shaders pack it: R reflectance, G gloss,
+A = roughness), the specular map (vehicles: RGB F0; world shaders pack it: R reflectance, G gloss,
 and the ColouredSpecular ones are RGB), vertex ambient occlusion, a key light, sky / ground ambient and
 reflections, GGX with Fresnel and a clear coat on paint. The world's packing is read from the data and
 approximate; tyres have no colour map (the rubber colour is in the shader). Off: the texture under a head light.
+
+Which channels a car shader reads comes from the game's own pixel programs (their DXBC, traced channel by
+channel): the car shaders have **no metalness** (metal parts are a dark albedo with a bright specular colour), so
+the specular map's A is unused, except on the textured `Alpha` badge / wheel shaders (a mirror coat: 1 reflects
+like a mirror) and `Wheel_Alpha1bit_Normalmap` (roughness; its cut-out is the normal map's A). The cabin / badge
+`..._NormalMap_Emissive_...` shader reads only G of its "normal" map (roughness, no bumps), `Wheel_Textured_Roughness`
+only its A, the `Lightmap` ones only the normal. (Earlier versions took specular A as metalness everywhere: badges
+such as the M3 GTR's BMW roundels and the cabins that share an 8x8 default map with A = 1 turned black.)
 
 Glass and lamps: `Glass` / `Refraction` shaders are see-through (their `OpacityMin` share of their own colour,
 0.09 for a windscreen, plus Fresnel reflections; drawn after everything else, far to near), `Glass_Colourise`
@@ -148,9 +156,10 @@ a colour stays dark): `Emissive` shaders glow (UV set 0), `Lightmap` shaders are
 
 **Export FBX** writes a binary FBX 7.4 (metres, Y up; Blender, 3ds Max, Maya, Unity) with every UV set,
 the mesh's own normals and a material per game material with its maps as PNG files in `<name>_textures`:
-base colour (the paint under the livery, the specular colour on metal), normal map, roughness and metalness,
-linked as DiffuseColor / NormalMap / ShininessExponent / ReflectionFactor, which Blender turns into a Principled
-material with those textures. Glass gets its opacity (Blender's alpha), tinting glass its colour, and with Lights
+base colour (the paint under the livery, the specular colour on metal), normal map, roughness and metalness
+(Blender's metallic where the specular colour is metal-bright, or a badge's mirror coat), linked as DiffuseColor /
+NormalMap / ShininessExponent / ReflectionFactor, which Blender turns into a Principled material with those
+textures; the base colour keeps its alpha only where the shader cuts out or blends by it. Glass gets its opacity (Blender's alpha), tinting glass its colour, and with Lights
 on, the glowing lamp masks are baked into an emission map (EmissiveColor / EmissiveFactor). Each object is named `R<renderable id>_<mesh index>`; further uses of the same
 mesh (the other wheels) get `~1`, `~2`. An extra UV layer `bndlx_id` (leave it in place) keeps each vertex's
 index in the game mesh.
@@ -337,6 +346,21 @@ braking) cut into grains of one engine cycle each; the game plays the grains of 
 positions and the sample rate; the audio is EA-XAS v0 (19-byte frames of 32 mono samples). BNDL Explorer
 shows the RPM range and grains, plays the sweep (the RPM at the play position is shown), exports WAV, and
 previews the engine held at a chosen RPM.
+
+**Replace with a recording** (or Replace / drop an audio file on it) makes a new engine sound from a WAV / FLAC /
+OGG / MP3 of an engine sweeping through its revs (a dyno pull, a free rev): rising for an on-load sound, falling
+for an off-load one. The RPM through the recording is either followed from its pitch (a four-stroke engine fires
+cylinders / 2 times a revolution: give the recorded engine's cylinders and the RPM it starts at; **Analyse**
+plots the curve found) or taken as a steady sweep between two RPMs. The recording is resampled to the sound's
+rate, cut into grains of one engine cycle (120 / RPM s), the 51 RPM steps placed where the sweep passes them (the
+lowest at sample 721 at the earliest, like every retail sound) and encoded as EA-XAS v0 (4-bit ADPCM, ~45 dB).
+Undo with Ctrl+Z; Save writes the bundle (the original is kept as .orig).
+
+The pitch tracking follows the autocorrelation peak of the firing period from the start RPM, only rising (or
+falling) and at most ~3 % every 10 ms, and carries the sweep on at its recent rate where the pitch fades. On the
+game's own 60 sweeps with the right cylinder count it finds the RPM to within 1-2 % on most rising sweeps; where
+no clear pitch shows on more than 30 % of the recording it warns (other cylinders or start RPM, or a steady
+sweep).
 
 ### Waves
 

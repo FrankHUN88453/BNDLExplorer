@@ -540,6 +540,31 @@ def test_ginsu(path):
     hold = g.hold((g.min_rpm + g.max_rpm) / 2, 2.0)
     check(len(hold) == 2 * g.rate and sweeps == {False, True},
           f'held-RPM preview {len(hold) / g.rate:.1f} s; on-load and off-load sweeps present')
+    # a new engine sound: a rising sweep of the bundle as "the recording" (the one with the clearest pitch; its own
+    # RPM table tells how well the tracking did), into the first one's layout
+    rising = [ginsu.read(r, b.e) for r in rs]
+    rising = [x for x in rising if not x.decel]
+    tmpl, best = rising[0], None
+    for x in rising:
+        c, e = ginsu.cylinders_of(x)
+        if e is not None and (best is None or e < best[0]):
+            best = (e, x, c)
+    _, src, cyl = best
+    pcm = src.pcm()
+    moved = pcm[5:]                              # off the source's own frames (else it re-encodes exactly)
+    dec = ginsu.decode_xas0(ginsu.encode_xas0(moved), len(moved)).astype(np.float64)
+    snr = 10 * np.log10(np.mean(moved.astype(np.float64) ** 2) / max(np.mean((dec - moved) ** 2), 1e-9))
+    data, info = ginsu.from_recording(tmpl, pcm, src.rate, 'track', cyl, src.min_rpm)
+    g2 = ginsu.Ginsu(data, b.e)
+    cycles = np.diff(g2.grain_pos) / (120 / np.array([g2.rpm_at(x) for x in (g2.grain_pos[:-1] + g2.grain_pos[1:]) / 2])
+                                      * g2.rate)
+    check(snr > 35 and len(data) % 16 == 0 and g2.version == tmpl.version and g2.rate == tmpl.rate
+          and abs(g2.samples / g2.rate - len(pcm) / src.rate) < 0.01
+          and abs(g2.max_rpm / src.max_rpm - 1) < 0.05 and abs(g2.grains / src.grains - 1) < 0.05
+          and abs(cycles.mean() - 1) < 0.01,
+          f'new engine sound from a recording: EA-XAS {snr:.0f} dB, {cyl} cylinders, {g2.min_rpm:.0f} - '
+          f'{g2.max_rpm:.0f} RPM (the recording {src.min_rpm:.0f} - {src.max_rpm:.0f}), {g2.grains} grains of one '
+          f'engine cycle ({src.grains}), no clear pitch {info["weak"] * 100:.0f} %')
 
 
 def test_fbx(path, root):
@@ -720,6 +745,18 @@ def test_shading(pc_root):
           and cabin and cabin[0].light_colours[0] == (0.0, 0.0, 0.0),
           'glass: windows see-through (OpacityMin 0.09), tail-light glass tints red; lamps light in their '
           'material colours, the cabin has no brake colour')
+    # which map channels each shader reads (from the game's pixel programs): the cabin / badge Emissive shader
+    # reads only G of its 'normal' map, the callipers take roughness from specular A and their cut-out from
+    # normal A, no body shader takes specular A (no metalness)
+    calliper = [m for m in meshes if m.shader == 'VehicleNFS13_Wheel_Alpha1bit_Normalmap']
+    body = [m for m in meshes if m.shader == 'VehicleNFS13_Body_Textured_NormalMap_NoDamage']
+    check(cabin and all(m.normal_mode == 1 and m.spec_alpha == 0 for m in cabin)
+          and calliper and all((m.normal_mode, m.spec_alpha) == (4, 3) for m in calliper)
+          and body and all((m.normal_mode, m.spec_alpha) == (0, 0) for m in body)
+          and mesh.vehicle_channels('VehicleNFS13_Body_Alpha1bit_NormalMap_Textured_NoDamage') == (0, 1)
+          and mesh.vehicle_channels('VehicleNFS13_Body', 'PS3') == (0, 2),
+          'shader channels: Emissive roughness from G, calliper roughness / cut-out from specular / normal A, '
+          'badges with a mirror coat in specular A')
     unit = os.path.join(pc_root, 'HAWAII', 'TRK_UNIT1.BNDL')
     b = Bundle.open(unit)
     modes = set()

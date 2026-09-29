@@ -61,6 +61,8 @@ uniform int uUseNormal;
 uniform int uUseSpec;
 uniform int uPaint;
 uniform int uSpecMode;
+uniform int uSpecAlpha;
+uniform int uNormalMode;
 uniform vec3 uTint;
 uniform vec3 uSpecColour;
 uniform float uRough;
@@ -82,8 +84,8 @@ vec3 aces(vec3 x) {
 }
 void main() {
     vec4 c = uUseTex == 1 ? texture(uTex, vUV) : vec4(uTint, 1.0);
-    if (uUseTex == 1 && uAlphaTest == 1 && c.a < 0.5)
-        discard;
+    if (uAlphaTest == 1 && (uNormalMode == 4 ? texture(uNormal, vUV).a : uUseTex == 1 ? c.a : 1.0) < 0.5)
+        discard;                                        // the cut-out (normal map A on two wheel / badge shaders)
     vec3 n = normalize(vN);
     if (uShaded == 0) {
         float l = 0.35 + 0.65 * abs(n.z);
@@ -104,21 +106,29 @@ void main() {
     float rough = uRough;
     if (uUseNormal == 1) {
         vec4 nm = texture(uNormal, vUV);
-        vec3 t = normalize(vT.xyz - n * dot(n, vT.xyz));
-        vec3 b = cross(n, t) * vT.w;
-        vec3 tn = nm.rgb * 2.0 - 1.0;
-        tn.y *= uFlipY;
-        n = normalize(t * tn.x + b * tn.y + n * max(tn.z, 0.05));
-        if (uSpecMode == 0)
-            rough = nm.a;
+        if (uNormalMode == 0 || uNormalMode >= 3) {     // 1, 2: the map holds only a roughness
+            vec3 t = normalize(vT.xyz - n * dot(n, vT.xyz));
+            vec3 b = cross(n, t) * vT.w;
+            vec3 tn = nm.rgb * 2.0 - 1.0;
+            tn.y *= uFlipY;
+            n = normalize(t * tn.x + b * tn.y + n * max(tn.z, 0.05));
+        }
+        if (uSpecMode == 0 && uNormalMode < 3)
+            rough = uNormalMode == 1 ? nm.g : nm.a;
     }
     vec3 f0 = uSpecColour;
     float metal = 0.0;
+    float coat = 0.0;
     if (uUseSpec == 1) {
         vec4 s = texture(uSpec, vUV);
         if (uSpecMode == 0) {
             f0 = pow(s.rgb, vec3(2.2));
-            metal = s.a;
+            if (uSpecAlpha == 1)
+                coat = s.a;                             // mirror coat (the Alpha badge / wheel shaders)
+            else if (uSpecAlpha == 2)
+                metal = s.a;
+            else if (uSpecAlpha == 3)
+                rough = s.a;
         } else if (uSpecMode == 1) {
             f0 = vec3(0.02 + 0.2 * s.r);
             rough = 1.0 - 0.85 * s.g;
@@ -144,6 +154,10 @@ void main() {
     vec3 fr = f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - nv, 5.0);
     vec3 env = mix(sky(r), (sky(n) + sky(r)) * 0.5, rough);
     col += (albedo * (1.0 - metal) * sky(n) * 0.9 + env * fr * (1.0 - rough * 0.6)) * ao;
+    if (coat > 0.0) {                                   // as the game: albedo * (1 - R), the reflection * R
+        float rc = coat + (1.0 - coat) * pow(1.0 - nv, 5.0);
+        col = col * (1.0 - rc) + sky(r) * rc * ao;
+    }
     if (uPaint == 1) {                                  // clear coat
         float cf = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
         float cd = 0.0025 / (PI * pow(nh * nh * (0.0025 - 1.0) + 1.0, 2.0));
@@ -335,7 +349,8 @@ class Viewer:
             nrm = m.normals()
             uv = m.uv if m.uv is not None else np.zeros((len(m.pos), 2), np.float32)
             material = getattr(m, 'normal_tex', None) or getattr(m, 'spec_tex', None) or getattr(m, 'paint', False)
-            tan = m.tangents() if getattr(m, 'normal_tex', None) else np.tile(np.float32([1, 0, 0, 1]), (len(m.pos), 1))
+            tan = (m.tangents() if getattr(m, 'normal_tex', None) and getattr(m, 'normal_mode', 0) in (0, 3, 4)
+                   else np.tile(np.float32([1, 0, 0, 1]), (len(m.pos), 1)))
             ao = m.ao if getattr(m, 'ao', None) is not None else np.ones(len(m.pos), np.float32)
             uv2 = getattr(m, 'lights_uv', None)
             uv2 = uv2 if uv2 is not None else uv
@@ -358,6 +373,7 @@ class Viewer:
                    'f0': getattr(m, 'spec', None) or (0.04, 0.04, 0.04),
                    'rough': getattr(m, 'rough', None) or (0.25 if getattr(m, 'paint', False) else 0.55),
                    'paint': bool(getattr(m, 'paint', False)), 'spec_mode': int(getattr(m, 'spec_mode', 0)),
+                   'spec_alpha': int(getattr(m, 'spec_alpha', 0)), 'normal_mode': int(getattr(m, 'normal_mode', 0)),
                    'lit': not (getattr(m, 'wire', False) or getattr(m, 'overlay', False)), 'has': bool(material),
                    'blend': int(getattr(m, 'blend', 0)), 'opacity': float(getattr(m, 'opacity', 1.0)),
                    'glass': tuple(getattr(m, 'glass_tint', None) or (0.012, 0.014, 0.016)),
@@ -400,7 +416,8 @@ class Viewer:
         loc = {n: GL.glGetUniformLocation(self.prog, n) for n in (
             'uTex', 'uNormal', 'uSpec', 'uUseTex', 'uTint', 'uAlphaTest', 'uShaded', 'uUseNormal', 'uUseSpec',
             'uPaint', 'uSpecColour', 'uRough', 'uPaintColour', 'uUp', 'uFlipY', 'uSpecMode', 'uLights', 'uUseLights',
-            'uLightsOn', 'uBlend', 'uOpacity', 'uGlassTint', 'uLightColours', 'uLightsEmit')}
+            'uLightsOn', 'uBlend', 'uOpacity', 'uGlassTint', 'uLightColours', 'uLightsEmit', 'uSpecAlpha',
+            'uNormalMode')}
         GL.glUniform1i(loc['uTex'], 0)
         GL.glUniform1i(loc['uNormal'], 1)
         GL.glUniform1i(loc['uSpec'], 2)
@@ -457,6 +474,8 @@ class Viewer:
             GL.glUniform3f(loc['uSpecColour'], *mat['f0'])
             GL.glUniform1f(loc['uRough'], mat['rough'])
             GL.glUniform1i(loc['uSpecMode'], mat['spec_mode'])
+            GL.glUniform1i(loc['uSpecAlpha'], mat['spec_alpha'])
+            GL.glUniform1i(loc['uNormalMode'], mat['normal_mode'])
             lights = shaded and mat['lights'] and any(self.lights_on)
             GL.glUniform1i(loc['uUseLights'], 1 if lights else 0)
             if lights:
@@ -464,7 +483,12 @@ class Viewer:
                 lc[:, :3] = mat['light_colours']
                 GL.glUniformMatrix4fv(loc['uLightColours'], 1, GL.GL_FALSE, lc)
                 GL.glUniform1i(loc['uLightsEmit'], 1 if mat['emit'] else 0)
-            for unit, t in ((0, tex if use else self.white), (1, mat['normal'] if maps and mat['normal'] else
+            cut = mat['normal_mode'] == 4 and mat['normal'] and alpha and not self.wire and not wire
+            if cut and not (maps and mat['normal']):
+                GL.glUniform1i(loc['uNormalMode'], 4)
+            elif not cut and mat['normal_mode'] == 4:
+                GL.glUniform1i(loc['uNormalMode'], 3)
+            for unit, t in ((0, tex if use else self.white), (1, mat['normal'] if (maps or cut) and mat['normal'] else
                                                                self.white), (2, mat['spec'] if maps and mat['spec']
                                                                              else self.white),
                             (3, mat['lights'] if lights else self.white)):
