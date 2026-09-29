@@ -1179,6 +1179,8 @@ class ExplorerUI:
             self.action_export(d, r, 'wav')
         if r.type == 0x201 and imgui.menu_item('As CSV (translations)...', '', False)[0]:
             self.action_export(d, r, 'csv')
+        if r.type == 0x105 and imgui.menu_item('As CSV (vehicle list)...', '', False)[0]:
+            self.action_export(d, r, 'csv')
         if imgui.menu_item('As resource file (.bres)...', '', False)[0]:
             self.action_export(d, r, 'bres')
         if imgui.begin_menu('Raw chunk (.bin)'):

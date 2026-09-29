@@ -108,10 +108,17 @@ def test_strings(path):
     r = next(r for r in b.resources if r.type == 0x201)
     t = StringTable.read(r, b.e)
     check(t.build(b.e) == r.data(0), f'string table rebuild identical ({len(t.entries)} strings)')
-    csv = t.to_csv().replace(f'{t.entries[0][0]:08X},', f'{t.entries[0][0]:08X},HELLO ', 1)
+    csv = t.to_csv().replace(f'0x{t.entries[0][0]:08X},', f'0x{t.entries[0][0]:08X},HELLO ', 1)
     ch, add, unk = ops.strings_from_csv(b, r, csv)
     t2 = StringTable.read(r, b.e)
     check(ch == 1 and t2.entries[0][1].startswith('HELLO '), 'CSV import changes one string')
+    # what Excel saves with a Hungarian / German locale: ';' separators, a BOM, ids without leading zeros
+    sid, old = t.entries[1]
+    quoted = ('SZIA; ' + old).replace('"', '""')
+    excel = chr(0xFEFF) + 'id;text' + chr(13) + chr(10) + f'{sid:X};"{quoted}"' + chr(13) + chr(10)
+    ch, add, unk = ops.strings_from_csv(b, r, excel)
+    t3 = dict(StringTable.read(r, b.e).entries)
+    check(ch == 1 and t3[sid] == f'SZIA; {old}', 'semicolon CSV (Excel, decimal-comma locales) imports')
 
 
 def test_sounds(path):
@@ -262,6 +269,34 @@ def test_materials(path):
           'material constant edit round-trips')
 
 
+def test_vehiclelist(path):
+    """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
+    duplicated car) saves and reads back."""
+    from bndlx import vehiclelist as VL
+    b = Bundle.open(path)
+    r = next(x for x in b.resources if x.type == VL.T_VEHICLELIST)
+    v = VL.read(r, b.e)
+    check(v.build() == bytes(r.data(0)), f'vehicle list rebuilds identical ({len(v.rows)} vehicles, '
+                                         f'{len(v.makers)} manufacturers, {b.platform})')
+    txt = ops.vehicles_to_csv(b, r)
+    names = ops.game_strings(path)
+    first = names.get(v.value(v.rows[0], 'name'), '')
+    check(first and first in txt, f'CSV names the cars ({first})')
+    lines = txt.splitlines()
+    cols = lines[0].split(',')
+    row = lines[1].split(',')
+    row[cols.index('top_speed_2')] = '250.5'
+    lines[1] = ','.join(row)
+    lines.insert(2, lines[1])                                  # a duplicated car
+    ops.vehicles_from_csv(b, r, '\n'.join(lines) + '\n')
+    out = os.path.join(TMP, 'vl.bndl')
+    b.save(out)
+    v2 = VL.read(Bundle.open(out).find(r.id), b.e)
+    check(len(v2.rows) == len(v.rows) + 1 and v2.value(v2.rows[0], 'top_speed_2') == 250.5
+          and v2.rows[1] == v2.rows[0] and v2.rows[2:] == v.rows[1:] and v2.makers == v.makers,
+          'vehicle list CSV edit saves and reads back')
+
+
 def main():
     if PC:
         g = os.path.join(PC, 'GLOBALEFFECTS.BNDL')
@@ -275,6 +310,7 @@ def main():
         test_prefetch(PC)
         test_models(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_materials(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
+        test_vehiclelist(os.path.join(PC, 'VEHICLES', 'VEHICLELIST.BNDL'))
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
@@ -284,6 +320,7 @@ def main():
         test_sounds(os.path.join(PS3, 'UI', 'SCREENS2', 'BLACKLISTHUD.BNDL'))
         test_models(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
         test_materials(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
+        test_vehiclelist(os.path.join(PS3, 'VEHICLES', 'VEHICLELIST.BNDL'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2

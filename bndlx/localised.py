@@ -64,7 +64,7 @@ class StringTable:
         for sid, text in self.entries:
             if sid not in done:
                 done.add(sid)
-                w.writerow([f'{sid:08X}', text])
+                w.writerow([f'0x{sid:08X}', text])          # 0x: Excel would read 000185E8 as a number
         return buf.getvalue()
 
     def update_from_csv(self, text, add_new=False):
@@ -74,7 +74,10 @@ class StringTable:
             current.setdefault(sid, t)
         changed = added = 0
         unknown = []
-        for row in csv.reader(io.StringIO(text)):
+        text = text.lstrip(chr(0xFEFF))
+        first = text.split(chr(10), 1)[0]
+        delim = ';' if first.count(';') > first.count(',') else ','      # Excel with a decimal-comma locale
+        for row in csv.reader(io.StringIO(text), delimiter=delim):
             if len(row) < 2 or row[0].strip().lower() == 'id':
                 continue
             try:

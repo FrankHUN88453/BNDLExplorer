@@ -5,9 +5,10 @@ import struct
 
 import numpy as np
 
-from . import colourcube, convert, eal3, raster, resfile, textfile
+from . import colourcube, convert, eal3, raster, resfile, textfile, vehiclelist
 from .localised import StringTable
 from .restypes import T_CUBE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
+from .vehiclelist import T_VEHICLELIST
 
 T_WAVE = 0x81
 
@@ -153,6 +154,39 @@ def game_root(bundle_path):
     return None
 
 
+_STRINGS = {}
+
+
+def game_strings(bundle_path, language='0001'):
+    """{string id: text} of the game's UI/LANGUAGE/<language>.BNDL (0001 = English), for showing names."""
+    root = game_root(bundle_path)
+    path = os.path.join(root, 'UI', 'LANGUAGE', language + '.BNDL') if root else None
+    if path not in _STRINGS:
+        out = {}
+        if path and os.path.isfile(path):
+            try:
+                from .bundle import Bundle
+                lb = Bundle.open(path)
+                for r in lb.resources:
+                    if r.type == T_STRINGS:
+                        out.update(StringTable.read(r, lb.e).entries)
+            except Exception:
+                pass
+        _STRINGS[path] = out
+    return _STRINGS[path]
+
+
+def vehicles_to_csv(b, res):
+    return vehiclelist.read(res, b.e).to_csv(game_strings(b.path))
+
+
+def vehicles_from_csv(b, res, text):
+    v = vehiclelist.read(res, b.e)
+    n = v.update_from_csv(text)
+    res.set_data(0, v.build())
+    return n
+
+
 def find_stream_file(bundle_path, rel=None, name=None):
     """External .SPS file of a sound: `rel` = path relative to the game folder (stream references), or
     `name` = file name looked up anywhere in the game folder (prefetched streams: <GameChanger id>.SPS)."""
@@ -288,6 +322,9 @@ def export_native(b, res, folder, texture_format='.dds'):
     elif t == T_CUBE:
         path = base + '.png'
         save_png(cube_strip(cube_lut(b, res)), path)
+    elif t == T_VEHICLELIST:
+        path = base + '.csv'
+        write_file(path, vehicles_to_csv(b, res).encode('utf-8-sig'))
     elif t == T_WAVE and eal3.wave_fields(res.data(0), b.e)['kind'] == 'memory':
         path = base + '.wav'
         audio, rate, _, _ = wave_audio(b, res)
@@ -332,7 +369,7 @@ def extract_all(b, folder, progress=None, texture_format='.dds'):
         os.makedirs(sub, exist_ok=True)
         export_bres(b, r, os.path.join(sub, id_text(r.id) + '.bres'))
         written += 1
-        if r.type in (T_TEXTURE, T_TEXT, T_STRINGS, T_CUBE, T_WAVE):
+        if r.type in (T_TEXTURE, T_TEXT, T_STRINGS, T_CUBE, T_WAVE, T_VEHICLELIST):
             try:
                 export_native(b, r, sub, texture_format)
             except Exception:
@@ -342,7 +379,7 @@ def extract_all(b, folder, progress=None, texture_format='.dds'):
 
 def import_folder(b, folder, types, progress=None):
     """Add / replace resources from a folder: .bres files, and files named <id>.dds/.png/... (textures),
-    <id>.txt (text files), <id>.csv (strings), <id>.png (colour cubes). Returns (changes, errors);
+    <id>.txt (text files), <id>.csv (strings, vehicle list), <id>.png (colour cubes). Returns (changes, errors);
     changes = [(id, 'added'|'replaced', path)]."""
     files = []
     for dp, _, fn in os.walk(folder):
@@ -381,6 +418,9 @@ def import_folder(b, folder, types, progress=None):
                     strings_from_csv(b, r, f.read())
             elif r.type == T_WAVE and ext in eal3.AUDIO_EXT:
                 replace_wave(b, r, path)
+            elif r.type == T_VEHICLELIST and ext == '.csv':
+                with open(path, encoding='utf-8-sig') as f:
+                    vehicles_from_csv(b, r, f.read())
             else:
                 continue
             changes.append((rid, 'replaced', path))
@@ -412,6 +452,9 @@ def text_summary(b, res, types):
         if t == T_STRINGS:
             n = struct.unpack_from(b.e + 'I', res.data(0), 4)[0]
             return f'{n} strings'
+        if t == T_VEHICLELIST:
+            v = vehiclelist.read(res, b.e)
+            return f'{len(v.rows)} vehicles, {len(v.makers)} manufacturers'
         if t == T_WAVE:
             f = eal3.wave_fields(res.data(0), b.e)
             s = f'{f["duration"] / 1000:.2f} s, {f["channels"]} ch'

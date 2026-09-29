@@ -15,6 +15,7 @@ import numpy as np
 from imgui_bundle import hello_imgui, imgui, immvision
 
 from . import convert, dragdrop, eal3, filedialog, genesys, gltf, mesh, ops, raster, resfile, textfile, theme
+from . import vehiclelist as VL
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -25,7 +26,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.5'
+VERSION = '0.6'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -160,6 +161,7 @@ class App(ExplorerUI):
         self.mesh_lib = mesh.Library()
         self.viewer = None
         self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0}
+        self.vlist = {'key': None, 'obj': None, 'sel': 0, 'msel': 0, 'filter': '', 'error': None}
         self.folder_cache = {}
         self.addr_edit = None
         self.addr_focus = False
@@ -480,6 +482,10 @@ class App(ExplorerUI):
                 p = filedialog.save_file('Export text', base + '.txt', filedialog.TEXT, 'txt')
                 if p:
                     ops.write_file(p, textfile.read(res, d.b.e))
+            elif kind == 'csv' and res.type == VL.T_VEHICLELIST:
+                p = filedialog.save_file('Export vehicle list as CSV', base + '.csv', filedialog.CSV, 'csv')
+                if p:
+                    ops.write_file(p, ops.vehicles_to_csv(d.b, res).encode('utf-8-sig'))
             elif kind == 'csv':
                 p = filedialog.save_file('Export strings as CSV', base + '.csv', filedialog.CSV, 'csv')
                 if p:
@@ -537,6 +543,10 @@ class App(ExplorerUI):
             elif res.type == T_STRINGS and ext == '.csv':
                 ch, add, unk = ops.strings_from_csv(d.b, res, data.decode('utf-8-sig'), options.get('add_new', False))
                 msg = f'{ch} string(s) changed, {add} added' + (f', {len(unk)} unknown id(s) skipped' if unk else '') + '.'
+            elif res.type == VL.T_VEHICLELIST and ext == '.csv':
+                nv, nm = ops.vehicles_from_csv(d.b, res, data.decode('utf-8-sig'))
+                self.vlist['key'] = None
+                msg = f'Vehicle list {res.id:#x} replaced: {nv} vehicles, {nm} manufacturers.'
             elif res.type == 0x81 and ext in eal3.AUDIO_EXT:
                 desc = ops.replace_wave(d.b, res, path=path, rate=options.get('rate'), channels=options.get('channels'),
                                         quality=options.get('quality', 0.2), bundle_path=d.path)
@@ -563,7 +573,7 @@ class App(ExplorerUI):
         if res is None:
             return
         flt = {T_TEXTURE: filedialog.IMAGES, T_CUBE: filedialog.PNG, T_TEXT: filedialog.TEXT,
-               T_STRINGS: filedialog.CSV, 0x81: filedialog.AUDIO}.get(res.type, filedialog.RES)
+               T_STRINGS: filedialog.CSV, 0x81: filedialog.AUDIO, VL.T_VEHICLELIST: filedialog.CSV}.get(res.type, filedialog.RES)
         p = filedialog.open_file(f'Replace {type_name(res.type)} {res.id:#x}', self.cfg.get('last_import', ''), flt)
         if not p:
             return
@@ -1317,6 +1327,8 @@ class App(ExplorerUI):
             self.model_view(d, r)
         elif t == 0x02:
             self.material_view(d, r)
+        elif t == VL.T_VEHICLELIST:
+            self.vehicle_list_view(d, r)
         else:
             imgui.text_wrapped(f'{type_name(t)}: no viewer for this type yet. The Imports and Hex tabs show its data; '
                                'Export / Replace work for every type (.bres or raw chunks).')
@@ -1723,6 +1735,269 @@ class App(ExplorerUI):
                 if ch and not d.b.truncated:
                     self.write(d, r, off, d.b.e + '4f', *nv)
             imgui.end_table()
+
+    # -- vehicle list -----------------------------------------------------------------------------------------
+    def vehicle_list_view(self, d, r):
+        st = self.vlist
+        key = (d.uid, r.id, id(r.data(0)))
+        if st['key'] != key:
+            st['key'] = key
+            try:
+                st['obj'], st['error'] = VL.read(r, d.b.e), None
+            except (VL.VehicleListError, struct.error) as ex:
+                st['obj'], st['error'] = None, str(ex)
+        if st['obj'] is None:
+            imgui.text_wrapped(f'Cannot read this vehicle list: {st["error"]}')
+            return
+        v = st['obj']
+        strings = ops.game_strings(d.path)
+        ro = d.b.truncated
+
+        def commit(desc=None):
+            if desc:
+                d.checkpoint(desc, [r.id])
+            else:
+                d.edit_checkpoint(r.id)
+            r.set_data(0, v.build())
+            st['key'] = (d.uid, r.id, id(r.data(0)))
+            d.summary.pop(r.id, None)
+            d.b.modified = True
+
+        def maker_name(mid):
+            m = v.maker_by_id(mid)
+            return strings.get(v.value(m, 'name', v.maker_fields), f'{mid}') if m is not None else f'{mid}'
+
+        imgui.text(f'{len(v.rows)} vehicles, {len(v.makers)} manufacturers')
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(f'VehicleList version {v.version}; '
+                              + ('names from UI\\LANGUAGE\\0001.BNDL' if strings else 'the game strings were not found'))
+        imgui.same_line()
+        if imgui.button('Export CSV'):
+            self.action_export(d, r, 'csv')
+        imgui.same_line()
+        if imgui.button('Import CSV') and not ro:
+            p = filedialog.open_file('Import vehicle list (CSV)', self.cfg.get('last_import', ''), filedialog.CSV)
+            if p:
+                self.replace_from_file(d, r, p)
+        if imgui.begin_tab_bar('vltabs'):
+            if imgui.begin_tab_item('Vehicles')[0]:
+                self.vehicle_rows(d, r, v, strings, commit, maker_name, ro)
+                imgui.end_tab_item()
+            if imgui.begin_tab_item('Manufacturers')[0]:
+                self.maker_rows(d, r, v, strings, commit, ro)
+                imgui.end_tab_item()
+            imgui.end_tab_bar()
+
+    def record_buttons(self, recs, sel_key, commit, what, ro):
+        """Duplicate / Delete / Up / Down for a record list; returns nothing, edits `recs` in place."""
+        st = self.vlist
+        i = st[sel_key]
+        ok = 0 <= i < len(recs) and not ro
+        imgui.begin_disabled(not ok)
+        if imgui.button(f'Duplicate##{sel_key}'):
+            recs.insert(i + 1, bytearray(recs[i]))
+            st[sel_key] = i + 1
+            commit(f'duplicate {what}')
+        imgui.same_line()
+        if imgui.button(f'Delete##{sel_key}'):
+            del recs[i]
+            st[sel_key] = min(i, len(recs) - 1)
+            commit(f'delete {what}')
+        imgui.same_line()
+        imgui.begin_disabled(i <= 0)
+        if imgui.arrow_button(f'##up{sel_key}', imgui.Dir.up):
+            recs[i - 1], recs[i] = recs[i], recs[i - 1]
+            st[sel_key] = i - 1
+            commit(f'move {what}')
+        imgui.end_disabled()
+        imgui.same_line()
+        imgui.begin_disabled(i >= len(recs) - 1)
+        if imgui.arrow_button(f'##dn{sel_key}', imgui.Dir.down):
+            recs[i + 1], recs[i] = recs[i], recs[i + 1]
+            st[sel_key] = i + 1
+            commit(f'move {what}')
+        imgui.end_disabled()
+        imgui.end_disabled()
+
+    def vehicle_rows(self, d, r, v, strings, commit, maker_name, ro):
+        st = self.vlist
+        imgui.set_next_item_width(260)
+        _, st['filter'] = imgui.input_text_with_hint('##vlfilter', 'search name, id or manufacturer', st['filter'])
+        imgui.same_line()
+        self.record_buttons(v.rows, 'sel', commit, 'vehicle', ro)
+        f = st['filter'].lower()
+        shown = []
+        for i, rec in enumerate(v.rows):
+            nm = strings.get(v.value(rec, 'name'), '')
+            mk = maker_name(v.value(rec, 'manufacturer'))
+            if not f or f in nm.lower() or f in mk.lower() or f in str(v.value(rec, 'id')):
+                shown.append((i, rec, nm, mk))
+        cols = [('#', 28), ('Id', 62), ('Name', 0), ('Manufacturer', 104), ('mph', 34), ('0-60', 32), ('hp', 36),
+                ('Year', 36)]
+        flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.scroll_y
+                 | imgui.TableFlags_.resizable)
+        avail = imgui.get_content_region_avail().y
+        if imgui.begin_table('vlrows', len(cols), flags, imgui.ImVec2(0, max(120, avail * 0.45))):
+            imgui.table_setup_scroll_freeze(0, 1)
+            for name, w in cols:
+                imgui.table_setup_column(name, imgui.TableColumnFlags_.width_fixed if w else imgui.TableColumnFlags_.width_stretch, w)
+            imgui.table_headers_row()
+            clipper = imgui.ListClipper()
+            clipper.begin(len(shown))
+            while clipper.step():
+                for j in range(clipper.display_start, clipper.display_end):
+                    i, rec, nm, mk = shown[j]
+                    imgui.table_next_row()
+                    imgui.table_next_column()
+                    if imgui.selectable(f'{i}##vr{i}', st['sel'] == i, imgui.SelectableFlags_.span_all_columns)[0]:
+                        st['sel'] = i
+                    imgui.table_next_column()
+                    imgui.text(str(v.value(rec, 'id')))
+                    imgui.table_next_column()
+                    imgui.text(nm or '-')
+                    imgui.table_next_column()
+                    imgui.text(mk)
+                    imgui.table_next_column()
+                    imgui.text(f'{v.value(rec, "top_speed_2"):.0f}')
+                    imgui.table_next_column()
+                    imgui.text(f'{v.value(rec, "zero_to_60"):.1f}')
+                    imgui.table_next_column()
+                    imgui.text(str(v.value(rec, 'power')))
+                    imgui.table_next_column()
+                    imgui.text(str(v.value(rec, 'year')))
+            imgui.end_table()
+        i = st['sel']
+        if 0 <= i < len(v.rows):
+            imgui.begin_child('vldetail', imgui.ImVec2(0, 0))
+            self.record_editor(d, v, v.rows[i], v.fields, strings, commit, f'v{i}', ro)
+            imgui.end_child()
+
+    def maker_rows(self, d, r, v, strings, commit, ro):
+        st = self.vlist
+        self.record_buttons(v.makers, 'msel', commit, 'manufacturer', ro)
+        flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.scroll_y
+                 | imgui.TableFlags_.resizable)
+        avail = imgui.get_content_region_avail().y
+        if imgui.begin_table('vlmakers', 4, flags, imgui.ImVec2(0, max(120, avail * 0.5))):
+            imgui.table_setup_scroll_freeze(0, 1)
+            imgui.table_setup_column('#', imgui.TableColumnFlags_.width_fixed, 34)
+            imgui.table_setup_column('Id', imgui.TableColumnFlags_.width_fixed, 70)
+            imgui.table_setup_column('Name', imgui.TableColumnFlags_.width_stretch)
+            imgui.table_setup_column('Vehicles', imgui.TableColumnFlags_.width_fixed, 60)
+            imgui.table_headers_row()
+            for i, m in enumerate(v.makers):
+                mid = v.value(m, 'id', v.maker_fields)
+                imgui.table_next_row()
+                imgui.table_next_column()
+                if imgui.selectable(f'{i}##mr{i}', st['msel'] == i, imgui.SelectableFlags_.span_all_columns)[0]:
+                    st['msel'] = i
+                imgui.table_next_column()
+                imgui.text(str(mid))
+                imgui.table_next_column()
+                imgui.text(strings.get(v.value(m, 'name', v.maker_fields), '-'))
+                imgui.table_next_column()
+                imgui.text(str(sum(1 for rec in v.rows if v.value(rec, 'manufacturer') == mid)))
+            imgui.end_table()
+        i = st['msel']
+        if 0 <= i < len(v.makers):
+            imgui.begin_child('vlmdetail', imgui.ImVec2(0, 0))
+            self.record_editor(d, v, v.makers[i], v.maker_fields, strings, commit, f'm{i}', ro)
+            imgui.end_child()
+
+    def record_editor(self, d, v, rec, fields, strings, commit, key, ro):
+        """Every field of one record: an editor, and what the number refers to."""
+        flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.resizable
+        if not imgui.begin_table(f'vlrec{key}', 3, flags):
+            return
+        imgui.table_setup_column('Field', imgui.TableColumnFlags_.width_fixed, 200)
+        imgui.table_setup_column('Value', imgui.TableColumnFlags_.width_fixed, 120)
+        imgui.table_setup_column('Refers to', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_headers_row()
+        for f in fields:
+            off, code, name, label, kind = f
+            val = v.get(rec, f)
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.text(label)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip(f'{name}, offset {off:#04x}')
+            imgui.table_next_column()
+            imgui.set_next_item_width(-1)
+            fid = f'##{key}{off}'
+            new = None
+            if code == 'f':
+                ch, nv = imgui.input_float(fid, val, 0, 0, '%.6g', imgui.InputTextFlags_.enter_returns_true)
+                if ch:
+                    new = nv
+            elif kind == 'hex':
+                ch, txt = imgui.input_text(fid, f'0x{val:x}', imgui.InputTextFlags_.enter_returns_true)
+                if ch:
+                    try:
+                        new = int(txt, 0)
+                    except ValueError:
+                        self.status = f'Not a number: {txt}'
+            elif kind == 'maker':
+                cur = v.maker_by_id(val)
+                cur_name = strings.get(v.value(cur, 'name', v.maker_fields), str(val)) if cur is not None else str(val)
+                if imgui.begin_combo(fid, cur_name):
+                    for m in v.makers:
+                        mid = v.value(m, 'id', v.maker_fields)
+                        if imgui.selectable(f'{strings.get(v.value(m, "name", v.maker_fields), mid)}##mk{mid}', mid == val)[0]:
+                            new = mid
+                    imgui.end_combo()
+            else:
+                ch, txt = imgui.input_text(fid, str(val), imgui.InputTextFlags_.enter_returns_true | imgui.InputTextFlags_.chars_decimal)
+                if ch:
+                    try:
+                        new = int(txt, 0)
+                    except ValueError:
+                        self.status = f'Not a number: {txt}'
+            if new is not None and new != val and not ro:
+                try:
+                    v.set(rec, f, new)
+                    commit()
+                    self.status = f'{label} set to {new} (Ctrl+Z to undo).'
+                except struct.error as ex:
+                    self.status = f'Value out of range: {ex}'
+            imgui.table_next_column()
+            if kind == 'string' and val:
+                txt = strings.get(val)
+                if txt is None:
+                    imgui.text_disabled('(not in the game strings)')
+                else:
+                    one = ' '.join(txt.split())
+                    imgui.text(one[:90] + ('...' if len(one) > 90 else ''))
+                    if len(one) > 90 and imgui.is_item_hovered():
+                        imgui.push_text_wrap_pos(600)
+                        imgui.set_tooltip(txt)
+                        imgui.pop_text_wrap_pos()
+            elif kind == 'ref' and val:
+                rid = (0x01000000 << 32) | val
+                od, orr = self.where(rid)
+                full = self.names.exact.get(rid)
+                self.locate(rid, f'{key}{off}')
+                imgui.same_line()
+                if orr is not None:
+                    imgui.text(self.display_name(od, orr)[0])
+                elif full:
+                    imgui.text(N.short(full))
+                else:
+                    paths = self.names.where.get(rid)
+                    imgui.text_disabled(f'{ops.id_text(rid)}' + (f' in {os.path.basename(paths[0])}' if paths else ''))
+            elif kind == 'vehicle' and val:
+                root = ops.game_root(d.path)
+                found = None
+                for suffix in ('HI', 'MS', 'LO'):
+                    p = os.path.join(root or '', 'VEHICLES', f'VEH_{val}_{suffix}.BNDL')
+                    if root and os.path.isfile(p):
+                        found = p
+                        break
+                if found:
+                    if imgui.small_button(f'Open {os.path.basename(found)}##{key}{off}'):
+                        self.open_path(found)
+                else:
+                    imgui.text_disabled('no VEH bundle')
+        imgui.end_table()
 
     def export_glb(self, d, res, path):
         lod = self.model['lod'] if self.model['key'] and self.model['key'][1] == res.id else 0
@@ -2387,6 +2662,10 @@ found in the open bundles and in the game's global bundles (SHADERS, GLOBALMATER
 Materials: the shader, the textures by slot (Diffuse, Normal, Specular, ...) with thumbnails, and the shader
 constants by name (PbrMaterialDiffuseColour, ...), editable. Go jumps to an open resource; Open opens the
 bundle that has it (known after Find names).
+
+Vehicle list (VEHICLES\\VEHICLELIST): every car with its name, manufacturer, speed, power, ratings, ...; select a
+car to edit its fields; Duplicate / Delete / arrows change the rows. Export / Import CSV (Excel with ';' and
+decimal commas works too).
 
 Sounds (Wave): Play / Stop and a waveform in the preview; Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
 AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound

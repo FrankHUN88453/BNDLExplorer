@@ -79,6 +79,7 @@ that happens to match a model id would also "match" its renderables; such names 
 | GenesysType | schema: fields, types, offsets, flags; enum values | .bres |
 | TextFile | text editor (JSON / XML) | .txt |
 | LocalisedText (UI\LANGUAGE) | searchable string table, edit in place | CSV (`id,text`) for translations |
+| VehicleList (VEHICLES\VEHICLELIST) | every car and manufacturer with names from the game's strings; edit any field, duplicate / delete / reorder cars | CSV (one row per car, then the manufacturers) |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
 | Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) with the diffuse textures, opens in Blender |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
@@ -127,6 +128,25 @@ the inverted CRC32 of the constant's name in the shader (`~crc32("PbrMaterialDif
 Constants can be edited in place (drag or type the numbers). Every texture has **Go** (select it, when its
 bundle is open) or **Open** (open the bundle that has it: **Find names** also records where each resource
 lives).
+
+## Vehicle list
+
+`VEHICLES\VEHICLELIST.BNDL` holds the list of every car of the game (PC: 110 rows, PS3 prototype: 188) and of
+the manufacturers. The preview shows them as a table with the names from the game's own strings
+(`UI\LANGUAGE\0001.BNDL`); select a car to edit its fields: name / description string ids, manufacturer
+(a list), images, content pack, top speed, 0-60 time, power, redline, year, the six 0-10 ratings of the car
+select screen, flags (1 police, 8 traffic, 18 player cars). Image, sound and Genesys fields link to their
+resources (**Go** / **Open**); the vehicle id opens the car's `VEH_<id>` bundle. **Duplicate**, **Delete**
+and the arrows change the rows. The PC retail list (version 1017) and the PS3 prototype list (1016) have
+different layouts; both are supported.
+
+**Export CSV** writes one row per car (plus a read-only `(name)` column), a blank line, then the
+manufacturers; **Import CSV** (or dropping the CSV on the resource) replaces the list with the file's rows, so
+cars can be added, removed and reordered in a spreadsheet.
+
+CSV files from Excel work with any regional setting: `;` separators and decimal commas (Hungarian, German,
+... Excel) are recognised. String table CSVs write their ids as `0x000185E8` so that Excel keeps them as text
+(it would turn `000185E8` into a number).
 
 ## Sounds
 
