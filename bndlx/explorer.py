@@ -421,6 +421,7 @@ class ExplorerUI:
         if self.search_focus:
             imgui.set_keyboard_focus_here()
             self.search_focus = False
+        t = self.tab                   # a crumb or button above may have switched the tab this frame
         name = (self.cur.name if self.cur is not None else (t.title() if t is not None else ''))
         if t is not None:
             if self.cur is not None:
@@ -1172,6 +1173,8 @@ class ExplorerUI:
             self.action_export(d, r, 'png')
         if r.type == 0x70 and imgui.menu_item('As text...', '', False)[0]:
             self.action_export(d, r, 'text')
+        if r.type == 0x81 and imgui.menu_item('As WAV...', '', False)[0]:
+            self.action_export(d, r, 'wav')
         if r.type == 0x201 and imgui.menu_item('As CSV (translations)...', '', False)[0]:
             self.action_export(d, r, 'csv')
         if imgui.menu_item('As resource file (.bres)...', '', False)[0]:

@@ -40,6 +40,8 @@ RES = [('BNDL Explorer resource (*.bres)', '*.bres'), ('All files', '*.*')]
 BIN = [('Raw data (*.bin)', '*.bin'), ('All files', '*.*')]
 TEXT = [('Text (*.txt, *.json, *.xml)', '*.txt;*.json;*.xml'), ('All files', '*.*')]
 CSV = [('CSV (*.csv)', '*.csv'), ('All files', '*.*')]
+AUDIO = [('Audio (*.wav, *.flac, *.ogg, *.mp3, *.aiff)', '*.wav;*.flac;*.ogg;*.mp3;*.aif;*.aiff'), ('All files', '*.*')]
+WAV = [('WAV (*.wav)', '*.wav')]
 ANY = [('All files', '*.*')]
 
 

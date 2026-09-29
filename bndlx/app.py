@@ -14,7 +14,7 @@ import traceback
 import numpy as np
 from imgui_bundle import hello_imgui, imgui, immvision
 
-from . import convert, dragdrop, filedialog, genesys, ops, raster, resfile, textfile, theme
+from . import convert, dragdrop, eal3, filedialog, genesys, ops, raster, resfile, textfile, theme
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -25,7 +25,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.2'
+VERSION = '0.3'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -481,6 +481,12 @@ class App(ExplorerUI):
                 p = filedialog.save_file('Export strings as CSV', base + '.csv', filedialog.CSV, 'csv')
                 if p:
                     ops.write_file(p, ops.strings_to_csv(d.b, res).encode('utf-8-sig'))
+            elif kind == 'wav':
+                from . import eal3
+                p = filedialog.save_file('Export sound as WAV', base + '.wav', filedialog.WAV, 'wav')
+                if p:
+                    audio, rate, _, _ = self.wave_audio(d, res)
+                    ops.write_file(p, eal3.wav_bytes(audio, rate))
             elif kind.startswith('chunk'):
                 k = int(kind[5:])
                 p = filedialog.save_file(f'Export chunk {k}', f'{base}.chunk{k}.bin', filedialog.BIN, 'bin')
@@ -523,6 +529,10 @@ class App(ExplorerUI):
             elif res.type == T_STRINGS and ext == '.csv':
                 ch, add, unk = ops.strings_from_csv(d.b, res, data.decode('utf-8-sig'), options.get('add_new', False))
                 msg = f'{ch} string(s) changed, {add} added' + (f', {len(unk)} unknown id(s) skipped' if unk else '') + '.'
+            elif res.type == 0x81 and ext in eal3.AUDIO_EXT:
+                desc = ops.replace_wave(d.b, res, path=path, rate=options.get('rate'), channels=options.get('channels'),
+                                        quality=options.get('quality', 0.2), bundle_path=d.path)
+                msg = f'Sound {res.id:#x} replaced: {desc}.'
             elif ext == '.bin' and 'chunk' in options:
                 res.set_data(options['chunk'], data)
                 msg = f'Chunk {options["chunk"]} of {res.id:#x} replaced ({len(data)} bytes).'
@@ -545,7 +555,7 @@ class App(ExplorerUI):
         if res is None:
             return
         flt = {T_TEXTURE: filedialog.IMAGES, T_CUBE: filedialog.PNG, T_TEXT: filedialog.TEXT,
-               T_STRINGS: filedialog.CSV}.get(res.type, filedialog.RES)
+               T_STRINGS: filedialog.CSV, 0x81: filedialog.AUDIO}.get(res.type, filedialog.RES)
         p = filedialog.open_file(f'Replace {type_name(res.type)} {res.id:#x}', self.cfg.get('last_import', ''), flt)
         if not p:
             return
@@ -554,6 +564,20 @@ class App(ExplorerUI):
             inf = raster.info(res, d.b.platform)
             self.modal = {'kind': 'texture_options', 'doc': d.uid, 'rid': res.id, 'path': p,
                           'fmt': 0, 'mips': 0, 'srgb': inf.srgb}
+        elif res.type == 0x81 and os.path.splitext(p)[1].lower() in eal3.AUDIO_EXT:
+            try:
+                _, rate, head, _ = self.wave_audio(d, res)
+            except Exception:
+                rate, head = None, None
+            try:
+                src, src_rate = eal3.read_audio(p)
+                src_info = f'{src.shape[1]} channel(s), {src_rate} Hz, {len(src) / src_rate:.2f} s'
+            except Exception as e:
+                self.status = f'Cannot read {os.path.basename(p)}: {e}'
+                return
+            self.modal = {'kind': 'wave_options', 'doc': d.uid, 'rid': res.id, 'path': p, 'src': src_info,
+                          'old': (f'{head["channels"]} channel(s), {rate} Hz' if head else 'unknown'),
+                          'rate': 0, 'channels': 0, 'quality': 0.2}
         else:
             self.replace_from_file(d, res, p)
 
@@ -1279,6 +1303,8 @@ class App(ExplorerUI):
             self.strings_view(d, r)
         elif t == T_CUBE:
             self.cube_view(d, r)
+        elif t == 0x81:
+            self.wave_view(d, r)
         else:
             imgui.text_wrapped(f'{type_name(t)}: no viewer for this type yet. The Imports and Hex tabs show its data; '
                                'Export / Replace work for every type (.bres or raw chunks).')
@@ -1416,6 +1442,80 @@ class App(ExplorerUI):
                 imgui.text_disabled(' ')
         else:
             imgui.text_disabled('Mouse wheel: zoom, drag: pan')
+
+    def wave_audio(self, d, r):
+        """(int16 audio, rate, header, stream file) of a Wave resource, cached (decodes on this thread)."""
+        key = ('wave', d.uid, r.id, id(r.data(0)))
+        hit = self.gcache.get(key)
+        if hit is None or isinstance(hit, Exception):
+            hit = ops.wave_audio(d.b, r, d.path)
+            self.gcache[key] = hit
+        return hit
+
+    def wave_view(self, d, r):
+        key = ('wave', d.uid, r.id, id(r.data(0)))
+        hit = self.gcache.get(key)
+        if hit is None:
+            self.gcache[key] = 'decoding'
+
+            def work():
+                try:
+                    res = ops.wave_audio(d.b, r, d.path)
+                    audio = res[0]
+                    cols = 1024
+                    mono = audio.astype(np.float32).mean(1) / 32768.0
+                    parts = np.array_split(mono, cols) if len(mono) >= cols else [mono]
+                    wave = (np.array([p.min() if len(p) else 0 for p in parts]),
+                            np.array([p.max() if len(p) else 0 for p in parts]))
+                    self.gcache[('wavegfx',) + key[1:]] = wave
+                    self.gcache[key] = res
+                except Exception as e:
+                    self.gcache[key] = e
+
+            threading.Thread(target=work, daemon=True).start()
+            hit = 'decoding'
+        if isinstance(hit, str):
+            imgui.text_disabled('decoding...')
+            return
+        if isinstance(hit, Exception):
+            imgui.text_wrapped(str(hit))
+            return
+        audio, rate, head, stream = hit
+        n, ch = audio.shape
+        imgui.text(f'EALayer3, {ch} channel(s), {rate} Hz, {n / max(rate, 1):.2f} s ({n} samples)'
+                   + (', looped' if head['loop'] else ''))
+        if stream:
+            imgui.text_disabled(f'Stream file: {stream}')
+        elif head.get('prefetch_only'):
+            imgui.text_colored(imgui.ImVec4(1, 0.7, 0.3, 1), 'Only the start of this streamed sound is in the bundle; '
+                               f'its {r.id & 0xFFFFFFFF}.SPS file was not found in the game folder.')
+        if imgui.button(f'{theme.I.ICON_FA_PLAY}  Play'):
+            play = audio if ch <= 2 else np.stack([audio[:, 0::2].mean(1), audio[:, 1::2].mean(1)], 1).astype(np.int16)
+            self._sound = eal3.wav_bytes(play, rate)
+            import ctypes
+            ctypes.windll.winmm.PlaySoundW(ctypes.c_char_p(self._sound), None, 0x0001 | 0x0002 | 0x0004)
+        imgui.same_line()
+        if imgui.button(f'{theme.I.ICON_FA_STOP}  Stop'):
+            import ctypes
+            ctypes.windll.winmm.PlaySoundW(None, None, 0)
+        imgui.same_line()
+        if imgui.button('Export WAV...'):
+            self.action_export(d, r, 'wav')
+        imgui.same_line()
+        if imgui.button('Replace...') and not d.b.truncated:
+            self.action_replace(d, r)
+        lo, hi = self.gcache.get(('wavegfx',) + key[1:], (np.zeros(1), np.zeros(1)))
+        avail = imgui.get_content_region_avail()
+        w, h = max(100, int(avail.x) - 8), 140
+        p0 = imgui.get_cursor_screen_pos()
+        dl = imgui.get_window_draw_list()
+        col = imgui.get_color_u32(imgui.Col_.plot_lines)
+        mid = p0.y + h / 2
+        m = len(lo)
+        for x in range(w):
+            i = min(m - 1, x * m // w)
+            dl.add_line(imgui.ImVec2(p0.x + x, mid - hi[i] * h / 2), imgui.ImVec2(p0.x + x, mid - lo[i] * h / 2 + 1), col)
+        imgui.dummy(imgui.ImVec2(w, h))
 
     def cube_view(self, d, r):
         lut = ops.cube_lut(d.b, r)
@@ -1788,7 +1888,7 @@ class App(ExplorerUI):
         title = {'message': m.get('title', 'Message'), 'confirm_delete': 'Delete resources',
                  'confirm_close': 'Unsaved changes', 'confirm_exit': 'Unsaved changes',
                  'confirm_replace': 'Replace resources', 'change_id': 'Duplicate resource' if m.get('dup') else 'Change id',
-                 'texture_options': 'Replace texture', 'open_path': 'Open by path', 'find': 'Find', 'goto': 'Go to id',
+                 'texture_options': 'Replace texture', 'wave_options': 'Replace sound', 'open_path': 'Open by path', 'find': 'Find', 'goto': 'Go to id',
                  'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties'}.get(m['kind'], 'Message')
         popup = f'{title}###modal'
         if not imgui.is_popup_open(popup):
@@ -1895,6 +1995,34 @@ class App(ExplorerUI):
                        raster.RGBA8 if d.b.platform == 'PC' else raster.ARGB8][m['fmt']]
                 mips = [None, 'full', 'none'][m['mips']]
                 opts = {'fmt': fmt, 'mips': mips, 'srgb': m['srgb']}
+                self.modal = None
+                imgui.close_current_popup()
+                imgui.end_popup()
+                self.replace_from_file(d, r, m['path'], opts)
+                return
+            imgui.same_line()
+            if imgui.button('Cancel', imgui.ImVec2(120, 0)):
+                close = True
+        elif k == 'wave_options':
+            d = self.doc_by_uid(m['doc'])
+            r = d.b.find(m['rid']) if d else None
+            imgui.text(os.path.basename(m['path']) + ':  ' + m['src'])
+            imgui.text_disabled('The sound now: ' + m['old'])
+            imgui.set_next_item_width(300)
+            _, m['rate'] = imgui.combo('sample rate', m['rate'], ['as the sound now', 'as the file (nearest MPEG rate)'])
+            imgui.set_next_item_width(300)
+            _, m['channels'] = imgui.combo('channels', m['channels'], ['as the sound now', 'as the file', 'mono', 'stereo'])
+            imgui.set_next_item_width(300)
+            _, m['quality'] = imgui.slider_float('compression', m['quality'], 0.0, 1.0, '%.2f (0 = best quality)')
+            imgui.text_disabled('Encoded as EALayer3 (MP3 based), like every sound of the game.')
+            if imgui.button('Replace', imgui.ImVec2(120, 0)) and r is not None:
+                opts = {'quality': m['quality']}
+                if m['rate'] == 1:
+                    opts['rate'] = eal3.read_audio(m['path'])[1]
+                if m['channels'] == 1:
+                    opts['channels'] = eal3.read_audio(m['path'])[0].shape[1]
+                elif m['channels'] in (2, 3):
+                    opts['channels'] = m['channels'] - 1
                 self.modal = None
                 imgui.close_current_popup()
                 imgui.end_popup()
@@ -2037,7 +2165,11 @@ Copy and paste, drag and drop (like Explorer):
 - drag resources onto another bundle's tab (or its entry in the navigation pane) to copy them;
 - drag resources out of the window into Explorer to save them (textures as PNG or DDS: ... > Options).
 
-Export / Replace / Import buttons: DDS, PNG, text, CSV, .bres (one resource with all its data), raw chunks.
+Sounds (Wave): Play / Stop and a waveform in the preview; Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
+AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound
+by default). Streamed sounds are read from and written to their .SPS files (the original is kept as .orig).
+
+Export / Replace / Import buttons: DDS, PNG, WAV, text, CSV, .bres (one resource with all its data), raw chunks.
 ... (See more) > Extract all / Import resources from folder work on whole bundles.
 
 Convert: saves a PS3 bundle for PC or a PC bundle for PS3: textures, Genesys types and objects, colour cubes,

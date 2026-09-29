@@ -1,3 +1,4 @@
 imgui-bundle>=1.92
 numpy
 Pillow
+soundfile>=0.12

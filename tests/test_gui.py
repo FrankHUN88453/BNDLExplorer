@@ -53,6 +53,8 @@ def main():
     ps3 = os.path.join(TMP, 'ENVIRONMENT_PS3.BNDL')
     shutil.copy2(os.path.join(PC, 'GLOBALEFFECTS.BNDL'), pc)
     shutil.copy2(os.path.join(PS3, 'HAWAII', 'ENVIRONMENT.BNDL'), ps3)
+    hud = os.path.join(TMP, 'HUD_PC.BNDL')
+    shutil.copy2(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'), hud)
     img = np.zeros((32, 32, 4), np.uint8)
     img[..., 2] = 255
     img[..., 3] = 255
@@ -62,6 +64,10 @@ def main():
     img[..., 1] = 255
     png2 = os.path.join(TMP, 'green.png')
     ops.save_png(img, png2)
+    from bndlx import eal3
+    wavfile = os.path.join(TMP, 'beep.wav')
+    tt = np.arange(24000) / 48000
+    ops.write_file(wavfile, eal3.wav_bytes((np.sin(2 * np.pi * 880 * tt) * 8000).astype(np.int16)[:, None], 48000))
 
     immvision.use_rgb_color_order()
     app = A.App([])
@@ -73,9 +79,9 @@ def main():
         app.gui()
         f = frame[0] = frame[0] + 1
         if f == 3:                                             # drop two bundles: a real WM_DROPFILES
-            post_dropfiles(app.hwnd, [pc, ps3])
+            post_dropfiles(app.hwnd, [pc, ps3, hud])
         elif f == 6:
-            check(len(app.docs) == 2, 'dropped bundles are open')
+            check(len(app.docs) == 3, 'dropped bundles are open')
             d = app.docs[0]
             tex = next(r for r in d.b.resources if r.type == 1 and raster.info(r, 'PC').faces == 1)
             state['tex'] = tex.id
@@ -118,11 +124,24 @@ def main():
             winclip.set_files([png2])
             app.goto(state['tex'], d)
             app.clip_paste(d)
+        elif f == 14:
+            # a WAV dropped on a sound (Wave) resource of the PS3 bundle
+            src = app.docs[2]
+            w = next((r for r in src.b.resources if r.type == 0x81 and len(r.data(0)) > 0x88), None)
+            state['wave'] = w.id if w is not None else None
+            if w is not None:
+                app.goto(w.id, src)
+                app.drop_target = lambda: (src, src.b.find(w.id), 'details')
+                app.on_drop([wavfile])
         elif f == 15:
             d = app.docs[0]
             dec = raster.decode(d.b.find(state['tex']), 'PC')
             check(dec[..., 1].mean() > 250 and dec[..., 2].mean() < 5, 'a PNG copied in Explorer pasted onto the texture')
             imgui.set_clipboard_text(state.get('clip_before', ''))
+            if state.get('wave'):
+                src = app.docs[2]
+                audio, rate, head, _ = ops.wave_audio(src.b, src.b.find(state['wave']))
+                check(abs(len(audio) / rate - 0.5) < 0.02, f'WAV dropped on a sound replaced it ({len(audio)} samples @ {rate} Hz)')
             app.action_save(d)
         elif f > 16 and app.job is None and 'saved' not in state:
             state['saved'] = f

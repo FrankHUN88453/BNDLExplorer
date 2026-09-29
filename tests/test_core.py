@@ -113,6 +113,69 @@ def test_strings(path):
     check(ch == 1 and t2.entries[0][1].startswith('HELLO '), 'CSV import changes one string')
 
 
+def test_sounds(path):
+    """Decode every sound, replace one from a WAV, save, reload; PS3 <-> PC header conversion."""
+    from bndlx import eal3
+    b = Bundle.open(path)
+    waves = [r for r in b.resources if r.type == 0x81 and eal3.wave_fields(r.data(0), b.e)['stream_ref'] is None]
+    bad = 0
+    for r in waves:
+        audio, rate, head, _ = ops.wave_audio(b, r)
+        if len(audio) != head['samples'] or audio.shape[1] != head['channels']:
+            bad += 1
+    check(waves and not bad, f'{len(waves)} sounds decode to their exact length ({os.path.basename(path)})')
+    rate = 48000
+    t = np.arange(rate) / rate
+    tone = (0.4 * np.sin(2 * np.pi * 440 * t) * 32767).astype(np.int16)
+    wav = os.path.join(TMP, 'tone.wav')
+    ops.write_file(wav, eal3.wav_bytes(np.stack([tone, tone], 1), rate))
+    r = waves[0]
+    old_ch = ops.wave_audio(b, r)[2]['channels']
+    ops.replace_wave(b, r, wav)
+    out = os.path.join(TMP, 'snd.BNDL')
+    b.save(out)
+    nb = Bundle.open(out)
+    audio, rate2, head, _ = ops.wave_audio(nb, nb.find(r.id))
+    ref = eal3.mix_channels(np.stack([tone, tone], 1), old_ch)
+    ref = eal3.resample(ref, rate, rate2)
+    n = min(len(ref), len(audio))
+    snr = 10 * np.log10((ref[:n].astype(float) ** 2).sum() / max(((ref[:n].astype(float) - audio[:n]) ** 2).sum(), 1))
+    check(len(audio) == len(ref) and snr > 25, f'a WAV imported into a sound decodes back ({snr:.1f} dB, {head["channels"]} ch)')
+    other = 'PC' if b.platform == 'PS3' else 'PS3'
+    conv = convert.convert_resource(nb.find(r.id), b.platform, other)
+    back = convert.convert_resource(conv, other, b.platform)
+    check(eal3.wave_stream(back.data(0), b.e) == eal3.wave_stream(nb.find(r.id).data(0), b.e), 'sound converts PS3 <-> PC')
+
+
+def test_prefetch(pc_root):
+    """A prefetched stream (start in the bundle, rest in <GameChanger id>.SPS): decode and import, on a copy."""
+    from bndlx import eal3
+    root = os.path.join(TMP, 'game')
+    os.makedirs(os.path.join(root, 'EN_US', 'FEEDBACKGROUPS'))
+    os.makedirs(os.path.join(root, 'UI', 'SEQUENCES', 'STREAMS'))
+    open(os.path.join(root, 'GLOBALEFFECTS.BNDL'), 'wb').close()
+    bp = os.path.join(root, 'EN_US', 'FEEDBACKGROUPS', '1156428.BNDL')
+    shutil.copy2(os.path.join(pc_root, 'EN_US', 'FEEDBACKGROUPS', '1156428.BNDL'), bp)
+    sp = os.path.join(root, 'UI', 'SEQUENCES', 'STREAMS', '1317608.SPS')
+    shutil.copy2(os.path.join(pc_root, 'UI', 'SEQUENCES', 'STREAMS', '1317608.SPS'), sp)
+    ops._SPS_INDEX.clear()
+    b = Bundle.open(bp)
+    r = b.find(0x0100000000141AE8)
+    audio, rate, head, f = ops.wave_audio(b, r, bp)
+    check(f == sp and len(audio) == head['samples'] and len(audio) > 10 * rate,
+          f'prefetched stream decodes whole ({len(audio) / rate:.1f} s from bundle + {os.path.basename(sp)})')
+    t = np.arange(3 * rate) / rate
+    wav = os.path.join(TMP, 'long.wav')
+    ops.write_file(wav, eal3.wav_bytes((np.sin(2 * np.pi * 330 * t) * 9000).astype(np.int16)[:, None], rate))
+    ops.replace_wave(b, r, wav, bundle_path=bp)
+    b.save(bp)
+    nb = Bundle.open(bp)
+    fields = eal3.wave_fields(nb.find(r.id).data(0), nb.e)
+    audio2, rate2, head2, f2 = ops.wave_audio(nb, nb.find(r.id), bp)
+    check(os.path.exists(sp + '.orig') and fields['kind'] == 'prefetch' and abs(len(audio2) - 3 * rate2) <= 1,
+          f'importing into a prefetched stream rewrites the bundle start and the .SPS ({len(audio2) / rate2:.2f} s)')
+
+
 def main():
     if PC:
         g = os.path.join(PC, 'GLOBALEFFECTS.BNDL')
@@ -122,12 +185,15 @@ def main():
         test_convert(os.path.join(PC, 'HAWAII', 'ENVIRONMENT.BNDL'))
         test_convert(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'))
         test_strings(os.path.join(PC, 'UI', 'LANGUAGE', '0001.BNDL'))
+        test_sounds(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'))
+        test_prefetch(PC)
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_convert(os.path.join(PS3, 'HAWAII', 'ENVIRONMENT.BNDL'))
         test_convert(os.path.join(PS3, 'POSTFX.BNDL'))
         test_strings(os.path.join(PS3, 'UI', 'LANGUAGE', '0001.BNDL'))
+        test_sounds(os.path.join(PS3, 'UI', 'SCREENS2', 'BLACKLISTHUD.BNDL'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2

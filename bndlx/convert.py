@@ -7,17 +7,19 @@ Converted types (the others hold platform-specific GPU data: shaders, vertex lay
   ColourCube      PC linear B, G, R <-> PS3 Morton R, G, B
   TextFile        length prefix
   LocalisedText   table + UTF-16 byte order
+  Wave            header byte order (the EALayer3 audio stream is the same on both)
 Note: the PS3 prototype and the retail game do not share every schema; converted Genesys data only works in
 the other build if its types are the same there.
 """
 import struct
 
-from . import colourcube, genesys, raster, textfile
+from . import colourcube, eal3, genesys, raster, textfile
 from .bundle import Bundle, F_MAIN_OPT, Resource
 from .localised import StringTable
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name
 
-CONVERTIBLE = {T_TEXTURE, T_GTYPE, T_GOBJECT, T_CUBE, T_TEXT, T_STRINGS}
+T_WAVE = 0x81
+CONVERTIBLE = {T_TEXTURE, T_GTYPE, T_GOBJECT, T_CUBE, T_TEXT, T_STRINGS, T_WAVE}
 E = {'PC': '<', 'PS3': '>'}
 
 
@@ -67,6 +69,9 @@ def convert_resource(res, src, dst, types=None, strict=True):
         imp_off = imp_cnt = 0
     elif t == T_STRINGS:
         chunks[0] = StringTable.read(res, es).build(ed)
+        imp_off = imp_cnt = 0
+    elif t == T_WAVE:
+        chunks[0] = eal3.convert_wave(res.data(0), es, ed)
         imp_off = imp_cnt = 0
     else:
         raise ConvertError(f'{name(t)} holds {src}-specific data and cannot be converted')

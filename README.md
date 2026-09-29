@@ -20,7 +20,7 @@ BNDLExplorer.pyw                      :: double click, or:
 python -m bndlx path\to\A.BNDL [path\to\B.BNDL ...] [--select RESOURCE_ID]
 ```
 
-Python 3.10+ (tested with 3.14). Built on [Dear ImGui](https://github.com/ocornut/imgui) through
+Python 3.10+ (tested with 3.14); sounds need `soundfile` (libsndfile with mpg123 and LAME). Built on [Dear ImGui](https://github.com/ocornut/imgui) through
 [imgui-bundle](https://github.com/pthom/imgui_bundle).
 
 **Building the exe:** `pip install pyinstaller`, then `python packaging\build_exe.py` → `dist\BNDLExplorer.exe`.
@@ -79,6 +79,7 @@ that happens to match a model id would also "match" its renderables; such names 
 | TextFile | text editor (JSON / XML) | .txt |
 | LocalisedText (UI\LANGUAGE) | searchable string table, edit in place | CSV (`id,text`) for translations |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
+| Wave (sound) | play / stop, waveform, channels, rate, length | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
 | every type | imports (edit the ids, jump to the target), hex view with byte editing | .bres, raw chunks (.bin) |
 
 Field names of Genesys data are hashes; short names are stored as text, a few are known, and any field can be
@@ -99,6 +100,23 @@ bundles, bundle properties (flags, root resource). **Undo / redo** (Ctrl+Z / Ctr
 - Drag resources out of the window into Explorer, or Ctrl+C and paste in Explorer, to get them as files
   (textures as PNG or DDS, text as .txt, strings as .csv, others as .bres).
 
+## Sounds
+
+Every sound of the game (PC and PS3) is an EA **SPS** stream with the **EALayer3 v1** codec (MP3 based):
+blocks `H` (SNR header: codec, channels, sample rate, samples), `D` (EALayer3 frames), `E` (end). An EALayer3
+frame is one MPEG Layer III granule of a mono or stereo stream; 6-channel sounds are three stereo streams whose
+frames alternate. Decoding rebuilds standard MP3 frames (bit reservoir) and decodes them with libsndfile
+(mpg123); the first MPEG frame (1152 samples of encoder / decoder delay) is dropped and the 47 samples stored as
+PCM in the second granule take its place, which is how the block sample counts of every game file add up.
+Importing encodes with LAME, takes the granules apart again and writes the same structure. All 15 000 sounds
+of both builds decode to their exact length; encoded sounds come back at 45-69 dB signal to noise.
+
+Wave resources come in three kinds (field 0x20 of the 0x80-byte header): the whole sound in the bundle; a
+reference to a stream file (`UI\MOVIES\2026359.SPS`); or a prefetched stream: the first second in the bundle,
+the rest in `<GameChanger id>.SPS` somewhere in the game folder (`UI\SEQUENCES\STREAMS`, `SOUND\STREAMS`,
+`EN_US\STREAMS`, ...). BNDL Explorer plays and replaces all three; stream files it rewrites are kept as `.orig`
+first. Sounds of languages that are not installed have no stream files: only their start can be played.
+
 ## Saving
 
 Save (Ctrl+S) writes to a temporary file, reads it back and compares every resource before it replaces the
@@ -111,7 +129,7 @@ bundles). Bundles written by other tools (for example DGIorio's Blender exporter
 
 **Convert** saves the open bundle for the other platform. Converted: textures (DXT blocks copied, uncompressed
 data (un)swizzled, RGBA16F byte-swapped, headers rewritten), Genesys types and objects (byte order of every
-field, walked with the schema), colour cubes, text files and string tables. Meshes, materials, shaders and
+field, walked with the schema), colour cubes, text files, string tables and sounds (the audio stream is the same on both). Meshes, materials, shaders and
 other GPU data are platform-specific and are left out; the report lists them. Round trips PC → PS3 → PC and
 PS3 → PC → PS3 give identical data (apart from a texture flag the PS3 header does not store).
 

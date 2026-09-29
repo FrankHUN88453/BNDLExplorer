@@ -5,9 +5,11 @@ import struct
 
 import numpy as np
 
-from . import colourcube, convert, raster, resfile, textfile
+from . import colourcube, convert, eal3, raster, resfile, textfile
 from .localised import StringTable
 from .restypes import T_CUBE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
+
+T_WAVE = 0x81
 
 IMAGE_EXT = ('.png', '.tga', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp')
 ID_RE = re.compile(r'^(?:0x)?([0-9A-Fa-f]{8,16})(?![0-9A-Fa-f])')
@@ -134,6 +136,120 @@ def replace_cube(b, res, path):
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# sounds
+# ---------------------------------------------------------------------------------------------------------------
+_SPS_INDEX = {}
+
+
+def game_root(bundle_path):
+    cur = os.path.dirname(os.path.abspath(bundle_path or '.'))
+    for _ in range(8):
+        if any(os.path.exists(os.path.join(cur, n)) for n in ('GLOBALEFFECTS.BNDL', 'NFS13.exe', 'EBOOT.BIN')):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return None
+
+
+def find_stream_file(bundle_path, rel=None, name=None):
+    """External .SPS file of a sound: `rel` = path relative to the game folder (stream references), or
+    `name` = file name looked up anywhere in the game folder (prefetched streams: <GameChanger id>.SPS)."""
+    if rel:
+        rel = rel.replace('\\', os.sep).replace('/', os.sep)
+        cur = os.path.dirname(os.path.abspath(bundle_path or '.'))
+        for _ in range(8):
+            p = os.path.join(cur, rel)
+            if os.path.isfile(p):
+                return p
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        return None
+    root = game_root(bundle_path)
+    if root is None or not name:
+        return None
+    idx = _SPS_INDEX.get(root)
+    if idx is None:
+        idx = {}
+        for dp, _, fn in os.walk(root):
+            for f in fn:
+                if f.upper().endswith('.SPS'):
+                    idx.setdefault(f.upper(), os.path.join(dp, f))
+        _SPS_INDEX[root] = idx
+    return idx.get(name.upper())
+
+
+def stream_file_of(b, res, bundle_path):
+    f = eal3.wave_fields(res.data(0), b.e)
+    if f['kind'] == 'stream':
+        return f, find_stream_file(bundle_path, rel=f['stream_ref'])
+    if f['kind'] == 'prefetch':
+        return f, find_stream_file(bundle_path, name=f'{res.id & 0xFFFFFFFF}.SPS')
+    return f, None
+
+
+def wave_audio(b, res, bundle_path=None):
+    """(int16 audio, rate, SNR header, stream file or None) of a Wave resource."""
+    f, p = stream_file_of(b, res, bundle_path)
+    if f['kind'] == 'stream' and p is None:
+        raise eal3.AudioError(f'this sound plays the stream file {f["stream_ref"]}, which was not found next to the bundle')
+    if p is not None:
+        with open(p, 'rb') as fh:
+            ext = fh.read()
+        if f['kind'] == 'prefetch':          # the file continues the start stored in the resource
+            ext = eal3.wave_stream(res.data(0), b.e) + ext
+        audio, rate, head = eal3.decode_sps(ext)
+        return audio, rate, head, p
+    audio, rate, head = eal3.decode_sps(eal3.wave_stream(res.data(0), b.e))
+    if f['kind'] == 'prefetch':
+        head = dict(head, prefetch_only=True)
+    return audio, rate, head, None
+
+
+def replace_wave(b, res, path=None, data=None, rate=None, channels=None, quality=0.2, bundle_path=None):
+    """Encode an audio file into a Wave resource (EALayer3). rate / channels None = as the old sound.
+    Streamed sounds get their .SPS file rewritten too (the original is kept as .orig). Returns a description."""
+    audio, src_rate = eal3.read_audio(path, data)
+    old = res.data(0)
+    f, stream_file = stream_file_of(b, res, bundle_path)
+    try:
+        _, old_rate, old_head, _ = wave_audio(b, res, bundle_path)
+    except eal3.AudioError:
+        old_rate, old_head = None, None
+    if f['kind'] != 'memory' and stream_file is None:
+        raise eal3.AudioError('the stream file of this sound was not found in the game folder')
+    target_rate = rate or old_rate or src_rate
+    target_ch = channels or (old_head['channels'] if old_head else None) or f['channels'] or None
+    audio, dst_rate = eal3.prepare_audio(audio, src_rate, target_ch, target_rate)
+    loop = bool(old_head and old_head['loop'])
+    sps, head = eal3.encode_sps(audio, dst_rate, loop=loop, loop_start=0, quality=quality)
+    where = ''
+    de = '<' if b.e == '>' else b.e
+    part = None
+    if f['kind'] == 'prefetch':
+        part = eal3.prefetch_part(sps, f.get('prefetch_ms', 1000.0), head['rate'])
+    if stream_file is not None:
+        if not os.path.exists(stream_file + '.orig'):
+            import shutil
+            shutil.copy2(stream_file, stream_file + '.orig')
+        write_file(stream_file, sps[len(part):] if part is not None else sps)
+        where = f' (stream file {os.path.basename(stream_file)} rewritten, original kept as .orig)'
+    if f['kind'] == 'stream':
+        hdr = bytearray(old)
+        struct.pack_into(de + 'f', hdr, 0x14, head['samples'] * 1000.0 / head['rate'])
+        hdr[0x24] = head['channels']
+        res.set_data(0, bytes(hdr))
+    elif f['kind'] == 'prefetch':
+        res.set_data(0, eal3.build_wave(old, part, head, b.e))
+    else:
+        res.set_data(0, eal3.build_wave(old, sps, head, b.e))
+    return f'{head["channels"]} channel(s), {head["rate"]} Hz, {head["samples"] / head["rate"]:.2f} s{where}'
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # text / strings
 # ---------------------------------------------------------------------------------------------------------------
 def replace_text(b, res, raw):
@@ -172,6 +288,10 @@ def export_native(b, res, folder, texture_format='.dds'):
     elif t == T_CUBE:
         path = base + '.png'
         save_png(cube_strip(cube_lut(b, res)), path)
+    elif t == T_WAVE and eal3.wave_fields(res.data(0), b.e)['kind'] == 'memory':
+        path = base + '.wav'
+        audio, rate, _, _ = wave_audio(b, res)
+        write_file(path, eal3.wav_bytes(audio, rate))
     else:
         path = base + '.bres'
         write_file(path, resfile.dump(res, b.platform, TOOL))
@@ -212,7 +332,7 @@ def extract_all(b, folder, progress=None, texture_format='.dds'):
         os.makedirs(sub, exist_ok=True)
         export_bres(b, r, os.path.join(sub, id_text(r.id) + '.bres'))
         written += 1
-        if r.type in (T_TEXTURE, T_TEXT, T_STRINGS, T_CUBE):
+        if r.type in (T_TEXTURE, T_TEXT, T_STRINGS, T_CUBE, T_WAVE):
             try:
                 export_native(b, r, sub, texture_format)
             except Exception:
@@ -259,6 +379,8 @@ def import_folder(b, folder, types, progress=None):
             elif r.type == T_STRINGS and ext == '.csv':
                 with open(path, encoding='utf-8-sig') as f:
                     strings_from_csv(b, r, f.read())
+            elif r.type == T_WAVE and ext in eal3.AUDIO_EXT:
+                replace_wave(b, r, path)
             else:
                 continue
             changes.append((rid, 'replaced', path))
@@ -290,6 +412,14 @@ def text_summary(b, res, types):
         if t == T_STRINGS:
             n = struct.unpack_from(b.e + 'I', res.data(0), 4)[0]
             return f'{n} strings'
+        if t == T_WAVE:
+            f = eal3.wave_fields(res.data(0), b.e)
+            s = f'{f["duration"] / 1000:.2f} s, {f["channels"]} ch'
+            if f['kind'] == 'stream':
+                s += f', stream {os.path.basename(f["stream_ref"])}'
+            elif f['kind'] == 'prefetch':
+                s += f', streamed ({res.id & 0xFFFFFFFF}.SPS)'
+            return s
     except Exception:
         return ''
     return ''
