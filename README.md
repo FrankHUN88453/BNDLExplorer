@@ -20,7 +20,8 @@ BNDLExplorer.pyw                      :: double click, or:
 python -m bndlx path\to\A.BNDL [path\to\B.BNDL ...] [--select RESOURCE_ID]
 ```
 
-Python 3.10+ (tested with 3.14); sounds need `soundfile` (libsndfile with mpg123 and LAME). Built on [Dear ImGui](https://github.com/ocornut/imgui) through
+Python 3.10+ (tested with 3.14); sounds need `soundfile` (libsndfile with mpg123 and LAME), the 3D view
+`PyOpenGL`. Built on [Dear ImGui](https://github.com/ocornut/imgui) through
 [imgui-bundle](https://github.com/pthom/imgui_bundle).
 
 **Building the exe:** `pip install pyinstaller`, then `python packaging\build_exe.py` → `dist\BNDLExplorer.exe`.
@@ -79,6 +80,7 @@ that happens to match a model id would also "match" its renderables; such names 
 | TextFile | text editor (JSON / XML) | .txt |
 | LocalisedText (UI\LANGUAGE) | searchable string table, edit in place | CSV (`id,text`) for translations |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
+| Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) with the diffuse textures, opens in Blender |
 | Wave (sound) | play / stop, waveform, channels, rate, length | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
 | every type | imports (edit the ids, jump to the target), hex view with byte editing | .bres, raw chunks (.bin) |
 
@@ -99,6 +101,20 @@ bundles, bundle properties (flags, root resource). **Undo / redo** (Ctrl+Z / Ctr
   bundle, to copy / move them. PS3 ↔ PC conversion happens automatically where it is possible.
 - Drag resources out of the window into Explorer, or Ctrl+C and paste in Explorer, to get them as files
   (textures as PNG or DDS, text as .txt, strings as .csv, others as .bres).
+
+## 3D models
+
+Renderables (meshes) and Models (LOD tables of renderables) are shown in a 3D view (OpenGL, through PyOpenGL
+in the window's own context). The vertex layout of a mesh comes from its material's shader (shader import at
+0x8, VertexDescriptor import at 0x9C of the shader); shaders and many materials / textures are not in the
+bundle itself, so they are also looked up in the game's global bundles (`SHADERS*.BNDL`,
+`GLOBALMATERIALDICTIONARY.BNDL`, `GLOBALTEXTUREDICTIONARY.BNDL`, `VEHICLES\VEHICLETEX.BNDL`, ...) of the game
+folder the bundle is in. Meshes show their Diffuse texture, or the material's diffuse colour constant; car paint
+(chosen by the player in the game) shows as silver, glass as dark glass. Normals are computed from the triangles.
+Positions: float32 for the world and effects, s16 normalised × 10 m for vehicles. Index buffers are u16
+triangle strips with 0xFFFF restarts (topology field in the mesh record).
+
+**Export glTF** writes a `.glb` (positions, normals, UVs, indices, diffuse textures as PNG, base colours).
 
 ## Sounds
 

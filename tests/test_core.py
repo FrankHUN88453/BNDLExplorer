@@ -176,6 +176,55 @@ def test_prefetch(pc_root):
           f'importing into a prefetched stream rewrites the bundle start and the .SPS ({len(audio2) / rate2:.2f} s)')
 
 
+def check_glb(data):
+    """Minimal .glb validation: header, chunks, accessors / views inside the buffer."""
+    import json
+    import struct as st
+    magic, ver, total = st.unpack_from('<III', data, 0)
+    jl, jt = st.unpack_from('<II', data, 12)
+    js = json.loads(data[20:20 + jl])
+    bl, bt = st.unpack_from('<II', data, 20 + jl)
+    ok = magic == 0x46546C67 and ver == 2 and total == len(data) and jt == 0x4E4F534A and bt == 0x004E4942
+    for v in js['bufferViews']:
+        ok &= v['byteOffset'] + v['byteLength'] <= bl
+    size = {5126: 4, 5125: 4}
+    comps = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3}
+    for a in js['accessors']:
+        v = js['bufferViews'][a['bufferView']]
+        ok &= a['count'] * size[a['componentType']] * comps[a['type']] <= v['byteLength']
+    return ok, js
+
+
+def test_models(path, expect_textures=True):
+    from bndlx import gltf, mesh
+    b = Bundle.open(path)
+    lib = mesh.Library()
+    done = tris = bad = 0
+    for r in b.resources:
+        if r.type != 0x51:
+            continue
+        try:
+            meshes, nlod = mesh.decode_resource(b, r, lib, [], path)
+        except mesh.MeshError:
+            continue
+        done += 1
+        for m in meshes:
+            tris += len(m.tris)
+            bad += int(m.tris.max() >= len(m.pos)) if len(m.tris) else 0
+    check(done and not bad, f'{done} models decode ({tris} triangles, {os.path.basename(path)})')
+    body = next(r for r in b.resources if r.type == 0x51)
+    meshes, _ = mesh.decode_resource(b, body, lib, [], path)
+    texs = {}
+    root = mesh.game_root(path)
+    for m in meshes:
+        if m.texture:
+            tb, tr = lib.find(m.texture, [b], root)
+            texs[m.texture] = raster.decode(tr, tb.platform) if tr is not None else None
+    ok, js = check_glb(gltf.write_glb(meshes, texs, 'test'))
+    check(ok and len(js['meshes']) == len(meshes) and (not expect_textures or 'images' in js or not any(texs.values())),
+          f'glTF export is well formed ({len(js["meshes"])} meshes, {len(js.get("images", []))} images)')
+
+
 def main():
     if PC:
         g = os.path.join(PC, 'GLOBALEFFECTS.BNDL')
@@ -187,6 +236,7 @@ def main():
         test_strings(os.path.join(PC, 'UI', 'LANGUAGE', '0001.BNDL'))
         test_sounds(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'))
         test_prefetch(PC)
+        test_models(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
@@ -194,6 +244,7 @@ def main():
         test_convert(os.path.join(PS3, 'POSTFX.BNDL'))
         test_strings(os.path.join(PS3, 'UI', 'LANGUAGE', '0001.BNDL'))
         test_sounds(os.path.join(PS3, 'UI', 'SCREENS2', 'BLACKLISTHUD.BNDL'))
+        test_models(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2

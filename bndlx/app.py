@@ -14,7 +14,7 @@ import traceback
 import numpy as np
 from imgui_bundle import hello_imgui, imgui, immvision
 
-from . import convert, dragdrop, eal3, filedialog, genesys, ops, raster, resfile, textfile, theme
+from . import convert, dragdrop, eal3, filedialog, genesys, gltf, mesh, ops, raster, resfile, textfile, theme
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -25,7 +25,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.3'
+VERSION = '0.4'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -157,6 +157,9 @@ class App(ExplorerUI):
         self.renaming = None
         self.thumbs = Thumbs()
         self.names = N.NameDB.load()
+        self.mesh_lib = mesh.Library()
+        self.viewer = None
+        self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0}
         self.folder_cache = {}
         self.addr_edit = None
         self.addr_focus = False
@@ -481,6 +484,11 @@ class App(ExplorerUI):
                 p = filedialog.save_file('Export strings as CSV', base + '.csv', filedialog.CSV, 'csv')
                 if p:
                     ops.write_file(p, ops.strings_to_csv(d.b, res).encode('utf-8-sig'))
+            elif kind == 'glb':
+                p = filedialog.save_file('Export model as glTF', base + '.glb', [('glTF binary (*.glb)', '*.glb')], 'glb')
+                if p:
+                    n = self.export_glb(d, res, p)
+                    self.status = f'Exported {n} mesh(es) to {p}.'
             elif kind == 'wav':
                 from . import eal3
                 p = filedialog.save_file('Export sound as WAV', base + '.wav', filedialog.WAV, 'wav')
@@ -1305,6 +1313,8 @@ class App(ExplorerUI):
             self.cube_view(d, r)
         elif t == 0x81:
             self.wave_view(d, r)
+        elif t in (0x05, 0x51):
+            self.model_view(d, r)
         else:
             imgui.text_wrapped(f'{type_name(t)}: no viewer for this type yet. The Imports and Hex tabs show its data; '
                                'Export / Replace work for every type (.bres or raw chunks).')
@@ -1516,6 +1526,117 @@ class App(ExplorerUI):
             i = min(m - 1, x * m // w)
             dl.add_line(imgui.ImVec2(p0.x + x, mid - hi[i] * h / 2), imgui.ImVec2(p0.x + x, mid - lo[i] * h / 2 + 1), col)
         imgui.dummy(imgui.ImVec2(w, h))
+
+    # -- 3D models ---------------------------------------------------------------------------------------------
+    def model_bundles(self, d):
+        return [d.b] + [o.b for o in self.docs if o is not d]
+
+    def texture_image(self, d, tid, max_size=1024):
+        """RGBA array of a texture found in the open bundles or the game's global bundles (None if missing)."""
+        if not tid:
+            return None
+        b, r = self.mesh_lib.find(tid, self.model_bundles(d), mesh.game_root(d.path))
+        if r is None or r.type != T_TEXTURE:
+            return None
+        try:
+            inf = raster.info(r, b.platform)
+            mip = 0
+            while mip + 1 < inf.mips and max(inf.w >> mip, inf.h >> mip) > max_size:
+                mip += 1
+            return raster.decode(r, b.platform, mip)
+        except Exception:
+            return None
+
+    def model_view(self, d, r):
+        st = self.model
+        key = (d.uid, r.id, id(r.data(0)), st['lod'])
+        if st['key'] != key:
+            st['key'] = key
+            st['result'] = None
+
+            def work(key=key, lod=st['lod']):
+                try:
+                    meshes, nlod = mesh.decode_resource(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
+                    texs = {m.texture: self.texture_image(d, m.texture) for m in meshes if m.texture}
+                    res = ('ok', meshes, texs, nlod)
+                except Exception as e:
+                    res = ('error', str(e))
+                if self.model['key'] == key:
+                    self.model['result'] = res
+
+            threading.Thread(target=work, daemon=True).start()
+        res = st['result']
+        if res is None:
+            imgui.text_disabled('loading the geometry...')
+            return
+        if res[0] == 'error':
+            imgui.text_wrapped(f'Cannot show this model: {res[1]}')
+            return
+        _, meshes, texs, nlod = res
+        if self.viewer is None:
+            from .viewer3d import Viewer
+            self.viewer = Viewer()
+        if st['uploaded'] != key:
+            try:
+                self.viewer.set_meshes(key, meshes, texs)
+            except Exception as e:
+                traceback.print_exc()
+                st['result'] = ('error', f'OpenGL: {e}')
+                return
+            st['uploaded'] = key
+        v = self.viewer
+        ntri = sum(len(m.tris) for m in meshes)
+        nvert = sum(len(m.pos) for m in meshes)
+        imgui.text(f'{len(meshes)} mesh(es), {ntri:,} triangles, {nvert:,} vertices'.replace(',', ' '))
+        if nlod > 1 or r.type == 0x51:
+            imgui.same_line()
+            imgui.set_next_item_width(90)
+            ch, lod = imgui.combo('LOD', st['lod'], [f'LOD {k}' for k in range(max(nlod, 1))])
+            if ch:
+                st['lod'] = lod
+        _, v.use_tex = imgui.checkbox('Textures', v.use_tex)
+        imgui.same_line()
+        _, v.wire = imgui.checkbox('Wireframe', v.wire)
+        imgui.same_line()
+        _, v.z_up = imgui.checkbox('Z up', v.z_up)
+        imgui.same_line()
+        if imgui.button('Reset view'):
+            v.pan[:] = 0
+            v.dist = v.radius * 2.6
+            v.yaw, v.pitch = 0.6, 0.35
+        imgui.same_line()
+        if imgui.button('Export glTF...'):
+            self.action_export(d, r, 'glb')
+        missing = sum(1 for m in meshes if m.texture and texs.get(m.texture) is None)
+        if missing:
+            imgui.text_disabled(f'{missing} mesh(es) use textures that are not in the open bundles or the global ones.')
+        avail = imgui.get_content_region_avail()
+        w, h = max(64, int(avail.x) - 4), max(64, int(avail.y) - 24)
+        v.widget(w, h)
+        imgui.text_disabled('Left drag: turn, right / middle drag: move, wheel: zoom, double click: fit')
+
+    def preview_ready(self):
+        """True when the preview of the selected resource is complete (used by --screenshot)."""
+        d, f = self.focused()
+        if f is None or not self.cfg.get('preview', True):
+            return True
+        if f.type == T_TEXTURE:
+            return self.tex.get('img') is not None or self.tex.get('err') is not None
+        if f.type in (0x05, 0x51):
+            res = self.model['result']
+            return res is not None and (res[0] == 'error' or self.model['uploaded'] == self.model['key'])
+        if f.type == 0x81:
+            hit = self.gcache.get(('wave', d.uid, f.id, id(f.data(0))))
+            return hit is not None and not isinstance(hit, str)
+        return True
+
+    def export_glb(self, d, res, path):
+        lod = self.model['lod'] if self.model['key'] and self.model['key'][1] == res.id else 0
+        meshes, _ = mesh.decode_resource(d.b, res, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
+        texs = {m.texture: self.texture_image(d, m.texture, 1 << 14) for m in meshes if m.texture}
+        name = self.display_name(d, res)[0]
+        ops.write_file(path, gltf.write_glb(meshes, texs, name))
+        return len(meshes)
 
     def cube_view(self, d, r):
         lut = ops.cube_lut(d.b, r)
@@ -2165,6 +2286,10 @@ Copy and paste, drag and drop (like Explorer):
 - drag resources onto another bundle's tab (or its entry in the navigation pane) to copy them;
 - drag resources out of the window into Explorer to save them (textures as PNG or DDS: ... > Options).
 
+Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms), LOD
+choice for models, Export glTF (.glb with textures, opens in Blender). Shaders, materials and shared textures are
+found in the open bundles and in the game's global bundles (SHADERS, GLOBALMATERIALDICTIONARY, ...).
+
 Sounds (Wave): Play / Stop and a waveform in the preview; Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
 AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound
 by default). Streamed sounds are read from and written to their .SPS files (the original is kept as .orig).
@@ -2221,8 +2346,7 @@ def run(paths=(), screenshot=None, frames=12, select=None, tab=None, expand=Fals
     def gui():
         app.gui()
         if screenshot:
-            f = app.focused()[1]
-            ready = app.tex.get('img') is not None or f is None or f.type != T_TEXTURE or not app.cfg.get('preview', True)
+            ready = app.preview_ready()
             if ready and app.job is None and not app.thumbs.pending:
                 count[0] += 1
             if count[0] > frames:

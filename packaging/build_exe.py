@@ -29,6 +29,8 @@ def main():
         # soundfile: libsndfile (with mpg123 / LAME) for the sounds
         '--collect-all', 'soundfile',
         '--collect-all', '_soundfile_data',
+        # PyOpenGL for the 3D preview (its platform / array plugins are loaded by name)
+        '--collect-submodules', 'OpenGL',
         '--exclude-module', 'tkinter',
         '--exclude-module', 'matplotlib',
         '--exclude-module', 'scipy',
