@@ -27,6 +27,7 @@ LIST_TYPE = 0x0100000000002A37
 T_GOBJECT, T_WAVE, T_STRINGS = 0x15, 0x81, 0x201
 NEW_ID_BASE = 0x0FA00000          # ids for new songs / strings / waves (far above the game's own, ~2.4 million)
 MAIN_LISTS = (1622455, 1845669)   # the two lists with the whole licensed soundtrack
+SHOWN_LISTS = MAIN_LISTS + (1836280,)   # lists whose songs the game names (artist / title)
 LIST_NAMES = {1622455: 'Soundtrack A (used by GAMEMODES)', 1845669: 'Soundtrack B',
               1836280: 'Selection (used by GAMEMODES)', 1084858: 'Steve Hillage (Spotify link)',
               116490: 'Untitled 3', 116491: 'Untitled 6', 1836664: 'Sequence 3', 1870156: 'Sequence 1',
@@ -192,6 +193,11 @@ class Soundtrack:
             start += count
         return start
 
+    def nameless(self):
+        """Songs in a soundtrack playlist without an artist or title (the game shows them as 0)."""
+        return [s for s in self.songs if (not s.artist.strip() or not s.title.strip())
+                and any(li.fields['own'] in SHOWN_LISTS for li in self.lists_of(s))]
+
     def _string_users(self, sid):
         return [s for s in self.songs if s.fields['artist'] == sid or s.fields['title'] == sid]
 
@@ -204,7 +210,7 @@ class Soundtrack:
             sid = s.fields[key]
             if not sid or len(self._string_users(sid)) > 1:
                 sid = self.new_id()
-                s.fields[key] = sid
+                s.fields[key] = sid           # the next keystroke finds this id used by this song only
             self.new_strings[sid] = text
             setattr(s, key, text)
             self.dirty = True

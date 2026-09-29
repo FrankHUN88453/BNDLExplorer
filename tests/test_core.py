@@ -400,10 +400,14 @@ def test_soundtrack(pc_root):
     root = os.path.join(TMP, 'st_game')
     os.makedirs(os.path.join(root, 'UI', 'SONGS'), exist_ok=True)
     os.makedirs(os.path.join(root, 'UI', 'LANGUAGE'), exist_ok=True)
-    shutil.copy2(os.path.join(pc_root, 'UI', 'SONGS', 'SONGS.BNDL'), os.path.join(root, 'UI', 'SONGS'))
+
+    def pristine(p):                                   # the game's own file, also after edits with the editor
+        return p + '.orig' if os.path.exists(p + '.orig') else p
+
+    shutil.copy2(pristine(os.path.join(pc_root, 'UI', 'SONGS', 'SONGS.BNDL')), os.path.join(root, 'UI', 'SONGS', 'SONGS.BNDL'))
     for f in os.listdir(os.path.join(pc_root, 'UI', 'LANGUAGE')):
         if f.lower().endswith('.bndl'):
-            shutil.copy2(os.path.join(pc_root, 'UI', 'LANGUAGE', f), os.path.join(root, 'UI', 'LANGUAGE'))
+            shutil.copy2(pristine(os.path.join(pc_root, 'UI', 'LANGUAGE', f)), os.path.join(root, 'UI', 'LANGUAGE', f))
     songs_path = os.path.join(root, 'UI', 'SONGS', 'SONGS.BNDL')
     orig = open(songs_path, 'rb').read()
     st = ST.Soundtrack(root)
@@ -444,6 +448,16 @@ def test_soundtrack(pc_root):
     st2.remove_song(st2.song(s.rid))
     st2.save()
     st3 = ST.Soundtrack(root)
+    untitled = next(x for x in st3.songs if not x.artist and not x.title)
+    st3.set_member(untitled, st3.lists[0], True)
+    flagged = [x.rid for x in st3.nameless()] == [untitled.rid]
+    for i in range(1, 5):                              # the name fields apply on every keystroke
+        st3.set_text(untitled, artist='Band'[:i], title='Song'[:i])
+    check(flagged and not st3.nameless() and len(st3.new_strings) == 2 and untitled.fields['artist']
+          and untitled.fields['title'], 'an untitled song in a playlist is flagged; typing its names makes two strings')
+    st3.set_member(untitled, st3.lists[0], False)
+    st3.new_strings.clear()
+    st3.dirty = False
     check(sorted(x.artist for x in st3.songs if x.rid in {y.rid for y in sc}) == ['Renamed', 'Silent Code', 'Silent Code']
           and len(st3.songs) == 58 and len(st3.lists[0].songs) == 42 and os.path.exists(songs_path + '.orig'),
           'shared artist renamed for one song only; removing the new song restores the lists')

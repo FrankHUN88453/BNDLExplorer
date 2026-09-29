@@ -94,8 +94,12 @@ class SoundtrackUI:
         self.run_job('Encoding...', lambda pr: m.replace_audio(s, p),
                      lambda _: setattr(self, 'status', f'Audio of {s.title} replaced (not saved yet).'))
 
-    def st_save(self):
+    def st_save(self, confirmed=False):
         m = self.st_ui['model']
+        missing = m.nameless()
+        if missing and not confirmed:
+            self.st_ui['confirm'] = 'nameless'
+            return
 
         def done(written):
             self.st_ui['audio'].clear()
@@ -139,14 +143,33 @@ class SoundtrackUI:
                 ui['confirm'] = 'close'
             else:
                 self.soundtrack_close()
+        if ui.get('confirm') == 'nameless':
+            imgui.open_popup('Songs without names')
+            ui['confirm'] = 'nameless-open'
+        if imgui.begin_popup_modal('Songs without names', None, imgui.WindowFlags_.always_auto_resize)[0]:
+            missing = m.nameless()
+            imgui.text(f'{len(missing)} song(s) in the soundtrack playlists have no artist or title;')
+            imgui.text('the game shows them as "0":')
+            for s in missing[:12]:
+                imgui.bullet_text(f'{s.artist or "(no artist)"} - {s.title or "(no title)"}  '
+                                  f'({os.path.basename(s.file) if s.file else ""})')
+            if imgui.button('Save anyway'):
+                ui['confirm'] = None
+                imgui.close_current_popup()
+                self.st_save(confirmed=True)
+            imgui.same_line()
+            if imgui.button('Cancel (type the names)'):
+                ui['confirm'] = None
+                imgui.close_current_popup()
+            imgui.end_popup()
         if ui.get('confirm') == 'close':
             imgui.open_popup('Unsaved soundtrack changes')
         if imgui.begin_popup_modal('Unsaved soundtrack changes', None, imgui.WindowFlags_.always_auto_resize)[0]:
             imgui.text('The soundtrack has unsaved changes.')
             if imgui.button('Save'):
-                self.st_save()
                 ui['confirm'] = None
                 imgui.close_current_popup()
+                self.st_save()
             imgui.same_line()
             if imgui.button('Discard'):
                 imgui.close_current_popup()
@@ -247,14 +270,22 @@ class SoundtrackUI:
                 imgui.table_next_column()
                 imgui.set_next_item_width(-1)
                 fname = os.path.basename(s.file) if s.file else ''
-                ch, txt = imgui.input_text_with_hint('##artist', '(no artist)', s.artist, imgui.InputTextFlags_.enter_returns_true)
+                ch, txt = imgui.input_text_with_hint('##artist', '(no artist)', s.artist)
                 if ch:
                     m.set_text(s, artist=txt)
                 imgui.table_next_column()
-                imgui.set_next_item_width(-1)
-                ch, txt = imgui.input_text_with_hint('##title', f'(untitled: {fname})', s.title, imgui.InputTextFlags_.enter_returns_true)
+                nameless = (not s.artist.strip() or not s.title.strip()) and any(
+                    li.fields['own'] in ST.SHOWN_LISTS for li in m.lists_of(s))
+                imgui.set_next_item_width(-26 if nameless else -1)
+                ch, txt = imgui.input_text_with_hint('##title', f'(untitled: {fname})', s.title)
                 if ch:
                     m.set_text(s, title=txt)
+                if nameless:
+                    imgui.same_line()
+                    imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.3, 1.0), theme.I.ICON_FA_TRIANGLE_EXCLAMATION)
+                    if imgui.is_item_hovered():
+                        imgui.set_tooltip('This song is in a soundtrack playlist but has no artist or title:\n'
+                                          'the game shows it as "0". Type both names.')
                 if imgui.is_item_hovered() and fname:
                     imgui.set_tooltip(s.file)
                 if s.added or s.new_sps is not None:
@@ -312,4 +343,4 @@ class SoundtrackUI:
         n_new = sum(1 for s in m.songs if s.added)
         imgui.text_disabled(f'{len(m.songs)} songs, {len(m.lists)} playlists'
                             + (f', {n_new} new' if n_new else '') + ('  -  unsaved changes' if m.dirty else '')
-                            + '.  Artist / title: Enter to apply.  The checkboxes are the two soundtrack playlists.')
+                            + '.  Names apply as you type.  The checkboxes are the two soundtrack playlists.')
