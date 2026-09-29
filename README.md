@@ -88,7 +88,7 @@ that happens to match a model id would also "match" its renderables; such names 
 | ZoneList (HAWAII\PVS) | map of all 169 track units by district; click a zone to open its TRK_UNIT | |
 | .SPS sound stream files | opened like a bundle with one sound: play, waveform, replace, save | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF / .SPS; a whole folder as WAV |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
-| Wave (sound) | play / stop, waveform, channels, rate, length | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
+| Wave (sound) | play / pause / stop with a play head on the waveform; click or drag on it to jump; time, channels, rate, length; stops when another item is selected | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
 
 Field names of Genesys data are hashes; short names are stored as text, a few are known, and any field can be
@@ -252,6 +252,7 @@ set BNDLX_PC=...\Need for Speed(TM) Most Wanted
 set BNDLX_PS3=...\NPXX00207\USRDIR\HAWAII_MAIN
 python tests\test_core.py                 :: library: saves, edits, conversion, strings
 python tests\test_gui.py                  :: the real window: drops, copy between bundles, clipboard, undo, save
+python tests\test_audio_gui.py            :: sound preview: jump to a position, stop when another item is selected (silent)
 python tests\roundtrip_all.py "%BNDLX_PC%" "%BNDLX_PS3%"   :: every bundle saves byte-identical
 ```
 

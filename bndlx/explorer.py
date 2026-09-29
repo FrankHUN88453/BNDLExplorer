@@ -193,6 +193,7 @@ class ExplorerUI:
             self._themed = True
         self.pump_job()
         self.pump_drops()
+        self.audio_guard()
         self.thumbs.pump()
         self.shortcuts()
         if self.want_select is not None and self.cur is not None:

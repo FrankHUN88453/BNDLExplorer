@@ -18,6 +18,7 @@ from . import convert, dragdrop, eal3, filedialog, genesys, gltf, mesh, ops, ras
 from . import vehiclelist as VL
 from . import zonelist as ZL
 from . import spsfile
+from .audioplay import Player
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -28,7 +29,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.11'
+VERSION = '0.12'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -150,6 +151,12 @@ class Doc:
         return desc
 
 
+def _clock(seconds):
+    """m:ss.s"""
+    seconds = max(0.0, seconds)
+    return f'{int(seconds // 60)}:{seconds % 60:04.1f}'
+
+
 class App(ExplorerUI):
     def __init__(self, paths=(), select=None):
         self.docs = []
@@ -165,6 +172,8 @@ class App(ExplorerUI):
         self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0, 'show': 0, 'stats': None,
                       'nb': False, 'progress': ''}
         self.zmap = {'key': None}
+        self.player = Player()
+        self.wave_cursor = {}            # sound key -> sample where Play starts (set by clicking the waveform)
         self.vlist = {'key': None, 'obj': None, 'sel': 0, 'msel': 0, 'filter': '', 'error': None}
         self.folder_cache = {}
         self.addr_edit = None
@@ -1593,15 +1602,37 @@ class App(ExplorerUI):
         elif head.get('prefetch_only'):
             imgui.text_colored(imgui.ImVec4(1, 0.7, 0.3, 1), 'Only the start of this streamed sound is in the bundle; '
                                f'its {r.id & 0xFFFFFFFF}.SPS file was not found in the game folder.')
-        if imgui.button(f'{theme.I.ICON_FA_PLAY}  Play'):
-            play = audio if ch <= 2 else np.stack([audio[:, 0::2].mean(1), audio[:, 1::2].mean(1)], 1).astype(np.int16)
-            self._sound = eal3.wav_bytes(play, rate)
-            import ctypes
-            ctypes.windll.winmm.PlaySoundW(ctypes.c_char_p(self._sound), None, 0x0001 | 0x0002 | 0x0004)
+        pl = self.player
+        mine = pl.opened and pl.key == key
+        if mine and pl.done:                 # played to the end: back to the start
+            pl.stop()
+            self.wave_cursor[key] = 0
+            mine = False
+        pos = pl.position() if mine else self.wave_cursor.get(key, 0)
+        if mine and not pl.paused:
+            label = f'{theme.I.ICON_FA_PAUSE}  Pause'
+        elif mine:
+            label = f'{theme.I.ICON_FA_PLAY}  Resume'
+        else:
+            label = f'{theme.I.ICON_FA_PLAY}  Play'
+        if imgui.button(label + '##playbtn'):
+            try:
+                if mine and not pl.paused:
+                    pl.pause()
+                elif mine:
+                    pl.resume()
+                else:
+                    pl.play(audio, rate, self.wave_cursor.get(key, 0), key)
+            except OSError as ex:
+                self.status = str(ex)
         imgui.same_line()
         if imgui.button(f'{theme.I.ICON_FA_STOP}  Stop'):
-            import ctypes
-            ctypes.windll.winmm.PlaySoundW(None, None, 0)
+            if mine:
+                pl.stop()
+            self.wave_cursor[key] = 0
+            pos = 0
+        imgui.same_line()
+        imgui.text(f'{_clock(pos / max(rate, 1))} / {_clock(n / max(rate, 1))}')
         imgui.same_line()
         if imgui.button('Export WAV...'):
             self.action_export(d, r, 'wav')
@@ -1612,14 +1643,54 @@ class App(ExplorerUI):
         avail = imgui.get_content_region_avail()
         w, h = max(100, int(avail.x) - 8), 140
         p0 = imgui.get_cursor_screen_pos()
+        imgui.invisible_button('##wave', imgui.ImVec2(w, h))
+        self.wave_rect = (p0.x, p0.y, w, h)
+        hovered, active = imgui.is_item_hovered(), imgui.is_item_active()
+        released = imgui.is_item_deactivated()
+        mx = min(max(imgui.get_io().mouse_pos.x - p0.x, 0.0), float(w))
+        target = int(mx / w * n)
         dl = imgui.get_window_draw_list()
         col = imgui.get_color_u32(imgui.Col_.plot_lines)
+        played = imgui.get_color_u32(imgui.Col_.plot_lines_hovered)
+        head_x = int(pos / max(n, 1) * w)
         mid = p0.y + h / 2
         m = len(lo)
         for x in range(w):
             i = min(m - 1, x * m // w)
-            dl.add_line(imgui.ImVec2(p0.x + x, mid - hi[i] * h / 2), imgui.ImVec2(p0.x + x, mid - lo[i] * h / 2 + 1), col)
-        imgui.dummy(imgui.ImVec2(w, h))
+            dl.add_line(imgui.ImVec2(p0.x + x, mid - hi[i] * h / 2), imgui.ImVec2(p0.x + x, mid - lo[i] * h / 2 + 1),
+                        played if x < head_x else col)
+        accent = imgui.get_color_u32(imgui.Col_.check_mark)
+        dl.add_line(imgui.ImVec2(p0.x + head_x, p0.y), imgui.ImVec2(p0.x + head_x, p0.y + h), accent, 2.0)
+        if active:                           # dragging: show where it will jump to
+            dl.add_line(imgui.ImVec2(p0.x + mx, p0.y), imgui.ImVec2(p0.x + mx, p0.y + h), accent, 1.0)
+        if hovered or active:
+            imgui.set_tooltip(f'{_clock(target / max(rate, 1))}  (click to jump here)')
+        if released:
+            self.wave_seek(key, audio, rate, target)
+        imgui.text_disabled('Click or drag on the waveform to move the play position.')
+
+    def wave_seek(self, key, audio, rate, target):
+        """Move the play position of a sound; if it is playing (or paused) it continues from there."""
+        pl = self.player
+        self.wave_cursor[key] = target
+        if pl.opened and pl.key == key:
+            was_paused = pl.paused
+            try:
+                pl.play(audio, rate, target, key)
+                if was_paused:
+                    pl.pause()
+            except OSError as ex:
+                self.status = str(ex)
+
+    def audio_guard(self):
+        """Stop the sound when its item is no longer the one shown (another item, bundle or tab was selected, or
+        the sound was changed)."""
+        if not self.player.opened:
+            return
+        d, r = self.focused()
+        shown = ('wave', d.uid, r.id, id(r.data(0))) if d is not None and r is not None and r.type == 0x81 else None
+        if shown != self.player.key or not self.cfg.get('preview', True):
+            self.player.stop()
 
     # -- 3D models ---------------------------------------------------------------------------------------------
     def model_bundles(self, d):
@@ -3007,7 +3078,7 @@ Vehicle list (VEHICLES\\VEHICLELIST): every car with its name, manufacturer, spe
 car to edit its fields; Duplicate / Delete / arrows change the rows. Export / Import CSV (Excel with ';' and
 decimal commas works too).
 
-Sounds (Wave): Play / Stop and a waveform in the preview; Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
+Sounds (Wave): Play / Pause / Stop and a waveform with the play position (click it to jump); Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
 AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound
 by default). Streamed sounds are read from and written to their .SPS files (the original is kept as .orig).
 
