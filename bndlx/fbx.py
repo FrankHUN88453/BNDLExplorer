@@ -467,8 +467,10 @@ def _write_rig(objects, conns, counts, ids, rig, skinned, name):
                     counts['AnimationCurve'] = counts.get('AnimationCurve', 0) + 1
 
 
-def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None):
-    """meshes: [MeshData]; texture_files: {texture id: relative file name of the PNG next to the .fbx}; rig:
+def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None, materials=None):
+    """meshes: [MeshData]; texture_files: {texture id: relative file name of the PNG next to the .fbx};
+    materials: {material id: {'colour', 'rough', 'metal', 'maps': {FBX channel (DiffuseColor, NormalMap,
+    ShininessExponent, ReflectionFactor): relative PNG file}}} for the full look instead of the diffuse only; rig:
     {'skeleton': anim.Skeleton, 'animations': [(name, anim.Animation)]} adds the bones, skins the meshes that have
     blend weights to them, and writes the animations as takes.
     Returns the .fbx bytes (binary FBX 7.4, metres, Y up)."""
@@ -564,7 +566,8 @@ def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None):
         conns.add('C', 'OO', geo_id, model_id)
         if rig is not None and getattr(m, 'joints', None) is not None and m.joints.max() < rig['skeleton'].count:
             skinned.append((model_id, geo_id, np.asarray(m.joints)[vmap], np.asarray(m.weights)[vmap]))
-        mkey = (m.material, m.texture)
+        mdef = (materials or {}).get(m.material) if m.material else None
+        mkey = (m.material, None if mdef else m.texture)
         if mkey not in mat_ids:
             mid = mat_ids[mkey] = next(ids)
             mat_name = f'material_{m.material:x}' if m.material else f'material_{len(mat_ids)}'
@@ -572,12 +575,20 @@ def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None):
             mat.add('Version', 102)
             mat.add('ShadingModel', 'phong')
             mat.add('MultiLayer', 0)
-            col = tuple(float(x) ** 2.2 for x in m.tint)        # linear, as glTF export
-            _p70(mat, [('DiffuseColor', 'Color', '', 'A', *col), ('Diffuse', 'Vector3D', 'Vector', '', *col),
-                       ('DiffuseFactor', 'Number', '', 'A', 1.0)])
+            col = tuple(float(x) ** 2.2 for x in (mdef['colour'] if mdef else m.tint))       # linear, as glTF
+            props = [('DiffuseColor', 'Color', '', 'A', *col), ('Diffuse', 'Vector3D', 'Vector', '', *col),
+                     ('DiffuseFactor', 'Number', '', 'A', 1.0)]
+            if mdef:
+                # Blender reads roughness from Shininess (1 - sqrt(s) / 10) and metal from ReflectionFactor
+                props += [('Shininess', 'double', 'Number', '', float(((1.0 - mdef['rough']) * 10) ** 2)),
+                          ('ReflectionFactor', 'Number', '', 'A', float(mdef['metal'])),
+                          ('BumpFactor', 'double', 'Number', '', 1.0)]
+            _p70(mat, props)
             counts['Material'] += 1
-            tfile = texture_files.get(m.texture) if m.texture else None
-            if tfile:
+            links = dict(mdef['maps']) if mdef else {}
+            if not mdef and m.texture and texture_files.get(m.texture):
+                links['DiffuseColor'] = texture_files[m.texture]
+            for channel, tfile in links.items():
                 if tfile not in tex_ids:
                     tid, vid = next(ids), next(ids)
                     tex_ids[tfile] = tid
@@ -596,7 +607,7 @@ def write_fbx(meshes, texture_files, name='model', mesh_names=None, rig=None):
                     conns.add('C', 'OO', vid, tid)
                     counts['Texture'] += 1
                     counts['Video'] += 1
-                conns.add('C', 'OP', tex_ids[tfile], mid, 'DiffuseColor')
+                conns.add('C', 'OP', tex_ids[tfile], mid, channel)
         conns.add('C', 'OO', mat_ids[mkey], model_id)
     if rig is not None:
         _write_rig(objects, conns, counts, ids, rig, skinned, name)

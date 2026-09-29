@@ -127,11 +127,21 @@ flipped where w < 0, is the normal; PS3: 11:11:10 `CMP` normals), else computed 
 Positions: float32 for the world and effects, s16 normalised × 10 m for vehicles. Index buffers are u16
 triangle strips with 0xFFFF restarts (topology field in the mesh record; every retail mesh uses strips).
 
+**Shaded** (on by default) draws the materials the way the game's physically based shaders use them:
+albedo (car paint, chosen with the colour button, mixed under the livery by the diffuse alpha), the normal map
+(RGB tangent-space normal in the DirectX convention: the stored bitangents of the cars point to -v, verified;
+A = roughness), the specular map (vehicles: RGB F0, A metalness; world shaders pack it: R reflectance, G gloss,
+and the ColouredSpecular ones are RGB), vertex ambient occlusion, a key light, sky / ground ambient and
+reflections, GGX with Fresnel and a clear coat on paint. The world's packing is read from the data and
+approximate; tyres have no colour map (the rubber colour is in the shader). Off: the texture under a head light.
+
 **Export glTF** writes a `.glb` (positions, normals, UVs, indices, diffuse textures as PNG, base colours).
 
 **Export FBX** writes a binary FBX 7.4 (metres, Y up; Blender, 3ds Max, Maya, Unity) with every UV set,
-the mesh's own normals, a Phong material per game material and the diffuse textures as PNG files in
-`<name>_textures` next to it. Each object is named `R<renderable id>_<mesh index>`; further uses of the same
+the mesh's own normals and a material per game material with its maps as PNG files in `<name>_textures`:
+base colour (the paint under the livery, the specular colour on metal), normal map, roughness and metalness,
+linked as DiffuseColor / NormalMap / ShininessExponent / ReflectionFactor, which Blender turns into a Principled
+material with those textures. Each object is named `R<renderable id>_<mesh index>`; further uses of the same
 mesh (the other wheels) get `~1`, `~2`. An extra UV layer `bndlx_id` (leave it in place) keeps each vertex's
 index in the game mesh.
 

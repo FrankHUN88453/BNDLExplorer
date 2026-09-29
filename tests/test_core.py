@@ -698,6 +698,29 @@ def test_animations(pc_root):
           f'FBX with the rig: {len(bones)} bones, {len(clusters)} clusters, {len(stacks)} takes, {len(curves)} curves')
 
 
+def test_shading(pc_root):
+    """Material data for the shaded view and FBX: a car's normal / specular maps, paint and vertex AO, tangents
+    along +u, and the world shaders' specular mode."""
+    from bndlx import mesh
+    car = os.path.join(pc_root, 'VEHICLES', 'VEH_1085007_HI.BNDL')
+    b = Bundle.open(car)
+    meshes, _ = mesh.decode_vgs(b, next(x for x in b.resources if x.type == mesh.T_VGS), mesh.Library(), [], car)
+    nm = [m for m in meshes if m.normal_tex]
+    tan_ok = all(np.allclose(np.linalg.norm(m.tangents()[:, :3], axis=1), 1, atol=1e-3) for m in nm)
+    check(len(nm) > 10 and any(m.spec_tex for m in meshes) and any(m.paint for m in meshes)
+          and all(m.ao is not None for m in meshes) and tan_ok and all(m.spec_mode == 0 for m in meshes),
+          f'car materials: {len(nm)} normal-mapped meshes, specular maps, paint, vertex AO, tangents')
+    unit = os.path.join(pc_root, 'HAWAII', 'TRK_UNIT1.BNDL')
+    b = Bundle.open(unit)
+    modes = set()
+    for r in [x for x in b.resources if x.type == mesh.T_RENDERABLE][:40]:
+        try:
+            modes |= {m.spec_mode for m in mesh.decode_renderable(b, r, mesh.Library(), [b], pc_root) if m.spec_tex}
+        except mesh.MeshError:
+            pass
+    check(1 in modes, f'world shaders read their packed specular maps (modes {sorted(modes)})')
+
+
 def test_ps3_animations(ps3_root):
     """PS3 prototype: its older animation layout reads (also inside lists, whose offsets are only filled in when
     loading); car bodies follow their skeleton (vertex slots 0-1) and dent by their ControlMesh (slots 2-3)."""
@@ -776,6 +799,7 @@ def main():
         test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
         test_animations(PC)
+        test_shading(PC)
         test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
         test_sps(PC)
         test_zones(os.path.join(PC, 'HAWAII'))

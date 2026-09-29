@@ -37,7 +37,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.20'
+VERSION = '0.21'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -2000,7 +2000,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                         meshes, nlod = mesh.decode_resource(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
                         stats, size = None, 1024
                     self.model['progress'] = 'loading the textures...'
-                    texs = {t: self.texture_image(d, t, size) for t in {m.texture for m in meshes if m.texture}}
+                    texs = {t: self.texture_image(d, t, size) for t in mesh.texture_ids(meshes, size >= 1024)}
                     res = ('ok', meshes, texs, nlod, stats)
                 except Exception as e:
                     res = ('error', str(e))
@@ -2026,6 +2026,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         if self.viewer is None:
             from .viewer3d import Viewer
             self.viewer = Viewer()
+            self.viewer.paint = tuple(self.cfg.get('paint', self.viewer.paint))
         ukey = (key, id(res))                # what is on the GPU: the request and the result shown
         if st['uploaded'] != ukey:
             old = st['uploaded'][0] if st['uploaded'] else None
@@ -2103,6 +2104,11 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 st['lod'] = lod
         _, v.use_tex = imgui.checkbox('Textures', v.use_tex)
         imgui.same_line()
+        _, v.shaded = imgui.checkbox('Shaded', v.shaded)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('The materials as the game shades them: normal and specular maps, roughness, metal, '
+                              'car paint, ambient occlusion (off: the texture under a head light)')
+        imgui.same_line()
         _, v.wire = imgui.checkbox('Wireframe', v.wire)
         imgui.same_line()
         _, v.z_up = imgui.checkbox('Z up', v.z_up)
@@ -2111,6 +2117,16 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             v.pan[:] = 0
             v.dist = v.radius * v.fit
             v.yaw, v.pitch = 0.6, 0.35
+        if any(m.paint for m in meshes):
+            ch, col = imgui.color_edit3('##paint', list(v.paint), imgui.ColorEditFlags_.no_inputs)
+            if ch:
+                v.paint = tuple(col)
+                self.cfg['paint'] = list(col)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Car paint colour (the player chooses it in the game)')
+            imgui.same_line()
+            imgui.text('Paint')
+            imgui.same_line()
         if imgui.button('Export glTF...'):             # own row: the view toolbar above is full
             self.action_export(d, r, 'glb')
         imgui.same_line()
@@ -2746,8 +2762,76 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             meshes = self.model_meshes(d, res)
         size = 1024 if res.type == mesh.T_INSTANCELIST else 1 << 14
         files = self.fbx_texture_files(d, meshes, path, size)
-        ops.write_file(path, fbx.write_fbx(meshes, files, name, meshimport.export_names(meshes, 'mesh'), rig))
-        return len(meshes), len(files)
+        mats = self.fbx_materials(d, meshes, path, size)
+        ops.write_file(path, fbx.write_fbx(meshes, files, name, meshimport.export_names(meshes, 'mesh'), rig, mats))
+        return len(meshes), len(files) + sum(len(m['maps']) for m in mats.values())
+
+    def fbx_materials(self, d, meshes, path, size):
+        """Per material the look as PNG maps for an FBX: base colour (the car paint under the livery, the specular
+        colour on metal), normal (RGB), roughness and metalness, and their constants."""
+        from PIL import Image
+        folder = os.path.splitext(path)[0] + '_textures'
+        paint = np.array(self.viewer.paint if self.viewer is not None else self.cfg.get('paint', (0.55, 0.05, 0.05)))
+        out = {}
+
+        def img(tid):
+            return self.texture_image(d, tid, size) if tid else None
+
+        def fit(a, shape):
+            if a.shape[:2] == shape:
+                return a
+            return np.asarray(Image.fromarray(a).resize((shape[1], shape[0]), Image.BILINEAR))
+
+        def save(a, fn):
+            os.makedirs(folder, exist_ok=True)
+            a = np.asarray(a, np.uint8)
+            if a.shape[-1] == 3:
+                a = np.concatenate([a, np.full(a.shape[:2] + (1,), 255, np.uint8)], -1)
+            ops.save_png(np.ascontiguousarray(a), os.path.join(folder, fn))
+            return os.path.basename(folder) + '/' + fn
+
+        for m in meshes:
+            if not m.material or m.material in out or not (m.texture or m.normal_tex or m.spec_tex or m.paint):
+                continue
+            if m.uv is None:
+                continue
+            diff, nrm, spec = img(m.texture), img(m.normal_tex), img(m.spec_tex)
+            key = f'{m.material:016X}'
+            maps = {}
+            rough = m.rough if m.rough is not None else (0.25 if m.paint else 0.55)
+            metal = 0.0
+            base = diff.astype(np.float32) if diff is not None else None
+            if m.paint:
+                p = np.append(paint * 255.0, 255.0)
+                if base is None:
+                    base = np.tile(p, (4, 4, 1))
+                else:
+                    a = base[..., 3:4] / 255.0
+                    base = np.concatenate([p[:3] * (1 - a) + base[..., :3] * a, np.full_like(a, 255.0)], -1)
+            if spec is not None and m.spec_mode == 0:
+                if base is None:
+                    base = np.tile(np.append(np.array(m.tint) * 255.0, 255.0), (4, 4, 1)).astype(np.float32)
+                s = fit(spec, base.shape[:2]).astype(np.float32)
+                mt = s[..., 3:4] / 255.0
+                base[..., :3] = base[..., :3] * (1 - mt) + s[..., :3] * mt
+                maps['ReflectionFactor'] = save(np.repeat(spec[..., 3:4], 3, -1), f'{key}_metal.png')
+                metal = 1.0
+            if base is not None:
+                maps['DiffuseColor'] = save(np.clip(base, 0, 255), f'{key}_base.png')
+            if nrm is not None:
+                n = nrm.copy()
+                n[..., 3] = 255
+                maps['NormalMap'] = save(n, f'{key}_normal.png')
+                if m.spec_mode == 0:
+                    maps['ShininessExponent'] = save(np.repeat(nrm[..., 3:4], 3, -1), f'{key}_rough.png')
+                    rough = 1.0
+            if spec is not None and m.spec_mode == 1:
+                r = (255 - 0.85 * spec[..., 1:2].astype(np.float32)).clip(0, 255)
+                maps['ShininessExponent'] = save(np.repeat(r, 3, -1), f'{key}_rough.png')
+                rough = 1.0
+            colour = tuple(paint) if m.paint else (1.0, 1.0, 1.0) if 'DiffuseColor' in maps else m.tint
+            out[m.material] = {'colour': colour, 'rough': rough, 'metal': metal, 'maps': maps}
+        return out
 
     def fbx_texture_files(self, d, meshes, path, size):
         """The meshes' diffuse textures as PNG files in <name>_textures next to the FBX: {texture id: path}."""
@@ -3476,8 +3560,9 @@ Copy and paste, drag and drop (like Explorer):
 - drag resources out of the window into Explorer to save them (textures as PNG or DDS: ... > Options).
 
 Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms), LOD
-choice for models, Export glTF (.glb with textures, opens in Blender) and Export FBX (textures as PNG files in
-<name>_textures). Import FBX (or Replace with an .fbx) writes an edited FBX back: keep the object names Export
+choice for models; Shaded shows the materials as the game shades them (normal and specular maps, roughness,
+metal, ambient occlusion, clear-coated car paint in the colour chosen next to Export), Export glTF (.glb with textures, opens in Blender) and Export FBX (the full materials as PNG maps in
+<name>_textures: base colour with the paint, normal, roughness, metal; Blender links them to its material). Import FBX (or Replace with an .fbx) writes an edited FBX back: keep the object names Export
 FBX gave (R<id>_<n>); join new parts into an existing object. Positions, UV sets and normals are replaced, the
 rest (tangents, colours, damage weights) comes from the nearest original vertex. Works for renderables, models,
 cars (VehicleGraphicsSpec) and track units; Ctrl+Z undoes it. Shaders, materials and shared textures are

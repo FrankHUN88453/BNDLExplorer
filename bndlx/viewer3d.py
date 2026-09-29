@@ -11,31 +11,129 @@ VS = '''
 in vec3 aPos;
 in vec3 aNrm;
 in vec2 aUV;
+in vec4 aTan;
+in float aAO;
 uniform mat4 uMVP;
 uniform mat4 uMV;
 out vec3 vN;
 out vec2 vUV;
+out vec3 vPos;
+out vec4 vT;
+out float vAO;
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
     vN = mat3(uMV) * aNrm;
+    vT = vec4(mat3(uMV) * aTan.xyz, aTan.w);
+    vPos = (uMV * vec4(aPos, 1.0)).xyz;
     vUV = aUV;
+    vAO = aAO;
 }
 '''
+# Two looks: the plain one (texture x a head light), and the shaded one, close to the game's physically based
+# vehicle / world shading: albedo (car paint mixed under the livery), normal map (RGB tangent-space normal,
+# A roughness), specular map (RGB F0, A metalness), vertex AO, a key light, a sky / ground ambient and sky
+# reflections; GGX with Schlick Fresnel, clear coat on paint; ACES tone mapping.
 FS = '''
 in vec3 vN;
 in vec2 vUV;
+in vec3 vPos;
+in vec4 vT;
+in float vAO;
 uniform sampler2D uTex;
+uniform sampler2D uNormal;
+uniform sampler2D uSpec;
 uniform int uUseTex;
 uniform int uAlphaTest;
+uniform int uShaded;
+uniform int uUseNormal;
+uniform int uUseSpec;
+uniform int uPaint;
+uniform int uSpecMode;
 uniform vec3 uTint;
+uniform vec3 uSpecColour;
+uniform float uRough;
+uniform vec3 uPaintColour;
+uniform vec3 uUp;
+uniform float uFlipY;
 out vec4 frag;
+const float PI = 3.14159265;
+vec3 sky(vec3 d) {
+    float h = dot(d, uUp);
+    vec3 ground = vec3(0.10, 0.095, 0.09);
+    vec3 horizon = vec3(0.62, 0.64, 0.66);
+    vec3 zenith = vec3(0.32, 0.45, 0.66);
+    return h < 0.0 ? mix(horizon * 0.45, ground, clamp(-h * 4.0, 0.0, 1.0))
+                   : mix(horizon, zenith, pow(clamp(h, 0.0, 1.0), 0.6));
+}
+vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
 void main() {
-    vec3 n = normalize(vN);
-    float l = 0.35 + 0.65 * abs(n.z);
     vec4 c = uUseTex == 1 ? texture(uTex, vUV) : vec4(uTint, 1.0);
     if (uUseTex == 1 && uAlphaTest == 1 && c.a < 0.5)
         discard;
-    frag = vec4(c.rgb * l, 1.0);
+    vec3 n = normalize(vN);
+    if (uShaded == 0) {
+        float l = 0.35 + 0.65 * abs(n.z);
+        frag = vec4(c.rgb * l, 1.0);
+        return;
+    }
+    vec3 v = normalize(-vPos);
+    if (dot(n, v) < 0.0) n = -n;                      // two-sided
+    vec3 albedo = pow(c.rgb, vec3(2.2));
+    if (uPaint == 1) {
+        vec3 paint = pow(uPaintColour, vec3(2.2));
+        albedo = uUseTex == 1 ? mix(paint, albedo, c.a) : paint;
+    }
+    float rough = uRough;
+    if (uUseNormal == 1) {
+        vec4 nm = texture(uNormal, vUV);
+        vec3 t = normalize(vT.xyz - n * dot(n, vT.xyz));
+        vec3 b = cross(n, t) * vT.w;
+        vec3 tn = nm.rgb * 2.0 - 1.0;
+        tn.y *= uFlipY;
+        n = normalize(t * tn.x + b * tn.y + n * max(tn.z, 0.05));
+        if (uSpecMode == 0)
+            rough = nm.a;
+    }
+    vec3 f0 = uSpecColour;
+    float metal = 0.0;
+    if (uUseSpec == 1) {
+        vec4 s = texture(uSpec, vUV);
+        if (uSpecMode == 0) {
+            f0 = pow(s.rgb, vec3(2.2));
+            metal = s.a;
+        } else if (uSpecMode == 1) {
+            f0 = vec3(0.02 + 0.2 * s.r);
+            rough = 1.0 - 0.85 * s.g;
+        } else {
+            f0 = pow(s.rgb, vec3(2.2)) * 0.25;
+        }
+    }
+    rough = clamp(rough, 0.04, 1.0);
+    float ao = mix(1.0, vAO, 0.85);
+    vec3 l = normalize(vec3(-0.45, 0.75, 0.55));
+    vec3 h = normalize(l + v);
+    float nl = max(dot(n, l), 0.0), nv = max(dot(n, v), 1e-3), nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
+    float a2 = rough * rough * rough * rough;
+    float d = a2 / (PI * pow(nh * nh * (a2 - 1.0) + 1.0, 2.0));
+    float k = (rough + 1.0) * (rough + 1.0) / 8.0;
+    float g = nl / (nl * (1.0 - k) + k) * nv / (nv * (1.0 - k) + k);
+    vec3 f = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
+    vec3 spec = d * g * f / max(4.0 * nl * nv, 1e-3);
+    vec3 kd = (1.0 - f) * (1.0 - metal);
+    vec3 light = vec3(2.6);
+    vec3 col = (kd * albedo / PI + spec) * light * nl;
+    vec3 r = reflect(-v, n);
+    vec3 fr = f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - nv, 5.0);
+    vec3 env = mix(sky(r), (sky(n) + sky(r)) * 0.5, rough);
+    col += (albedo * (1.0 - metal) * sky(n) * 0.9 + env * fr * (1.0 - rough * 0.6)) * ao;
+    if (uPaint == 1) {                                  // clear coat
+        float cf = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+        float cd = 0.0025 / (PI * pow(nh * nh * (0.0025 - 1.0) + 1.0, 2.0));
+        col = col * (1.0 - cf) + (sky(r) * cf + cd * cf * light * nl * 0.25) * ao;
+    }
+    frag = vec4(pow(aces(col * 1.1), vec3(1.0 / 2.2)), 1.0);
 }
 '''
 
@@ -69,8 +167,11 @@ class Viewer:
         self.prog = None
         self.fbo = self.color = self.depth = None
         self.size = (0, 0)
-        self.meshes = []            # [(vao, vbo, ibo, count, tex, tint, alpha test, wire, overlay)]
-        self.uvs = []               # UVs of each mesh (for update_vertices)
+        self.meshes = []            # [(vao, vbo, ibo, count, tex, tint, alpha test, wire, overlay, material)]
+        self.uvs = []               # UVs, tangents and AO of each mesh (for update_vertices)
+        self.shaded = True          # the materials look (normal / specular maps, paint); False: texture x head light
+        self.paint = (0.55, 0.05, 0.05)
+        self.flip_y = -1.0          # normal map green: DirectX convention
         self.textures = {}          # texture key -> gl id
         self.key = None
         self.yaw, self.pitch, self.dist = 0.6, 0.35, 1.0
@@ -101,7 +202,7 @@ class Viewer:
             if not GL.glGetShaderiv(sh, GL.GL_COMPILE_STATUS):
                 raise RuntimeError(GL.glGetShaderInfoLog(sh).decode('latin1', 'replace'))
             GL.glAttachShader(prog, sh)
-        for i, name in enumerate(('aPos', 'aNrm', 'aUV')):
+        for i, name in enumerate(('aPos', 'aNrm', 'aUV', 'aTan', 'aAO')):
             GL.glBindAttribLocation(prog, i, name)
         GL.glLinkProgram(prog)
         if not GL.glGetProgramiv(prog, GL.GL_LINK_STATUS):
@@ -170,7 +271,8 @@ class Viewer:
         for i, (pos, nrm) in changes.items():
             if i >= len(self.meshes):
                 continue
-            data = np.ascontiguousarray(np.concatenate([pos, nrm, self.uvs[i]], 1), np.float32)
+            uv, tan, ao = self.uvs[i]
+            data = np.ascontiguousarray(np.concatenate([pos, nrm, uv, tan, ao[:, None]], 1), np.float32)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.meshes[i][1])
             GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, data.nbytes, data)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
@@ -199,7 +301,10 @@ class Viewer:
         for i, m in enumerate(meshes):
             nrm = m.normals()
             uv = m.uv if m.uv is not None else np.zeros((len(m.pos), 2), np.float32)
-            data = np.ascontiguousarray(np.concatenate([m.pos, nrm, uv], 1), np.float32)
+            material = getattr(m, 'normal_tex', None) or getattr(m, 'spec_tex', None) or getattr(m, 'paint', False)
+            tan = m.tangents() if getattr(m, 'normal_tex', None) else np.tile(np.float32([1, 0, 0, 1]), (len(m.pos), 1))
+            ao = m.ao if getattr(m, 'ao', None) is not None else np.ones(len(m.pos), np.float32)
+            data = np.ascontiguousarray(np.concatenate([m.pos, nrm, uv, tan, ao[:, None]], 1), np.float32)
             idx = np.ascontiguousarray(m.tris.ravel(), np.uint32)
             vao = GL.glGenVertexArrays(1)
             GL.glBindVertexArray(vao)
@@ -208,15 +313,21 @@ class Viewer:
             GL.glBufferData(GL.GL_ARRAY_BUFFER, data.nbytes, data, GL.GL_STATIC_DRAW)
             GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, ibo)
             GL.glBufferData(GL.GL_ELEMENT_ARRAY_BUFFER, idx.nbytes, idx, GL.GL_STATIC_DRAW)
-            for loc, (n, off) in enumerate(((3, 0), (3, 12), (2, 24))):
+            for loc, (n, off) in enumerate(((3, 0), (3, 12), (2, 24), (4, 32), (1, 48))):
                 GL.glEnableVertexAttribArray(loc)
-                GL.glVertexAttribPointer(loc, n, GL.GL_FLOAT, GL.GL_FALSE, 32, ctypes.c_void_p(off))
+                GL.glVertexAttribPointer(loc, n, GL.GL_FLOAT, GL.GL_FALSE, 52, ctypes.c_void_p(off))
             GL.glBindVertexArray(0)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+            mat = {'normal': self.textures.get(getattr(m, 'normal_tex', None)),
+                   'spec': self.textures.get(getattr(m, 'spec_tex', None)),
+                   'f0': getattr(m, 'spec', None) or (0.04, 0.04, 0.04),
+                   'rough': getattr(m, 'rough', None) or (0.25 if getattr(m, 'paint', False) else 0.55),
+                   'paint': bool(getattr(m, 'paint', False)), 'spec_mode': int(getattr(m, 'spec_mode', 0)),
+                   'lit': not (getattr(m, 'wire', False) or getattr(m, 'overlay', False)), 'has': bool(material)}
             self.meshes.append((vao, vbo, ibo, len(idx), self.textures.get(m.texture), m.tint,
                                 getattr(m, 'alpha_test', False), getattr(m, 'wire', False),
-                                getattr(m, 'overlay', False)))
-            self.uvs.append(uv)
+                                getattr(m, 'overlay', False), mat))
+            self.uvs.append((uv, tan, ao))
 
     # -- drawing ----------------------------------------------------------------------------------------------
     def render(self, w, h):
@@ -245,26 +356,45 @@ class Viewer:
         GL.glUseProgram(self.prog)
         GL.glUniformMatrix4fv(GL.glGetUniformLocation(self.prog, 'uMVP'), 1, GL.GL_TRUE, mvp)
         GL.glUniformMatrix4fv(GL.glGetUniformLocation(self.prog, 'uMV'), 1, GL.GL_TRUE, mv)
-        GL.glUniform1i(GL.glGetUniformLocation(self.prog, 'uTex'), 0)
-        loc_use = GL.glGetUniformLocation(self.prog, 'uUseTex')
-        loc_tint = GL.glGetUniformLocation(self.prog, 'uTint')
-        loc_alpha = GL.glGetUniformLocation(self.prog, 'uAlphaTest')
-        GL.glActiveTexture(GL.GL_TEXTURE0)
+        loc = {n: GL.glGetUniformLocation(self.prog, n) for n in (
+            'uTex', 'uNormal', 'uSpec', 'uUseTex', 'uTint', 'uAlphaTest', 'uShaded', 'uUseNormal', 'uUseSpec',
+            'uPaint', 'uSpecColour', 'uRough', 'uPaintColour', 'uUp', 'uFlipY', 'uSpecMode')}
+        GL.glUniform1i(loc['uTex'], 0)
+        GL.glUniform1i(loc['uNormal'], 1)
+        GL.glUniform1i(loc['uSpec'], 2)
+        GL.glUniform3f(loc['uPaintColour'], *self.paint)
+        GL.glUniform3f(loc['uUp'], *(mv[:3, :3] @ up))
+        GL.glUniform1f(loc['uFlipY'], self.flip_y)
         cleared = False
-        for vao, _, _, count, tex, tint, alpha, wire, over in sorted(self.meshes, key=lambda x: x[8]):
+        for vao, _, _, count, tex, tint, alpha, wire, over, mat in sorted(self.meshes, key=lambda x: x[8]):
             if over and not cleared:          # overlays last, over the rest (markers inside a car stay visible)
                 GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
                 cleared = True
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE if self.wire or wire else GL.GL_FILL)
             use = bool(tex) and self.use_tex and not self.wire and not wire
-            GL.glUniform1i(loc_use, 1 if use else 0)
-            GL.glUniform1i(loc_alpha, 1 if alpha else 0)
-            GL.glUniform3f(loc_tint, *tint)
-            GL.glBindTexture(GL.GL_TEXTURE_2D, tex if use else self.white)
+            shaded = self.shaded and mat['lit'] and not self.wire
+            maps = shaded and self.use_tex
+            GL.glUniform1i(loc['uUseTex'], 1 if use else 0)
+            GL.glUniform1i(loc['uAlphaTest'], 1 if alpha else 0)
+            GL.glUniform3f(loc['uTint'], *tint)
+            GL.glUniform1i(loc['uShaded'], 1 if shaded else 0)
+            GL.glUniform1i(loc['uUseNormal'], 1 if maps and mat['normal'] else 0)
+            GL.glUniform1i(loc['uUseSpec'], 1 if maps and mat['spec'] else 0)
+            GL.glUniform1i(loc['uPaint'], 1 if shaded and mat['paint'] else 0)
+            GL.glUniform3f(loc['uSpecColour'], *mat['f0'])
+            GL.glUniform1f(loc['uRough'], mat['rough'])
+            GL.glUniform1i(loc['uSpecMode'], mat['spec_mode'])
+            for unit, t in ((0, tex if use else self.white), (1, mat['normal'] if maps and mat['normal'] else
+                                                               self.white), (2, mat['spec'] if maps and mat['spec']
+                                                                             else self.white)):
+                GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
+                GL.glBindTexture(GL.GL_TEXTURE_2D, t)
             GL.glBindVertexArray(vao)
             GL.glDrawElements(GL.GL_TRIANGLES, count, GL.GL_UNSIGNED_INT, None)
         GL.glBindVertexArray(0)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        for unit in (2, 1, 0):
+            GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
         GL.glUseProgram(0)
         GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
         GL.glDisable(GL.GL_DEPTH_TEST)

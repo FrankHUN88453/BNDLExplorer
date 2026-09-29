@@ -26,6 +26,7 @@ vertices u16 x3 in 1000/65536 m units; polygons 12 bytes: u32 collision tag, u8 
 triangle; quads first, split 0-1-2 / 1-3-2), u8 x4 edge data.
 """
 import collections
+import dataclasses
 import glob
 import os
 import struct
@@ -73,6 +74,15 @@ class MeshData:
     weights: np.ndarray = None  # (N, k) blend weights, summing to 1
     dent_points: np.ndarray = None   # (N, 2) PS3 prototype cars: the ControlMesh points a vertex follows
     dent_weights: np.ndarray = None  # (N, 2) their weights
+    # the material, for the shaded view and FBX: normal map (RGB normal, A roughness), specular map (RGB F0,
+    # A metalness), constant F0 / roughness when there is no map, car paint (the player's colour), vertex AO
+    normal_tex: int = None
+    spec_tex: int = None
+    spec: tuple = None
+    rough: float = None
+    paint: bool = False
+    ao: np.ndarray = None
+    spec_mode: int = 0         # 0 vehicle (RGB F0, A metal), 1 world packed (R reflectance, G gloss), 2 RGB F0
 
     def placed(self, m, flip=False):
         """This mesh moved by the 4x4 row-vector matrix m (normals follow; flip reverses the triangles)."""
@@ -82,9 +92,37 @@ class MeshData:
         nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
         tris = self.tris[:, ::-1].copy() if flip else self.tris
         x = m if self.xform is None else self.xform @ m
-        return MeshData(pos, self.uv, tris, self.material, self.texture, self.shader, self.tint,
-                        nrm.astype(np.float32), self.alpha_test, self.wire, self.src, x, self.uvs, self.overlay,
-                        self.joints, self.weights, self.dent_points, self.dent_weights)
+        return dataclasses.replace(self, pos=pos, tris=tris, nrm=nrm.astype(np.float32), xform=x)
+
+    def tangents(self):
+        """(N, 4) tangents along +u with the bitangent sign in w, from the triangles and the first UV set (for
+        normal mapping; the car formats store frames, but every mesh has UVs)."""
+        n = self.normals().astype(np.float64)
+        tan = np.zeros((len(self.pos), 4), np.float32)
+        tan[:, 0], tan[:, 3] = 1, 1
+        if self.uv is None or not len(self.tris):
+            return tan
+        p = self.pos.astype(np.float64)
+        uv = self.uv.astype(np.float64)
+        t = self.tris.astype(np.int64)
+        e1, e2 = p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]]
+        d1, d2 = uv[t[:, 1]] - uv[t[:, 0]], uv[t[:, 2]] - uv[t[:, 0]]
+        det = d1[:, 0] * d2[:, 1] - d2[:, 0] * d1[:, 1]
+        r = np.where(np.abs(det) > 1e-12, 1.0 / np.where(det == 0, 1, det), 0.0)[:, None]
+        sdir = (e1 * d2[:, 1:2] - e2 * d1[:, 1:2]) * r
+        tdir = (e2 * d1[:, 0:1] - e1 * d2[:, 0:1]) * r
+        ts, bs = np.zeros_like(p), np.zeros_like(p)
+        for k in range(3):
+            np.add.at(ts, t[:, k], sdir)
+            np.add.at(bs, t[:, k], tdir)
+        ts -= n * np.sum(n * ts, 1, keepdims=True)
+        ln = np.linalg.norm(ts, axis=1, keepdims=True)
+        other = np.cross(n, np.where(np.abs(n[:, :1]) < 0.9, [[1.0, 0, 0]], [[0, 1.0, 0]]))
+        ts = np.where(ln > 1e-9, ts / np.maximum(ln, 1e-12), other / np.maximum(np.linalg.norm(other, axis=1,
+                                                                                                keepdims=True), 1e-12))
+        tan[:, :3] = ts
+        tan[:, 3] = np.where(np.sum(np.cross(n, ts) * bs, 1) < 0, -1.0, 1.0)
+        return tan
 
     def normals(self):
         if self.nrm is None:
@@ -329,6 +367,54 @@ def strips_to_tris(ib):
 DIFFUSE_COLOUR = 0x067923B3          # ~crc32('PbrMaterialDiffuseColour')
 
 
+NORMAL_SLOT, SPECULAR_SLOT = 0x0D9C, 0x31F2
+SPECULAR_COLOUR, ROUGHNESS = 0x58ED4287, 0x90BA1E21      # ~crc32('PbrMaterialSpecularColour'), roughness (likely)
+SPECULAR_SETTINGS = 0x202D5108                           # PbrMaterialSpecularSettings: x = roughness (PS3)
+
+
+def material_pbr(b, mat, shader_name=''):
+    """{'normal': texture id, 'spec_tex': texture id, 'spec': F0 (linear RGB) or None, 'rough': float or None,
+    'paint': bool} of a material: the normal map (RGB tangent-space normal, A roughness) and specular map (RGB F0,
+    A metalness) of the physically based shaders, the constants used when a map is missing, and whether the car
+    paint colour shows through (BodyPaint / PaintGloss shaders)."""
+    low = shader_name.lower()
+    out = {'normal': None, 'spec_tex': None, 'spec': None, 'rough': None, 'paint': 'paint' in low,
+           # vehicle maps are verified; the world shaders pack their specular map (R reflectance, G / B gloss),
+           # except the ColouredSpecular ones (RGB)
+           'spec_mode': 0 if low.startswith('vehicle') else 2 if 'colouredspecular' in low else 1}
+    try:
+        info = material_info(b, mat)
+    except (struct.error, IndexError, ValueError):
+        return out
+    have = {slot: tid for slot, tid, _, _ in info['textures'] if tid}
+    if 'tyre' in shader_name.lower():
+        out['rough'] = 0.85
+    out['normal'] = have.get(NORMAL_SLOT)
+    out['spec_tex'] = have.get(SPECULAR_SLOT)
+    for h, v, _ in info['constants']:
+        if h == SPECULAR_COLOUR:
+            out['spec'] = tuple(float(min(1.0, max(0.0, x))) for x in v[:3])
+        elif h == ROUGHNESS or h == SPECULAR_SETTINGS and out['rough'] is None:
+            out['rough'] = float(min(1.0, max(0.02, v[0])))
+    return out
+
+
+def texture_ids(meshes, maps=True):
+    """The textures the meshes show: diffuse, and with maps their normal and specular maps."""
+    ids = {m.texture for m in meshes if m.texture}
+    if maps:
+        ids |= {t for m in meshes for t in (m.normal_tex, m.spec_tex) if t}
+    return ids
+
+
+def vertex_ao(raw, e, layout):
+    """Per-vertex ambient occlusion (the first channel of the vertex colour: PC COLOR, PS3 attribute 3), or None."""
+    el = next((x for x in layout if x[0] in ('u4', 'a3') and x[1] == 'u8n' and x[2] == 4), None)
+    if el is None:
+        return None
+    return raw[:, el[3]].astype(np.float32) / 255.0
+
+
 def material_look(b, mat, shader_name=''):
     """(diffuse texture id or None, RGB tint for untextured display) of a material."""
     tex, tint = None, None
@@ -352,7 +438,9 @@ def material_look(b, mat, shader_name=''):
         pass
     if tint is None:
         low = shader_name.lower()
-        tint = (0.16, 0.19, 0.22) if 'glass' in low or 'refraction' in low else             (0.62, 0.64, 0.68) if 'paint' in low else (0.72, 0.72, 0.74)
+        tint = ((0.16, 0.19, 0.22) if 'glass' in low or 'refraction' in low else
+                (0.12, 0.12, 0.12) if 'tyre' in low else           # rubber: the tyre shaders have no colour map
+                (0.62, 0.64, 0.68) if 'paint' in low else (0.72, 0.72, 0.74))
     return tex, tint
 
 
@@ -459,6 +547,11 @@ def decode_renderable(b, res, lib, bundles, root, parts=None):
         md.uvs = [x for x in (_read(raw, e, u[1], u[2], u[3]) for u in uv_sets(layout)[1:]) if x is not None] or None
         md.joints, md.weights = blend_weights(raw, layout)
         md.dent_points, md.dent_weights = dent_weights(raw, layout)
+        pbr = material_pbr(mb, mat, sname)
+        md.normal_tex, md.spec_tex, md.spec, md.rough, md.paint = (pbr['normal'], pbr['spec_tex'], pbr['spec'],
+                                                                   pbr['rough'], pbr['paint'])
+        md.spec_mode = pbr['spec_mode']
+        md.ao = vertex_ao(raw, e, layout)
         out.append(md)
         if parts is not None:
             parts[k] = (mr, layout, stride, raw)

@@ -141,7 +141,7 @@ class AnimUI:
                                         wire=True, overlay=True))              # forward axes, filled in when posed
             if pm is not None:
                 meshes.append(pm)
-        texs = {t: self.texture_image(d, t, 1024) for t in {m.texture for m in meshes if m.texture}}
+        texs = {t: self.texture_image(d, t, 1024) for t in mesh.texture_ids(meshes)}
         return {'anims': anims, 'skel': skel, 'skel_res': skel_res, 'meshes': meshes, 'texs': texs,
                 'skinned': skinned, 'sk_at': sk_at, 'size': size, 'car': car, 'bounds': bounds}
 
@@ -226,6 +226,8 @@ class AnimUI:
             return
         _, v.use_tex = imgui.checkbox('Textures', v.use_tex)
         imgui.same_line()
+        _, v.shaded = imgui.checkbox('Shaded##anim', v.shaded)
+        imgui.same_line()
         _, v.wire = imgui.checkbox('Wireframe', v.wire)
         imgui.same_line()
         ch, st['bones'] = imgui.checkbox('Bones', st['bones'])
@@ -293,6 +295,7 @@ class AnimUI:
         if self.viewer is None:
             from .viewer3d import Viewer
             self.viewer = Viewer()
+            self.viewer.paint = tuple(self.cfg.get('paint', self.viewer.paint))
         v = self.viewer
         if v.key != ('anim',) + key:
             try:

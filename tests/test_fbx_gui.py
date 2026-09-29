@@ -85,6 +85,14 @@ def main():
     n, nt = state.get('export', (0, 0))
     pngs = os.listdir(os.path.join(TMP, 'car_textures')) if os.path.isdir(os.path.join(TMP, 'car_textures')) else []
     check(n == 45 and nt > 0 and len(pngs) == nt, f'Export FBX: {n} meshes, {nt} textures as PNG next to it')
+    links = set()
+    if os.path.isfile(out):
+        _, nodes = fbx.read_binary(open(out, 'rb').read())
+        conns = next(x for x in nodes if x.name == 'Connections')
+        links = {c.props[3] for c in conns.findall('C') if len(c.props) > 3 and c.props[0] == 'OP'}
+    kinds = {k for k in ('_base', '_normal', '_rough', '_metal') if any(k in p for p in pngs)}
+    check(len(kinds) == 4 and {'DiffuseColor', 'NormalMap', 'ShininessExponent', 'ReflectionFactor'} <= links,
+          f'FBX materials: base colour, normal, roughness and metal maps linked ({sorted(kinds)})')
     check('replaced' in state.get('report', '') and 'further copies' in state.get('report', ''),
           'Import FBX of the exported file reports the replaced meshes: '
           + state.get('report', '').split(chr(10))[0])
