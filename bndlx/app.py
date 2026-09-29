@@ -16,6 +16,8 @@ from imgui_bundle import hello_imgui, imgui, immvision
 
 from . import convert, dragdrop, eal3, filedialog, genesys, gltf, mesh, ops, raster, resfile, textfile, theme
 from . import vehiclelist as VL
+from . import zonelist as ZL
+from . import spsfile
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -26,7 +28,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.7'
+VERSION = '0.8'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -160,7 +162,9 @@ class App(ExplorerUI):
         self.names = N.NameDB.load()
         self.mesh_lib = mesh.Library(lambda rid: self.names.where.get(rid))
         self.viewer = None
-        self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0, 'show': 0, 'stats': None}
+        self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0, 'show': 0, 'stats': None,
+                      'nb': False, 'progress': ''}
+        self.zmap = {'key': None}
         self.vlist = {'key': None, 'obj': None, 'sel': 0, 'msel': 0, 'filter': '', 'error': None}
         self.folder_cache = {}
         self.addr_edit = None
@@ -236,8 +240,14 @@ class App(ExplorerUI):
                 self.status = f'{d.name} is already open.'
                 return d
         try:
-            b = Bundle.open(path)
-        except (OSError, BundleError) as e:
+            if spsfile.is_sps_file(path):
+                b = spsfile.SpsBundle.open(path, lambda rid: self.names.where.get(rid))
+                title = ops.song_titles(path).get(os.path.basename(path).upper())
+                if title:
+                    b.resources[0].name = f'{title} ({os.path.basename(path)})'
+            else:
+                b = Bundle.open(path)
+        except (OSError, BundleError, eal3.AudioError) as e:
             self.status = f'Cannot open {path}: {e}'
             return None
         d = Doc(b, path)
@@ -248,7 +258,13 @@ class App(ExplorerUI):
         self.types.add_bundle(b)
         self.remember('last_bundle', path)
         extra = ' The file is truncated: read only.' if b.truncated else ''
-        self.status = f'Opened {path}: {b.platform}, {len(b.resources)} resources.{extra}'
+        if getattr(b, 'kind', '') == 'sps':
+            self.goto(b.resources[0].id, d)
+            self.status = f'Opened the sound stream {path}.' + (
+                f' Its start is in {os.path.basename(b.owner[0])}.' if b.owner else
+                ' It continues a sound whose start was not found (run Find names).' if b.headerless and not b.prefix else '')
+        else:
+            self.status = f'Opened {path}: {b.platform}, {len(b.resources)} resources.{extra}'
         return d
 
     def rebuild_types(self):
@@ -380,12 +396,20 @@ class App(ExplorerUI):
     def action_save_as(self, d):
         if d is None:
             return
+        if getattr(d.b, 'kind', '') == 'sps':
+            p = filedialog.save_file('Save sound stream as', d.path or '', filedialog.SPS, 'SPS')
+            if p:
+                self.action_save(d, p)
+            return
         p = filedialog.save_file('Save bundle as', d.path or self.cfg.get('last_bundle', ''), filedialog.BUNDLES, 'BNDL')
         if p:
             self.action_save(d, p)
 
     def action_convert(self, d, target):
         if d is None:
+            return
+        if getattr(d.b, 'kind', '') == 'sps':
+            self.status = 'Sound streams (.SPS) are the same on PC and PS3; nothing to convert.'
             return
         if d.b.platform == target:
             self.status = f'{d.name} is already a {target} bundle.'
@@ -407,6 +431,29 @@ class App(ExplorerUI):
             self.status = f'Converted {d.name} to {target}: {rep["converted"]} resources.'
 
         self.run_job(f'Converting to {target}...', job, done)
+
+    def action_export_sps(self, src=None):
+        """Every .SPS file of a folder (and its sub folders) as WAV files."""
+        src = src or filedialog.pick_folder('Export the .SPS sound streams of this folder (and its sub folders)')
+        if not src:
+            return
+        dst = filedialog.pick_folder('Write the WAV files into this folder')
+        if not dst:
+            return
+
+        def loc(rid):
+            return self.names.where.get(rid)
+
+        def done(res):
+            n, errors = res
+            text = f'{n} sound stream(s) written as WAV to {dst}.'
+            if errors:
+                text += chr(10) * 2 + 'Not exported:' + chr(10) + chr(10).join(
+                    f'{os.path.basename(p)}: {e}' for p, e in errors[:20])
+            self.modal = {'kind': 'message', 'title': 'Export sound streams', 'text': text}
+            self.status = text.split(chr(10))[0]
+
+        self.run_job('Exporting sound streams...', lambda pr: ops.export_sps_folder(src, dst, loc, pr), done)
 
     def action_extract(self, d):
         if d is None:
@@ -547,6 +594,13 @@ class App(ExplorerUI):
                 nv, nm = ops.vehicles_from_csv(d.b, res, data.decode('utf-8-sig'))
                 self.vlist['key'] = None
                 msg = f'Vehicle list {res.id:#x} replaced: {nv} vehicles, {nm} manufacturers.'
+            elif res.type == 0x81 and ext in eal3.AUDIO_EXT and getattr(d.b, 'prefix', b''):
+                d.undo.pop()
+                self.modal = {'kind': 'message', 'title': 'Replace sound',
+                              'text': f'{d.name} continues a sound whose start is in '
+                                      f'{os.path.basename(d.b.owner[0])}. Open that bundle and replace the sound '
+                                      f'there: both the bundle and this file are rewritten.'}
+                return False
             elif res.type == 0x81 and ext in eal3.AUDIO_EXT:
                 desc = ops.replace_wave(d.b, res, path=path, rate=options.get('rate'), channels=options.get('channels'),
                                         quality=options.get('quality', 0.2), bundle_path=d.path)
@@ -743,6 +797,12 @@ class App(ExplorerUI):
             except OSError:
                 continue
             (bundles if magic[:4] == b'bnd2' else others).append((p, magic))
+        # .SPS files open as sound streams unless one is dropped on a Wave (then it replaces that sound)
+        on_wave = target is not None and target.type == 0x81 and area in ('details', 'row') and len(others) == 1
+        if not on_wave:
+            for p, _ in [x for x in others if spsfile.is_sps_file(x[0])]:
+                bundles.append((p, None))
+            others = [x for x in others if not spsfile.is_sps_file(x[0])]
         for p, _ in bundles:
             self.open_path(p)
         if not others:
@@ -1141,6 +1201,11 @@ class App(ExplorerUI):
         imgui.text(d.name)
         imgui.text_disabled(d.path or '')
         imgui.separator()
+        if getattr(b, 'kind', '') == 'sps':
+            imgui.text('Sound stream (.SPS): one sound, the same on PC and PS3.')
+            if b.owner:
+                imgui.text_disabled(f'Its first part is in {os.path.basename(b.owner[0])}.')
+            return
         flags = ', '.join(n for bit, n in FLAG_NAMES if b.flags & bit) or 'none'
         imgui.text(f'Platform: {b.platform}    version {b.version}    {len(b.resources)} resources')
         imgui.text(f'Flags: {b.flags:#x} ({flags})')
@@ -1329,6 +1394,8 @@ class App(ExplorerUI):
             self.material_view(d, r)
         elif t == VL.T_VEHICLELIST:
             self.vehicle_list_view(d, r)
+        elif t == ZL.T_ZONELIST:
+            self.zone_map_view(d, r)
         else:
             imgui.text_wrapped(f'{type_name(t)}: no viewer for this type yet. The Imports and Hex tabs show its data; '
                                'Export / Replace work for every type (.bres or raw chunks).')
@@ -1477,6 +1544,19 @@ class App(ExplorerUI):
         return hit
 
     def wave_view(self, d, r):
+        if getattr(d.b, 'kind', '') == 'sps':
+            if d.b.owner:
+                imgui.text_disabled(f'Sound stream file; its first part is in {os.path.basename(d.b.owner[0])}.')
+                imgui.same_line()
+                if imgui.small_button('Open that bundle'):
+                    nd = self.open_path(d.b.owner[0])
+                    if nd is not None:
+                        self.goto(d.b.owner[1], nd)
+            elif d.b.headerless:
+                imgui.text_wrapped('This file continues a sound whose start is stored in a bundle, which was not '
+                                   'found. Run Find names (... menu), then open the file again.')
+            else:
+                imgui.text_disabled('Sound stream file (.SPS): Replace or drop an audio file, then Save (Ctrl+S).')
         key = ('wave', d.uid, r.id, id(r.data(0)))
         hit = self.gcache.get(key)
         if hit is None:
@@ -1564,27 +1644,52 @@ class App(ExplorerUI):
     def model_view(self, d, r):
         st = self.model
         show = st['show'] if r.type == mesh.T_INSTANCELIST else 0
-        key = (d.uid, r.id, id(r.data(0)), st['lod'], show)
+        nb = st['nb'] and r.type == mesh.T_INSTANCELIST
+        key = (d.uid, r.id, id(r.data(0)), st['lod'], show, nb)
         if st['key'] != key:
             st['key'] = key
             st['result'] = None
 
-            def work(key=key, lod=st['lod'], show=show):
+            def work(key=key, lod=st['lod'], show=show, nb=nb):
                 try:
                     if r.type == mesh.T_INSTANCELIST:
-                        meshes, stats, size = [], {}, 256        # a whole track unit: small textures
-                        if show in (0, 2):
-                            meshes, stats = mesh.decode_instances(d.b, r, self.mesh_lib, self.model_bundles(d)[1:],
-                                                                  d.path, lod)
+                        meshes, size = [], 128 if nb else 256        # whole track units: small textures
+                        units = [(d.b, r, d.path)]
+                        if nb:
+                            for p in ZL.neighbour_paths(d.path):
+                                self.model['progress'] = f'loading {os.path.basename(p)}...'
+                                ub = self.mesh_lib.open_extra(p)
+                                ur = next((x for x in ub.resources if x.type == mesh.T_INSTANCELIST), None) if ub else None
+                                if ur is not None:
+                                    units.append((ub, ur, p))
+                        stats = {'instances': 0, 'shown': 0, 'models': 0, 'missing': [], 'kinds': {}, 'units': len(units)}
+                        csum = {'soups': 0, 'polygons': 0, 'tags': {}}
+                        for ub, ur, up in units:
+                            self.model['progress'] = f'decoding {os.path.basename(up)}...'
+                            if show in (0, 2):
+                                ms, s1 = mesh.decode_instances(ub, ur, self.mesh_lib, self.model_bundles(d)[1:], up, lod)
+                                meshes += ms
+                                for k in ('instances', 'shown', 'models'):
+                                    stats[k] += s1[k]
+                                stats['missing'] += s1['missing']
+                                for k, v in s1['kinds'].items():
+                                    stats['kinds'][k] = stats['kinds'].get(k, 0) + v
+                            if show in (1, 2):
+                                soup = next((x for x in ub.resources if x.type == mesh.T_POLYSOUP), None)
+                                if soup is None:
+                                    continue
+                                cm, cst = mesh.decode_polysoup(ub, soup)
+                                for m in cm:
+                                    m.wire = show == 2
+                                meshes += cm
+                                csum['soups'] += cst['soups']
+                                csum['polygons'] += cst['polygons']
+                                for t, n in cst['tags'].items():
+                                    csum['tags'][t] = csum['tags'].get(t, 0) + n
                         if show in (1, 2):
-                            soup = next((x for x in d.b.resources if x.type == mesh.T_POLYSOUP), None)
-                            if soup is None:
-                                raise mesh.MeshError('this bundle has no collision (PolygonSoupList)')
-                            cm, cst = mesh.decode_polysoup(d.b, soup)
-                            for m in cm:
-                                m.wire = show == 2
-                            meshes = meshes + cm
-                            stats = dict(stats, collision=cst)
+                            stats['collision'] = csum
+                        if not meshes:
+                            raise mesh.MeshError('nothing to show')
                         nlod = 4
                     elif r.type == mesh.T_POLYSOUP:
                         meshes, cst = mesh.decode_polysoup(d.b, r)
@@ -1592,9 +1697,9 @@ class App(ExplorerUI):
                     else:
                         meshes, nlod = mesh.decode_resource(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
                         stats, size = None, 1024
+                    self.model['progress'] = 'loading the textures...'
                     texs = {t: self.texture_image(d, t, size) for t in {m.texture for m in meshes if m.texture}}
-                    st['stats'] = stats
-                    res = ('ok', meshes, texs, nlod)
+                    res = ('ok', meshes, texs, nlod, stats)
                 except Exception as e:
                     res = ('error', str(e))
                 if self.model['key'] == key:
@@ -1603,12 +1708,14 @@ class App(ExplorerUI):
             threading.Thread(target=work, daemon=True).start()
         res = st['result']
         if res is None:
-            imgui.text_disabled('loading the geometry...')
+            imgui.text_disabled(st.get('progress') or 'loading the geometry...')
             return
         if res[0] == 'error':
             imgui.text_wrapped(f'Cannot show this model: {res[1]}')
+            if r.type == mesh.T_INSTANCELIST and (st['show'] or st['nb']) and imgui.button('Back to the world view'):
+                st['show'], st['nb'] = 0, False
             return
-        _, meshes, texs, nlod = res
+        _, meshes, texs, nlod, st['stats'] = res
         if self.viewer is None:
             from .viewer3d import Viewer
             self.viewer = Viewer()
@@ -1631,18 +1738,27 @@ class App(ExplorerUI):
                 imgui.set_tooltip('Triangles per collision tag (colour in the view):' + chr(10) + chr(10).join(
                     f'{t:#010x}  {n}' for t, n in sorted(cst['tags'].items(), key=lambda x: -x[1])[:24]))
         elif stats and 'instances' in stats:
-            imgui.text(f'{stats["shown"]} of {stats["instances"]} instances ({stats["models"]} models), '
+            units = f'{stats["units"]} units, ' if stats.get('units', 1) > 1 else ''
+            imgui.text(f'{units}{stats["shown"]} of {stats["instances"]} instances ({stats["models"]} models), '
                        f'{ntri:,} triangles'.replace(',', ' '))
-            if stats['missing'] and imgui.is_item_hovered():
-                imgui.set_tooltip('Models not found: ' + ', '.join(ops.id_text(x) for x in stats['missing'][:12]))
+            if imgui.is_item_hovered():
+                k = stats.get('kinds', {})
+                tip = ', '.join(f'{k[n]} {n}' for n in ('world', 'props', 'dynamic', 'compound') if k.get(n))
+                if stats['missing']:
+                    tip += '\nModels not found: ' + ', '.join(ops.id_text(x) for x in stats['missing'][:12])
+                imgui.set_tooltip(tip)
         else:
             imgui.text(f'{len(meshes)} mesh(es), {ntri:,} triangles, {nvert:,} vertices'.replace(',', ' '))
         if r.type == mesh.T_INSTANCELIST:
-            imgui.same_line()
-            imgui.set_next_item_width(150)
+            imgui.set_next_item_width(150)          # own row: the summary line is long for whole units
             ch, sh = imgui.combo('##show', st['show'], ['World', 'Collision', 'World + collision'])
             if ch:
                 st['show'] = sh
+            imgui.same_line()
+            ch, st['nb'] = imgui.checkbox('Neighbours', st['nb'])
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Also show the track units that share a border with this one (from HAWAII' + chr(92)
+                                  + 'PVS.BNDL)')
         if nlod > 1 or r.type == 0x51:
             imgui.same_line()
             imgui.set_next_item_width(90)
@@ -2039,6 +2155,115 @@ class App(ExplorerUI):
                 else:
                     imgui.text_disabled('no VEH bundle')
         imgui.end_table()
+
+    # -- zone map ---------------------------------------------------------------------------------------------
+    def zone_map_view(self, d, r):
+        """HAWAII\\PVS.BNDL: the track units as a map; click one to open it."""
+        key = (d.uid, r.id, id(r.data(0)))
+        zm = self.zmap
+        if zm.get('key') != key:
+            try:
+                zones = ZL.read(r, d.b.e)
+            except (struct.error, IndexError) as ex:
+                zones = []
+                self.status = f'Cannot read the zone list: {ex}'
+            self.zmap = zm = {'key': key, 'zones': zones, 'zoom': 1.0, 'pan': [0.0, 0.0]}
+        zones = zm['zones']
+        if not zones:
+            imgui.text_disabled('No zones.')
+            return
+        districts = sorted({z.district for z in zones})
+        import colorsys
+        pal = {dd: colorsys.hsv_to_rgb(i / max(len(districts), 1), 0.55, 0.85) for i, dd in enumerate(districts)}
+        imgui.text(f'{len(zones)} track units in {len(districts)} districts')
+        imgui.same_line()
+        imgui.text_disabled('click: open the unit, wheel: zoom, right drag: move')
+        line_w = imgui.get_content_region_avail().x
+        used = 0.0
+        for i, dd in enumerate(districts):
+            c = pal[dd]
+            label = f'DISTRICT_{dd} ({sum(1 for z in zones if z.district == dd)})'
+            w = 12 + 3 * imgui.get_style().item_spacing.x + imgui.calc_text_size(label).x
+            if i and used + w <= line_w:
+                imgui.same_line()
+            else:
+                used = 0.0
+            used += w
+            imgui.color_button(f'##dc{dd}', imgui.ImVec4(c[0], c[1], c[2], 1), 0, imgui.ImVec2(12, 12))
+            imgui.same_line()
+            imgui.text(label)
+        avail = imgui.get_content_region_avail()
+        w, h = max(100.0, avail.x), max(100.0, avail.y - 4)
+        p0 = imgui.get_cursor_screen_pos()
+        imgui.invisible_button('##zmap', imgui.ImVec2(w, h), imgui.ButtonFlags_.mouse_button_left | imgui.ButtonFlags_.mouse_button_right)
+        hovered = imgui.is_item_hovered()
+        clicked = imgui.is_item_clicked(imgui.MouseButton_.left)
+        io = imgui.get_io()
+        xs = [x for z in zones for x, _ in z.points]
+        ys = [y for z in zones for _, y in z.points]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        base = 0.95 * min(w / max(max(xs) - min(xs), 1), h / max(max(ys) - min(ys), 1))
+        scale = base * zm['zoom']
+        ox, oy = cx + zm['pan'][0], cy + zm['pan'][1]
+
+        def scr(x, y):
+            return imgui.ImVec2(p0.x + w / 2 + (x - ox) * scale, p0.y + h / 2 + (y - oy) * scale)
+
+        mx, my = (io.mouse_pos.x - p0.x - w / 2) / scale + ox, (io.mouse_pos.y - p0.y - h / 2) / scale + oy
+        if hovered and io.mouse_wheel:
+            f = 1.2 ** io.mouse_wheel
+            zm['zoom'] = min(40.0, max(0.5, zm['zoom'] * f))
+            ns = base * zm['zoom']
+            zm['pan'][0] = mx - (io.mouse_pos.x - p0.x - w / 2) / ns - cx      # keep the point under the mouse
+            zm['pan'][1] = my - (io.mouse_pos.y - p0.y - h / 2) / ns - cy
+        if imgui.is_item_active() and imgui.is_mouse_down(1):
+            zm['pan'][0] -= io.mouse_delta.x / scale
+            zm['pan'][1] -= io.mouse_delta.y / scale
+
+        def inside(z, x, y):
+            pts, c = z.points, False
+            for i in range(len(pts)):
+                (x1, y1), (x2, y2) = pts[i], pts[i - 1]
+                if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+                    c = not c
+            return c
+
+        hot = next((z for z in zones if hovered and inside(z, mx, my)), None)
+        near = {zones[j].index for j, fl in hot.neighbours if fl & 2} if hot is not None else set()
+        dl = imgui.get_window_draw_list()
+        dl.push_clip_rect(p0, imgui.ImVec2(p0.x + w, p0.y + h), True)
+        dl.add_rect_filled(p0, imgui.ImVec2(p0.x + w, p0.y + h), imgui.get_color_u32(imgui.Col_.frame_bg))
+        for z in zones:
+            c = pal[z.district]
+            a = 0.95 if z is hot else 0.75 if z.index in near else 0.45
+            pts = [scr(x, y) for x, y in z.points]
+            if len(pts) >= 3:
+                dl.add_concave_poly_filled(pts, imgui.color_convert_float4_to_u32(imgui.ImVec4(c[0], c[1], c[2], a)))
+                dl.add_polyline(pts, imgui.get_color_u32(imgui.Col_.border), 1.0, imgui.ImDrawFlags_.closed)
+            if scale * min(z.box[2] - z.box[0], z.box[3] - z.box[1]) > 28:
+                sx = sum(p.x for p in pts) / len(pts)
+                sy = sum(p.y for p in pts) / len(pts)
+                t = str(z.unit)
+                ts = imgui.calc_text_size(t)
+                dl.add_text(imgui.ImVec2(sx - ts.x / 2, sy - ts.y / 2), imgui.get_color_u32(imgui.Col_.text), t)
+        dl.pop_clip_rect()
+        if hot is not None:
+            nbs = ', '.join(str(zones[j].unit) for j, fl in hot.neighbours if fl & 2)
+            imgui.set_tooltip(f'TRK_UNIT{hot.unit}.BNDL' + chr(10) + f'DISTRICT_{hot.district}' + chr(10)
+                              + f'next to: {nbs}' + chr(10) + 'click to open')
+            if clicked:
+                self.open_unit(os.path.join(os.path.dirname(d.path or ''), ZL.unit_file(hot.unit)))
+
+    def open_unit(self, path):
+        """Open a TRK_UNIT bundle and select its InstanceList (the 3D view of the unit)."""
+        if not os.path.isfile(path):
+            self.status = f'{path} not found.'
+            return
+        nd = self.open_path(path)
+        if nd is not None:
+            rid = next((x.id for x in nd.b.resources if x.type == mesh.T_INSTANCELIST), None)
+            if rid is not None:
+                self.goto(rid, nd)
 
     def export_glb(self, d, res, path):
         lod = self.model['lod'] if self.model['key'] and self.model['key'][1] == res.id else 0
@@ -2705,9 +2930,13 @@ Materials: the shader, the textures by slot (Diffuse, Normal, Specular, ...) wit
 constants by name (PbrMaterialDiffuseColour, ...), editable. Go jumps to an open resource; Open opens the
 bundle that has it (known after Find names).
 
-Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece of the city in 3D (World /
-Collision / World + collision); the PolygonSoupList is the collision, coloured by surface tag. Shared models come
-from the DISTRICT and GLOBALRESOURCES bundles (found faster after Find names).
+Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece of the city in 3D with its props
+(World / Collision / World + collision, Neighbours); the PolygonSoupList is the collision, coloured by surface tag.
+Shared models come from the DISTRICT and GLOBALRESOURCES bundles (found faster after Find names).
+HAWAII\\PVS.BNDL: a map of all track units; click one to open it.
+
+Sound streams (.SPS files: music, ambience, sequence and video sound): open them like bundles; play, export WAV,
+replace and save. ... > Export sound streams (.SPS) of a folder as WAV converts a whole folder.
 
 Vehicle list (VEHICLES\\VEHICLELIST): every car with its name, manufacturer, speed, power, ratings, ...; select a
 car to edit its fields; Duplicate / Delete / arrows change the rows. Export / Import CSV (Excel with ';' and

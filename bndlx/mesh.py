@@ -15,6 +15,9 @@ InstanceList (0x50, the static world of a TRK_UNIT bundle), PC: u32 instances of
 u32 count, u32 version (3); 0x60-byte instances: model import at +0, f32 at +4, u32 instance id at +8, a 4x4
 row-vector matrix at +0x20 (translation in the 4th row; the 4th column is not used). Shared world models are
 in HAWAII\\GLOBALRESOURCES.BNDL and HAWAII\\DISTRICT_*.BNDL.
+Prop / Dynamic / Compound instance lists (0x218 / 0x204 / 0x216): u32 version, u32 instances offset (0x10),
+u32 count, u32 0; 0x60-byte instances: 4x4 matrix at +0, object import at +0x40 (PropObject / WorldObject /
+CompoundObject), u32 id at +0x48. The object's model is its import at 0x4.
 PolygonSoupList (0x60, collision of a TRK_UNIT bundle), PC: f32x3 min, pad, f32x3 max, pad, u32 soup table
 offset, u32 bounding box offset, i32 soup count, u32 data size; soup header (0x10): u32 polygon offset, u32
 vertex offset, u16, i8 x3 vertex offset in 500 m steps, u8 quad count, u8 polygon count, u8 vertex count;
@@ -93,7 +96,7 @@ class Library:
     """Finds resources in the open bundles first, then in the global bundles of the game folder, then (when a
     locator is set, e.g. the Find names index) in the bundle that holds them, and for world geometry in
     GLOBALRESOURCES and the DISTRICT bundles."""
-    EXTRA_LIMIT = 8
+    EXTRA_LIMIT = 16
 
     def __init__(self, locator=None):
         self.globals = {}          # game root -> [Bundle]
@@ -436,19 +439,59 @@ def instance_list(b, res):
     return out
 
 
-def decode_instances(b, res, lib, bundles, path, lod=0, progress=None):
-    """World-space meshes of every instance of an InstanceList: (meshes, {'instances', 'shown', 'models',
-    'missing': [model ids]}). Each model is decoded once."""
+OBJECT_LISTS = {0x218: 'props', 0x204: 'dynamic', 0x216: 'compound'}
+
+
+def object_instances(b, res, lib, look, root):
+    """[(model id, 4x4 matrix)] of a Prop / Dynamic / Compound instance list."""
+    e = b.e
+    c = res.data(0)
+    if len(c) < 16:
+        return []
+    ver, off, n, _ = struct.unpack_from(e + '4I', c, 0)
+    imps = {i.offset: i.id for i in res.imports()}
+    models = {}
+    out = []
+    for i in range(n):
+        o = off + 0x60 * i
+        if o + 0x60 > len(c):
+            break
+        m = np.array(struct.unpack_from(e + '16f', c, o), np.float64).reshape(4, 4)
+        oid = imps.get(o + 0x40)
+        if oid not in models:
+            ob, obj = lib.find(oid, look, root, deep=True)
+            models[oid] = {x.offset: x.id for x in obj.imports()}.get(0x4) if obj is not None else None
+        out.append((models[oid], m))
+    return out
+
+
+def unit_instances(b, res, lib, look, root, objects=True):
+    """[(model id, matrix, kind)]: the InstanceList, and (objects=True) the prop / dynamic / compound instances
+    of the same bundle."""
+    out = [(mid, m, 'world') for mid, m in instance_list(b, res)]
+    if objects:
+        for r in b.resources:
+            kind = OBJECT_LISTS.get(r.type)
+            if kind:
+                out += [(mid, m, kind) for mid, m in object_instances(b, r, lib, look, root)]
+    return out
+
+
+def decode_instances(b, res, lib, bundles, path, lod=0, progress=None, objects=True):
+    """World-space meshes of every instance of an InstanceList (and of the bundle's props, dynamic and compound
+    objects): (meshes, {'instances', 'shown', 'models', 'missing': [model ids], 'kinds': {kind: count}}).
+    Each model is decoded once."""
     root = game_root(path)
-    insts = instance_list(b, res)
+    look = [b] + list(bundles)
+    insts = unit_instances(b, res, lib, look, root, objects)
     if not insts:
         raise MeshError('this instance list is empty (the PS3 prototype keeps its world elsewhere)')
-    look = [b] + list(bundles)
+    kinds = collections.Counter(k for _, _, k in insts)
     cache = {}
     out = []
     shown = 0
     missing = []
-    for i, (mid, m) in enumerate(insts):
+    for i, (mid, m, kind) in enumerate(insts):
         if progress:
             progress(i, len(insts))
         if mid not in cache:
@@ -478,7 +521,8 @@ def decode_instances(b, res, lib, bundles, path, lod=0, progress=None):
                                 nrm.astype(np.float32), md.alpha_test))
     if not out:
         raise MeshError('none of the instanced models could be found')
-    return out, {'instances': len(insts), 'shown': shown, 'models': len(cache), 'missing': missing}
+    return out, {'instances': len(insts), 'shown': shown, 'models': len(cache), 'missing': missing,
+                 'kinds': dict(kinds)}
 
 
 SOUP_UNIT = 1000.0 / 65536.0

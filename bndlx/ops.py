@@ -466,3 +466,83 @@ def text_summary(b, res, types):
     except Exception:
         return ''
     return ''
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# stand-alone sound streams (.SPS)
+# ---------------------------------------------------------------------------------------------------------------
+_SONGS = {}
+
+
+def song_titles(path):
+    """{SPS file name (upper case): 'Artist - Title'} from the Song objects of UI\\SONGS\\SONGS.BNDL."""
+    root = game_root(path)
+    if root in _SONGS:
+        return _SONGS[root]
+    out = {}
+    p = os.path.join(root, 'UI', 'SONGS', 'SONGS.BNDL') if root else None
+    if p and os.path.isfile(p):
+        try:
+            from . import genesys
+            from .bundle import Bundle
+            b = Bundle.open(p)
+            types = genesys.TypeDB()
+            g = os.path.join(root, 'GLOBALCONFIG.BNDL')
+            if os.path.isfile(g):
+                types.add_bundle(Bundle.open(g))
+            types.add_bundle(b)
+            strings = game_strings(p)
+            rd = genesys.Reader(types, b.e)
+            waves = {r.id: r for r in b.resources if r.type == T_WAVE}
+            for r in b.resources:
+                imps = r.imports() if r.type == 0x15 else []
+                if not imps or types.name(imps[0].id) != 'Song':
+                    continue
+                wave = next((waves[i.id] for i in imps if i.id in waves), None)
+                if wave is None:
+                    continue
+                try:
+                    fields = rd.read_resource(r).fields
+                except Exception:
+                    continue
+                texts = [strings[v] for v in fields.values()
+                         if isinstance(v, int) and not isinstance(v, bool) and v in strings]
+                f = eal3.wave_fields(wave.data(0), b.e)
+                target = f['stream_ref'] if f['kind'] == 'stream' else f'{wave.id & 0xFFFFFFFF}.SPS'
+                if texts and target:
+                    out.setdefault(os.path.basename(target.replace('\\', '/')).upper(), ' - '.join(texts[:2]))
+        except Exception:
+            out = {}
+    _SONGS[root] = out
+    return out
+
+
+def safe_filename(name):
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).strip(' .') or 'sound'
+
+
+def export_sps_folder(src, dst, locator=None, progress=None):
+    """Every .SPS file under src as a WAV under dst (same sub folders; songs named 'Artist - Title').
+    Returns (written, [(file, error)])."""
+    from .spsfile import SpsBundle
+    files = []
+    for dp, _, fn in os.walk(src):
+        files += [os.path.join(dp, f) for f in fn if f.lower().endswith('.sps')]
+    files.sort()
+    written, errors = 0, []
+    for i, p in enumerate(files):
+        if progress:
+            progress(i, len(files))
+        try:
+            b = SpsBundle.open(p, locator)
+            audio, rate, _, _ = wave_audio(b, b.resources[0], p)
+            title = song_titles(p).get(os.path.basename(p).upper())
+            stem = os.path.splitext(os.path.basename(p))[0]
+            name = safe_filename(f'{title} ({stem})' if title else stem) + '.wav'
+            out = os.path.join(dst, os.path.relpath(os.path.dirname(p), src), name)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            write_file(out, eal3.wav_bytes(audio, rate))
+            written += 1
+        except Exception as ex:
+            errors.append((p, str(ex)))
+    return written, errors

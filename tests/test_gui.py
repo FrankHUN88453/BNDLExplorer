@@ -65,6 +65,8 @@ def main():
     png2 = os.path.join(TMP, 'green.png')
     ops.save_png(img, png2)
     from bndlx import eal3
+    sps = os.path.join(TMP, 'stream.SPS')
+    shutil.copy2(os.path.join(PC, 'SOUND', 'STREAMS', '1536091.SPS'), sps)
     wavfile = os.path.join(TMP, 'beep.wav')
     tt = np.arange(24000) / 48000
     ops.write_file(wavfile, eal3.wav_bytes((np.sin(2 * np.pi * 880 * tt) * 8000).astype(np.int16)[:, None], 48000))
@@ -145,7 +147,26 @@ def main():
             app.action_save(d)
         elif f > 16 and app.job is None and 'saved' not in state:
             state['saved'] = f
-        elif 'saved' in state and f > state['saved'] + 3:
+        elif 'saved' in state and f == state['saved'] + 3:
+            app.__dict__.pop('drop_target', None)                # the real drop target again (the mouse position)
+            app._paste_target = None
+            post_dropfiles(app.hwnd, [sps])                     # an .SPS file dropped on the window opens
+        elif 'saved' in state and f == state['saved'] + 6:
+            sd = next((x for x in app.docs if getattr(x.b, 'kind', '') == 'sps'), None)
+            check(sd is not None and len(sd.b.resources) == 1, 'dropped .SPS file opens as a sound stream')
+            if sd is not None:
+                state['sps_doc'] = sd
+                w = sd.b.resources[0]
+                app.goto(w.id, sd)
+                app.drop_target = lambda: (sd, sd.b.find(w.id), 'details')
+                app.on_drop([wavfile])
+        elif 'saved' in state and f == state['saved'] + 9 and 'sps_doc' in state:
+            sd = state['sps_doc']
+            audio, rate, head, _ = ops.wave_audio(sd.b, sd.b.resources[0], sd.path)
+            check(abs(len(audio) / rate - 0.5) < 0.02 and sd.modified,
+                  f'WAV dropped on the .SPS replaced its sound ({len(audio)} samples @ {rate} Hz)')
+            app.action_save(sd)
+        elif 'saved' in state and f > state['saved'] + 12 and app.job is None:
             hello_imgui.get_runner_params().app_shall_exit = True
             app.exit_ok = True
 
@@ -161,6 +182,10 @@ def main():
         if r.type == 1:
             raster.decode(r, 'PC')
     check(True, 'copied textures decode in the saved bundle')
+    from bndlx import eal3
+    audio, rate, head = eal3.decode_sps(open(sps, 'rb').read())
+    check(abs(len(audio) / rate - 0.5) < 0.02 and os.path.exists(sps + '.orig'),
+          f'saved .SPS file holds the new sound ({len(audio) / rate:.2f} s), original kept as .orig')
     shutil.rmtree(TMP, ignore_errors=True)
     print(f'{len(failures)} failure(s)')
     return 1 if failures else 0

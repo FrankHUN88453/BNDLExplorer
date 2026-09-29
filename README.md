@@ -84,6 +84,8 @@ that happens to match a model id would also "match" its renderables; such names 
 | Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) with the diffuse textures, opens in Blender |
 | InstanceList (TRK_UNIT) | the whole track unit in 3D: every model instance in place, with its textures; collision over it | glTF (.glb) of the whole unit |
 | PolygonSoupList (TRK_UNIT) | collision in 3D, coloured by surface tag | glTF (.glb) |
+| ZoneList (HAWAII\PVS) | map of all 169 track units by district; click a zone to open its TRK_UNIT | |
+| .SPS sound stream files | opened like a bundle with one sound: play, waveform, replace, save | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF / .SPS; a whole folder as WAV |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / stop, waveform, channels, rate, length | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
@@ -134,8 +136,13 @@ lives).
 ## Track units (the world)
 
 `HAWAII\TRK_UNIT<n>.BNDL` files are the pieces of the city. Selecting a unit's **InstanceList** shows the
-whole piece in 3D: every model instance at its place, with textures (tree leaves and fences cut out by their
-alpha). Models shared between units come from `HAWAII\DISTRICT_*.BNDL` and `HAWAII\GLOBALRESOURCES.BNDL`;
+whole piece in 3D: every model instance at its place, together with the unit's props, dynamic objects (signs,
+...) and compound objects (street lamps, ...), with textures (tree leaves and fences cut out by their alpha).
+**Neighbours** adds the units that share a border with it (from `HAWAII\PVS.BNDL`).
+
+`HAWAII\PVS.BNDL` holds the **ZoneList**: its preview is a map of the city, one polygon per track unit,
+coloured by district. Hover a zone for its unit, district and neighbours; click it to open the unit in 3D
+(wheel zooms, right drag moves). Models shared between units come from `HAWAII\DISTRICT_*.BNDL` and `HAWAII\GLOBALRESOURCES.BNDL`;
 they are found automatically (faster, and complete, after **Find names**). The list above the view switches
 between **World**, **Collision** and **World + collision** (collision as a coloured wireframe), and the LOD
 list shows the lower detail levels of every model. **Export glTF** writes the whole unit.
@@ -146,6 +153,23 @@ buildings, terrain, invisible walls, ...); hover the summary line for the tags a
 Roads and ground use blend shaders without a Diffuse slot; the view uses their first colour layer (roads:
 the asphalt colour), so ground looks plainer than in the game. The PS3 prototype's track units are empty
 (its world is stored elsewhere).
+
+## Sound stream files (.SPS)
+
+Music, ambience, sequence sound tracks, video sound tracks and some speech are not in bundles but in `.SPS`
+files (`UI\SONGS`, `SOUND\STREAMS`, `UI\SEQUENCES\STREAMS`, `UI\MOVIES`, `EN_US\STREAMS`). They hold nothing
+but EALayer3 audio. Open one (double click in a folder, **Open**, or drop it on the window) and it shows as a
+tab with one sound: waveform, **Play**, **Export WAV**, **Replace** (or drop a WAV / FLAC / OGG / MP3 / AIFF on
+it), undo, and **Save** writes the .SPS again (the original is kept as `.orig`). Songs are named after their
+artist and title (from `UI\SONGS\SONGS.BNDL`), also in the folder view.
+
+Files that start without a header continue a sound whose first second is stored in a bundle (the Wave with
+id `0x01000000_<file number>`). That part is found automatically, so these play whole too; **Open that
+bundle** jumps to it, and replacing such a sound is done there (the bundle and the .SPS file are rewritten).
+
+**... > Export sound streams (.SPS) of a folder as WAV** converts every .SPS file of a folder and its sub
+folders (for example the whole soundtrack: `UI\SONGS`, named `Artist - Title (id).wav`). An .SPS file can also
+be used as the source when replacing any sound.
 
 ## Vehicle list
 

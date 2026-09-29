@@ -269,6 +269,40 @@ def test_materials(path):
           'material constant edit round-trips')
 
 
+def test_sps(pc_root):
+    """Stand-alone .SPS files: open (continuation files with their start from the bundle), save byte-identical,
+    replace the sound and save, batch export as WAV with song titles."""
+    from bndlx import eal3, spsfile
+    for rel in (('UI', 'SONGS', '116502.SPS'), ('UI', 'SEQUENCES', 'STREAMS', '1009836.SPS'),
+                ('EN_US', 'STREAMS', '2026277.SPS')):
+        p = os.path.join(pc_root, *rel)
+        b = spsfile.SpsBundle.open(p)
+        audio, rate, head, _ = ops.wave_audio(b, b.resources[0], p)
+        same = b.to_bytes() == open(p, 'rb').read()
+        check(same and len(audio) == head['samples'],
+              f'{rel[-1]} opens ({len(audio) / rate:.1f} s, {head["channels"]} ch'
+              + (f', start from {os.path.basename(b.owner[0])}' if b.owner else '') + ') and saves unchanged')
+    src = os.path.join(pc_root, 'SOUND', 'STREAMS', '1536091.SPS')
+    p = os.path.join(TMP, 'stream.SPS')
+    shutil.copy2(src, p)
+    b = spsfile.SpsBundle.open(p)
+    wav = os.path.join(TMP, 'tone.wav')
+    t = np.arange(48000) / 48000
+    ops.write_file(wav, eal3.wav_bytes((np.sin(2 * np.pi * 440 * t) * 9000).astype(np.int16)[:, None], 48000))
+    ops.replace_wave(b, b.resources[0], path=wav, bundle_path=p)
+    b.save()
+    audio, rate, head = eal3.decode_sps(open(p, 'rb').read())
+    check(abs(len(audio) / rate - 1.0) < 0.01, f'sound replaced in an .SPS file and saved ({len(audio) / rate:.2f} s)')
+    audio2, rate2 = eal3.read_audio(p)
+    check(len(audio2) == len(audio), 'an .SPS file can be used as audio input')
+    out = os.path.join(TMP, 'wav_out')
+    n, errors = ops.export_sps_folder(os.path.join(pc_root, 'EN_US', 'STREAMS'), out)
+    check(n == len([f for f in os.listdir(os.path.join(pc_root, 'EN_US', 'STREAMS')) if f.lower().endswith('.sps')])
+          and not errors, f'{n} continuation .SPS files exported as WAV')
+    titles = ops.song_titles(os.path.join(pc_root, 'UI', 'SONGS', 'SONGS.BNDL'))
+    check(len(titles) >= 40, f'{len(titles)} songs named from SONGS.BNDL (e.g. {next(iter(titles.values()), "")})')
+
+
 def test_world(path):
     """Every instance of a track unit is drawn (shared models from GLOBALRESOURCES / DISTRICT_*), inside the
     unit's area, and exports as glTF."""
@@ -279,6 +313,8 @@ def test_world(path):
     meshes, st = mesh.decode_instances(b, r, lib, [], path)
     lo = np.min([m.pos.min(0) for m in meshes], 0)
     hi = np.max([m.pos.max(0) for m in meshes], 0)
+    check(st['kinds'].get('props') and st['kinds'].get('compound') and st['kinds'].get('world') == 222,
+          f"instances by list: {st['kinds']}")
     check(st['shown'] == st['instances'] and (hi - lo).max() < 2000,
           f"{st['shown']}/{st['instances']} instances drawn, {len(meshes)} meshes, "
           f"{(hi - lo).round().tolist()} m ({os.path.basename(path)})")
@@ -296,6 +332,20 @@ def test_world(path):
     ntri = sum(len(m.tris) for m in cm)
     check(np.allclose(clo, box_lo, atol=0.02) and np.allclose(chi, box_hi, atol=0.02) and ntri >= cst['polygons'],
           f"collision: {cst['soups']} soups, {cst['polygons']} polygons, {len(cst['tags'])} tags, fills the list's box")
+
+
+def test_zones(hawaii):
+    """HAWAII\\PVS.BNDL: one zone per track unit, border neighbours share polygon points."""
+    from bndlx import zonelist as ZL
+    zones = ZL.zones_in(hawaii)
+    exist = sum(os.path.isfile(os.path.join(hawaii, ZL.unit_file(z.unit))) for z in zones)
+    check(zones and exist == len(zones), f'{len(zones)} zones, a TRK_UNIT file for each ({exist})')
+    border = [(z, zones[j]) for z in zones for j, fl in z.neighbours if fl & 2]
+    shared = sum(1 for a, b in border
+                 if len({(round(x, 1), round(y, 1)) for x, y in a.points} & {(round(x, 1), round(y, 1)) for x, y in b.points}) >= 2)
+    check(border and shared == len(border), f'{len(border)} border neighbours, all share an edge')
+    nb = ZL.neighbour_paths(os.path.join(hawaii, 'TRK_UNIT1.BNDL'))
+    check(nb and all(os.path.isfile(p) for p in nb), f'TRK_UNIT1 borders {[os.path.basename(p) for p in nb]}')
 
 
 def test_vehiclelist(path):
@@ -341,6 +391,8 @@ def main():
         test_materials(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_vehiclelist(os.path.join(PC, 'VEHICLES', 'VEHICLELIST.BNDL'))
         test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
+        test_sps(PC)
+        test_zones(os.path.join(PC, 'HAWAII'))
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))

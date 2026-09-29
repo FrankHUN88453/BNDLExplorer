@@ -14,6 +14,7 @@ from .theme import I, icon_text
 
 PAYLOAD = 'BNDLX_RES'
 BUNDLE_EXT = ('.bndl', '.bundle')
+SPS_EXT = ('.sps',)
 
 
 def human(n):
@@ -71,6 +72,8 @@ def folder_entries(path, cache):
                 try:
                     if e.is_dir():
                         out.append((e.name, True, 0, e.stat().st_mtime, ''))
+                    elif e.name.lower().endswith(SPS_EXT):
+                        out.append((e.name, False, e.stat().st_size, e.stat().st_mtime, 'SPS'))
                     elif e.name.lower().endswith(BUNDLE_EXT):
                         st = e.stat()
                         plat = ''
@@ -606,6 +609,8 @@ class ExplorerUI:
             self.action_extract(d)
         if imgui.menu_item('Import resources from folder...', '', False, d is not None and not d.b.truncated)[0]:
             self.action_import_folder(d)
+        if imgui.menu_item('Export sound streams (.SPS) of a folder as WAV...', '', False, self.job is None)[0]:
+            self.action_export_sps()
         imgui.separator()
         if imgui.menu_item('Find names (scan the game folders)...', '', False, self.job is None)[0]:
             self.action_find_names()
@@ -838,7 +843,7 @@ class ExplorerUI:
         if s:
             ents = [e for e in ents if s in e[0].lower()]
         if not ents:
-            imgui.text_disabled('This folder has no subfolders or bundles.' if not s else 'No items match your search.')
+            imgui.text_disabled('This folder has no subfolders, bundles or sound streams.' if not s else 'No items match your search.')
         flags = (imgui.TableFlags_.resizable | imgui.TableFlags_.scroll_y | imgui.TableFlags_.pad_outer_x
                  | imgui.TableFlags_.hideable)
         if ents and imgui.begin_table('folder', 4, flags):
@@ -874,14 +879,22 @@ class ExplorerUI:
                     imgui.same_line(0, 0)
                     if is_dir:
                         icon_text(theme.FOLDER, theme.PALETTE['folder'])
+                    elif plat == 'SPS':
+                        icon_text(*theme.type_icon(0x81))
                     else:
                         icon_text(theme.BUNDLE, theme.BUNDLE_COL)
                     imgui.same_line()
                     imgui.text(name)
+                    if plat == 'SPS':
+                        title = ops.song_titles(full).get(name.upper())
+                        if title:
+                            imgui.same_line()
+                            imgui.text_disabled(title)
                     imgui.table_next_column()
                     imgui.text_disabled(time.strftime('%Y. %m. %d. %H:%M', time.localtime(mt)))
                     imgui.table_next_column()
-                    imgui.text_disabled('File folder' if is_dir else f'Bundle ({plat})' if plat else 'Bundle')
+                    imgui.text_disabled('File folder' if is_dir else 'Sound stream' if plat == 'SPS'
+                                        else f'Bundle ({plat})' if plat else 'Bundle')
                     imgui.table_next_column()
                     if not is_dir:
                         imgui.text(short_size(size))

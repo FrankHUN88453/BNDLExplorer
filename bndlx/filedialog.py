@@ -31,7 +31,10 @@ class BROWSEINFOW(ctypes.Structure):
                 ('lParam', wintypes.LPARAM), ('iImage', ctypes.c_int)]
 
 
-BUNDLES = [('Bundles (*.BNDL, *.BUNDLE)', '*.BNDL;*.bndl;*.BUNDLE;*.bundle'), ('All files', '*.*')]
+BUNDLES = [('Bundles and sound streams (*.BNDL, *.BUNDLE, *.SPS)', '*.BNDL;*.bndl;*.BUNDLE;*.bundle;*.SPS;*.sps'),
+           ('Bundles (*.BNDL, *.BUNDLE)', '*.BNDL;*.bndl;*.BUNDLE;*.bundle'), ('Sound streams (*.SPS)', '*.SPS;*.sps'),
+           ('All files', '*.*')]
+SPS = [('Sound streams (*.SPS)', '*.SPS;*.sps'), ('All files', '*.*')]
 IMAGES = [('Images and DDS (*.png, *.dds, *.tga, *.jpg, *.bmp)', '*.png;*.dds;*.tga;*.jpg;*.jpeg;*.bmp'),
           ('All files', '*.*')]
 DDS = [('DirectDraw Surface (*.dds)', '*.dds')]
@@ -40,7 +43,8 @@ RES = [('BNDL Explorer resource (*.bres)', '*.bres'), ('All files', '*.*')]
 BIN = [('Raw data (*.bin)', '*.bin'), ('All files', '*.*')]
 TEXT = [('Text (*.txt, *.json, *.xml)', '*.txt;*.json;*.xml'), ('All files', '*.*')]
 CSV = [('CSV (*.csv)', '*.csv'), ('All files', '*.*')]
-AUDIO = [('Audio (*.wav, *.flac, *.ogg, *.mp3, *.aiff)', '*.wav;*.flac;*.ogg;*.mp3;*.aif;*.aiff'), ('All files', '*.*')]
+AUDIO = [('Audio (*.wav, *.flac, *.ogg, *.mp3, *.aiff, *.sps)', '*.wav;*.flac;*.ogg;*.mp3;*.aif;*.aiff;*.sps;*.SPS'),
+         ('All files', '*.*')]
 WAV = [('WAV (*.wav)', '*.wav')]
 ANY = [('All files', '*.*')]
 

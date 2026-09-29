@@ -318,8 +318,18 @@ def wav_bytes(audio, rate):
 # encoding: audio -> LAME MP3 -> EALayer3 granules -> SPS stream
 # ---------------------------------------------------------------------------------------------------------------
 def read_audio(path=None, data=None):
-    """Any file libsndfile reads (WAV, FLAC, OGG, MP3, AIFF, ...) -> (int16 (n, ch), rate)."""
+    """Any file libsndfile reads (WAV, FLAC, OGG, MP3, AIFF, ...), or a whole EA .SPS stream -> (int16 (n, ch),
+    rate)."""
     import soundfile as sf
+    if data is None and path and path.lower().endswith('.sps'):
+        with open(path, 'rb') as f:
+            data = f.read()
+    if data is not None and data[:1] in (b'H', b'D', b'E') and len(data) >= 8 and not data.startswith(b'RIFF'):
+        if data[:1] != b'H':
+            raise AudioError('this .SPS file continues a sound whose start is in a bundle; open the .SPS file '
+                             'itself and export it as WAV first')
+        audio, rate, _ = decode_sps(data)
+        return (audio if audio.ndim == 2 else audio[:, None]), rate
     src = io.BytesIO(data) if data is not None else path
     audio, rate = sf.read(src, dtype='int16', always_2d=True)
     return audio, rate
@@ -529,7 +539,7 @@ def build_wave(old, sps, head, e):
 #   0x20 u32 type: 0 in memory, 1 stream file (path at 0x28), 2 prefetched stream (<GameChanger id>.SPS)
 #   0x24 u8 channels, u8 flag                                    0x28 type 2: f32 prefetch length in ms
 # ---------------------------------------------------------------------------------------------------------------
-AUDIO_EXT = ('.wav', '.flac', '.ogg', '.oga', '.mp3', '.aif', '.aiff', '.w64', '.caf')
+AUDIO_EXT = ('.wav', '.flac', '.ogg', '.oga', '.mp3', '.aif', '.aiff', '.w64', '.caf', '.sps')
 
 
 def _dur_order(c, e):
