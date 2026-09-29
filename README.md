@@ -82,7 +82,7 @@ that happens to match a model id would also "match" its renderables; such names 
 | VehicleList (VEHICLES\VEHICLELIST) | every car and manufacturer with names from the game's strings; edit any field, duplicate / delete / reorder cars | CSV (one row per car, then the manufacturers) |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
 | Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) with the diffuse textures, opens in Blender |
-| VehicleGraphicsSpec (VEH_*) | the whole car in 3D: body and the four wheels (tyre, disc, rim, caliper) at their places; LOD choice | glTF (.glb) of the assembled car |
+| VehicleGraphicsSpec (VEH_*) | the whole car in 3D: body and the four wheels (tyre, disc, rim, caliper) at their places; LOD choice; wheel positions and scales editable (mirrored left / right) | glTF (.glb) of the assembled car |
 | InstanceList (TRK_UNIT) | the whole track unit in 3D: every model instance in place, with its textures; collision over it | glTF (.glb) of the whole unit |
 | PolygonSoupList (TRK_UNIT) | collision in 3D, coloured by surface tag | glTF (.glb) |
 | ZoneList (HAWAII\PVS) | map of all 169 track units by district; click a zone to open its TRK_UNIT | |

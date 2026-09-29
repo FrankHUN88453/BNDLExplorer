@@ -28,7 +28,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.10'
+VERSION = '0.11'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -1710,9 +1710,14 @@ class App(ExplorerUI):
 
             threading.Thread(target=work, daemon=True).start()
         res = st['result']
+        prev = st.get('prev')
+        if res is None and prev is not None and prev[0][:2] == key[:2] and prev[0][3:] == key[3:]:
+            res = prev[1]                    # the same object is being re-decoded after an edit: keep showing it
         if res is None:
             imgui.text_disabled(st.get('progress') or 'loading the geometry...')
             return
+        if res[0] == 'ok' and res is st['result']:
+            st['prev'] = (key, res)
         if res[0] == 'error':
             imgui.text_wrapped(f'Cannot show this model: {res[1]}')
             if r.type == mesh.T_INSTANCELIST and (st['show'] or st['nb']) and imgui.button('Back to the world view'):
@@ -1722,14 +1727,18 @@ class App(ExplorerUI):
         if self.viewer is None:
             from .viewer3d import Viewer
             self.viewer = Viewer()
-        if st['uploaded'] != key:
+        ukey = (key, id(res))                # what is on the GPU: the request and the result shown
+        if st['uploaded'] != ukey:
+            old = st['uploaded'][0] if st['uploaded'] else None
+            same = old is not None and old[:2] == key[:2] and old[3:] == key[3:]
             try:
-                self.viewer.set_meshes(key, meshes, texs, 1.1 if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP) else 2.6)
+                self.viewer.set_meshes(key, meshes, texs, 1.1 if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP) else 2.6,
+                                       keep_view=same)
             except Exception as e:
                 traceback.print_exc()
                 st['result'] = ('error', f'OpenGL: {e}')
                 return
-            st['uploaded'] = key
+            st['uploaded'] = ukey
         v = self.viewer
         ntri = sum(len(m.tris) for m in meshes)
         nvert = sum(len(m.pos) for m in meshes)
@@ -1790,9 +1799,53 @@ class App(ExplorerUI):
         if missing:
             imgui.text_disabled(f'{missing} mesh(es) use textures that are not in the open bundles or the global ones.')
         avail = imgui.get_content_region_avail()
-        w, h = max(64, int(avail.x) - 4), max(64, int(avail.y) - 24)
+        extra = int(imgui.get_frame_height_with_spacing() * 6.6) + 8 if r.type == mesh.T_VGS else 0   # wheel table
+        w, h = max(64, int(avail.x) - 4), max(64, int(avail.y) - 24 - extra)
         v.widget(w, h)
         imgui.text_disabled('Left drag: turn, right / middle drag: move, wheel: zoom, double click: fit')
+        if r.type == mesh.T_VGS:
+            self.wheel_editor(d, r)
+
+    def wheel_editor(self, d, r):
+        """Wheel positions and scales of a VehicleGraphicsSpec (metres; x = left, y = up, z = forward)."""
+        try:
+            _, wheels = mesh.vgs_layout(d.b, r)
+        except (struct.error, IndexError):
+            return
+        ro = d.b.truncated
+        _, self.cfg['wheel_mirror'] = imgui.checkbox('Mirror left / right', self.cfg.get('wheel_mirror', True))
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('Changing a left wheel also changes the right one of the same axle (x mirrored), and back')
+        flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.resizable
+        if not imgui.begin_table('wheels', 3, flags):
+            return
+        imgui.table_setup_column('Wheel', imgui.TableColumnFlags_.width_fixed, 90)
+        imgui.table_setup_column('Position (x left, y up, z forward; m)', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column('Scale', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_headers_row()
+        e = d.b.e
+        by_name = {w['name']: w for w in wheels}
+        for i, w in enumerate(wheels):
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.text(w['name'] or f'wheel {i}')
+            imgui.table_next_column()
+            imgui.set_next_item_width(-1)
+            ch, pos = imgui.drag_float3(f'##wp{i}', list(w['pos']), 0.002, -5.0, 5.0, '%.3f')
+            if ch and not ro:
+                self.write(d, r, w['pos_off'], e + '3f', *pos)
+                other = w['name'].replace('Left', '#').replace('Right', 'Left').replace('#', 'Right')
+                if self.cfg.get('wheel_mirror', True) and other != w['name'] and other in by_name:
+                    self.write(d, r, by_name[other]['pos_off'], e + '3f', -pos[0], pos[1], pos[2])
+            imgui.table_next_column()
+            imgui.set_next_item_width(-1)
+            ch, sc = imgui.drag_float3(f'##ws{i}', list(w['scale']), 0.002, 0.2, 5.0, '%.3f')
+            if ch and not ro:
+                self.write(d, r, w['scale_off'], e + '3f', *sc)
+                other = w['name'].replace('Left', '#').replace('Right', 'Left').replace('#', 'Right')
+                if self.cfg.get('wheel_mirror', True) and other != w['name'] and other in by_name:
+                    self.write(d, r, by_name[other]['scale_off'], e + '3f', *sc)
+        imgui.end_table()
 
     def preview_ready(self):
         """True when the preview of the selected resource is complete (used by --screenshot)."""
@@ -1803,7 +1856,7 @@ class App(ExplorerUI):
             return self.tex.get('img') is not None or self.tex.get('err') is not None
         if f.type in (0x05, 0x51, 0x50, 0x60, 0x106):
             res = self.model['result']
-            return res is not None and (res[0] == 'error' or self.model['uploaded'] == self.model['key'])
+            return res is not None and (res[0] == 'error' or self.model['uploaded'] == (self.model['key'], id(res)))
         if f.type == 0x81:
             hit = self.gcache.get(('wave', d.uid, f.id, id(f.data(0))))
             return hit is not None and not isinstance(hit, str)
@@ -2938,7 +2991,9 @@ Materials: the shader, the textures by slot (Diffuse, Normal, Specular, ...) wit
 constants by name (PbrMaterialDiffuseColour, ...), editable. Go jumps to an open resource; Open opens the
 bundle that has it (known after Find names).
 
-Cars: select the VehicleGraphicsSpec of a VEH_* bundle to see the assembled car (body + wheels) in 3D.
+Cars: select the VehicleGraphicsSpec of a VEH_* bundle to see the assembled car (body + wheels) in 3D; drag the
+wheel positions / scales below the view (track width, wheelbase, ride height, wheel size; Mirror keeps it
+symmetric), then Save.
 
 Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece of the city in 3D with its props
 (World / Collision / World + collision, Neighbours); the PolygonSoupList is the collision, coloured by surface tag.

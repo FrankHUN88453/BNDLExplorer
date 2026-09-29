@@ -360,6 +360,14 @@ def test_car(path):
     check(st['wheels'] == 4 and st['parts'] == 16 and not st['missing'] and 3.5 < size[2] < 5.5
           and abs(lo[0] + hi[0]) < 0.05, f"car assembled: {st['wheels']} wheels, {st['parts']} parts, "
           f"{size.round(2).tolist()} m ({os.path.basename(path)})")
+    _, wheels = mesh.vgs_layout(b, r)
+    c = bytearray(r.data(0))
+    struct.pack_into(b.e + '3f', c, wheels[0]['pos_off'], 1.25, 0.5, 2.0)
+    struct.pack_into(b.e + '3f', c, wheels[0]['scale_off'], 1.1, 1.2, 1.3)
+    r.set_data(0, bytes(c))
+    _, w2 = mesh.vgs_layout(b, r)
+    check(w2[0]['pos'] == (1.25, 0.5, 2.0) and abs(w2[0]['scale'][2] - 1.3) < 1e-6 and w2[1]['pos'] == wheels[1]['pos'],
+          f"wheel position / scale edit lands in the {w2[0]['name']} record")
 
 
 def test_proto_world(seacrest):

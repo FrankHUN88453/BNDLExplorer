@@ -665,7 +665,9 @@ def vgs_layout(b, res):
         if cnt > 8:
             break
         wheels.append({'name': name.split(b'\0')[0].decode('latin1', 'replace'), 'pos': pos, 'quat': quat,
-                       'scale': scale, 'parts': [imps.get(tbl + 4 * k) for k in range(cnt)]})
+                       'scale': scale, 'parts': [imps.get(tbl + 4 * k) for k in range(cnt)],
+                       'pos_off': o if b.platform == 'PC' else o + 0x20,
+                       'scale_off': o + 0x20 if b.platform == 'PC' else o + 0x40})
     return imps.get(0x30), wheels
 
 

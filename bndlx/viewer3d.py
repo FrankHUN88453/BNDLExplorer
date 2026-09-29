@@ -159,8 +159,9 @@ class Viewer:
         self.meshes = []
         self.key = None
 
-    def set_meshes(self, key, meshes, texture_images, fit=2.6):
-        """meshes: [MeshData]; texture_images: {texture id: RGBA array or None}; fit: start distance in radii."""
+    def set_meshes(self, key, meshes, texture_images, fit=2.6, keep_view=False):
+        """meshes: [MeshData]; texture_images: {texture id: RGBA array or None}; fit: start distance in radii;
+        keep_view: the same object changed (keep the camera)."""
         if self.gl is None:
             self._init()
         GL = self.gl
@@ -168,11 +169,12 @@ class Viewer:
         self.key = key
         lo = np.min([m.pos.min(0) for m in meshes], 0) if meshes else np.zeros(3)
         hi = np.max([m.pos.max(0) for m in meshes], 0) if meshes else np.ones(3)
-        self.center = ((lo + hi) / 2).astype(np.float32)
-        self.radius = float(max(np.linalg.norm(hi - lo) / 2, 1e-3))
-        self.fit = fit
-        self.dist = self.radius * fit
-        self.pan = np.zeros(3, np.float32)
+        if not keep_view:
+            self.center = ((lo + hi) / 2).astype(np.float32)
+            self.radius = float(max(np.linalg.norm(hi - lo) / 2, 1e-3))
+            self.fit = fit
+            self.dist = self.radius * fit
+            self.pan = np.zeros(3, np.float32)
         for tid, img in texture_images.items():
             if tid not in self.textures and img is not None:
                 self.textures[tid] = self._texture(img)
