@@ -82,6 +82,8 @@ that happens to match a model id would also "match" its renderables; such names 
 | VehicleList (VEHICLES\VEHICLELIST) | every car and manufacturer with names from the game's strings; edit any field, duplicate / delete / reorder cars | CSV (one row per car, then the manufacturers) |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
 | Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) with the diffuse textures, opens in Blender |
+| InstanceList (TRK_UNIT) | the whole track unit in 3D: every model instance in place, with its textures; collision over it | glTF (.glb) of the whole unit |
+| PolygonSoupList (TRK_UNIT) | collision in 3D, coloured by surface tag | glTF (.glb) |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / stop, waveform, channels, rate, length | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
@@ -128,6 +130,22 @@ the inverted CRC32 of the constant's name in the shader (`~crc32("PbrMaterialDif
 Constants can be edited in place (drag or type the numbers). Every texture has **Go** (select it, when its
 bundle is open) or **Open** (open the bundle that has it: **Find names** also records where each resource
 lives).
+
+## Track units (the world)
+
+`HAWAII\TRK_UNIT<n>.BNDL` files are the pieces of the city. Selecting a unit's **InstanceList** shows the
+whole piece in 3D: every model instance at its place, with textures (tree leaves and fences cut out by their
+alpha). Models shared between units come from `HAWAII\DISTRICT_*.BNDL` and `HAWAII\GLOBALRESOURCES.BNDL`;
+they are found automatically (faster, and complete, after **Find names**). The list above the view switches
+between **World**, **Collision** and **World + collision** (collision as a coloured wireframe), and the LOD
+list shows the lower detail levels of every model. **Export glTF** writes the whole unit.
+
+The **PolygonSoupList** of a unit is its collision: shown in 3D with one colour per collision tag (road, kerbs,
+buildings, terrain, invisible walls, ...); hover the summary line for the tags and their triangle counts.
+
+Roads and ground use blend shaders without a Diffuse slot; the view uses their first colour layer (roads:
+the asphalt colour), so ground looks plainer than in the game. The PS3 prototype's track units are empty
+(its world is stored elsewhere).
 
 ## Vehicle list
 

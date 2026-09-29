@@ -26,7 +26,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.6'
+VERSION = '0.7'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -158,9 +158,9 @@ class App(ExplorerUI):
         self.renaming = None
         self.thumbs = Thumbs()
         self.names = N.NameDB.load()
-        self.mesh_lib = mesh.Library()
+        self.mesh_lib = mesh.Library(lambda rid: self.names.where.get(rid))
         self.viewer = None
-        self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0}
+        self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0, 'show': 0, 'stats': None}
         self.vlist = {'key': None, 'obj': None, 'sel': 0, 'msel': 0, 'filter': '', 'error': None}
         self.folder_cache = {}
         self.addr_edit = None
@@ -1323,7 +1323,7 @@ class App(ExplorerUI):
             self.cube_view(d, r)
         elif t == 0x81:
             self.wave_view(d, r)
-        elif t in (0x05, 0x51):
+        elif t in (0x05, 0x51, 0x50, 0x60):
             self.model_view(d, r)
         elif t == 0x02:
             self.material_view(d, r)
@@ -1563,15 +1563,37 @@ class App(ExplorerUI):
 
     def model_view(self, d, r):
         st = self.model
-        key = (d.uid, r.id, id(r.data(0)), st['lod'])
+        show = st['show'] if r.type == mesh.T_INSTANCELIST else 0
+        key = (d.uid, r.id, id(r.data(0)), st['lod'], show)
         if st['key'] != key:
             st['key'] = key
             st['result'] = None
 
-            def work(key=key, lod=st['lod']):
+            def work(key=key, lod=st['lod'], show=show):
                 try:
-                    meshes, nlod = mesh.decode_resource(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
-                    texs = {m.texture: self.texture_image(d, m.texture) for m in meshes if m.texture}
+                    if r.type == mesh.T_INSTANCELIST:
+                        meshes, stats, size = [], {}, 256        # a whole track unit: small textures
+                        if show in (0, 2):
+                            meshes, stats = mesh.decode_instances(d.b, r, self.mesh_lib, self.model_bundles(d)[1:],
+                                                                  d.path, lod)
+                        if show in (1, 2):
+                            soup = next((x for x in d.b.resources if x.type == mesh.T_POLYSOUP), None)
+                            if soup is None:
+                                raise mesh.MeshError('this bundle has no collision (PolygonSoupList)')
+                            cm, cst = mesh.decode_polysoup(d.b, soup)
+                            for m in cm:
+                                m.wire = show == 2
+                            meshes = meshes + cm
+                            stats = dict(stats, collision=cst)
+                        nlod = 4
+                    elif r.type == mesh.T_POLYSOUP:
+                        meshes, cst = mesh.decode_polysoup(d.b, r)
+                        stats, nlod, size = {'collision': cst}, 1, 256
+                    else:
+                        meshes, nlod = mesh.decode_resource(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
+                        stats, size = None, 1024
+                    texs = {t: self.texture_image(d, t, size) for t in {m.texture for m in meshes if m.texture}}
+                    st['stats'] = stats
                     res = ('ok', meshes, texs, nlod)
                 except Exception as e:
                     res = ('error', str(e))
@@ -1592,7 +1614,7 @@ class App(ExplorerUI):
             self.viewer = Viewer()
         if st['uploaded'] != key:
             try:
-                self.viewer.set_meshes(key, meshes, texs)
+                self.viewer.set_meshes(key, meshes, texs, 1.1 if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP) else 2.6)
             except Exception as e:
                 traceback.print_exc()
                 st['result'] = ('error', f'OpenGL: {e}')
@@ -1601,11 +1623,30 @@ class App(ExplorerUI):
         v = self.viewer
         ntri = sum(len(m.tris) for m in meshes)
         nvert = sum(len(m.pos) for m in meshes)
-        imgui.text(f'{len(meshes)} mesh(es), {ntri:,} triangles, {nvert:,} vertices'.replace(',', ' '))
+        stats = st.get('stats') if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP) else None
+        cst = (stats or {}).get('collision')
+        if r.type == mesh.T_POLYSOUP and cst:
+            imgui.text(f'{cst["soups"]} soups, {cst["polygons"]:,} polygons, {len(cst["tags"])} surface tags'.replace(',', ' '))
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Triangles per collision tag (colour in the view):' + chr(10) + chr(10).join(
+                    f'{t:#010x}  {n}' for t, n in sorted(cst['tags'].items(), key=lambda x: -x[1])[:24]))
+        elif stats and 'instances' in stats:
+            imgui.text(f'{stats["shown"]} of {stats["instances"]} instances ({stats["models"]} models), '
+                       f'{ntri:,} triangles'.replace(',', ' '))
+            if stats['missing'] and imgui.is_item_hovered():
+                imgui.set_tooltip('Models not found: ' + ', '.join(ops.id_text(x) for x in stats['missing'][:12]))
+        else:
+            imgui.text(f'{len(meshes)} mesh(es), {ntri:,} triangles, {nvert:,} vertices'.replace(',', ' '))
+        if r.type == mesh.T_INSTANCELIST:
+            imgui.same_line()
+            imgui.set_next_item_width(150)
+            ch, sh = imgui.combo('##show', st['show'], ['World', 'Collision', 'World + collision'])
+            if ch:
+                st['show'] = sh
         if nlod > 1 or r.type == 0x51:
             imgui.same_line()
             imgui.set_next_item_width(90)
-            ch, lod = imgui.combo('LOD', st['lod'], [f'LOD {k}' for k in range(max(nlod, 1))])
+            ch, lod = imgui.combo('##lod', st['lod'], [f'LOD {k}' for k in range(max(nlod, 1))])
             if ch:
                 st['lod'] = lod
         _, v.use_tex = imgui.checkbox('Textures', v.use_tex)
@@ -1616,7 +1657,7 @@ class App(ExplorerUI):
         imgui.same_line()
         if imgui.button('Reset view'):
             v.pan[:] = 0
-            v.dist = v.radius * 2.6
+            v.dist = v.radius * v.fit
             v.yaw, v.pitch = 0.6, 0.35
         imgui.same_line()
         if imgui.button('Export glTF...'):
@@ -1636,7 +1677,7 @@ class App(ExplorerUI):
             return True
         if f.type == T_TEXTURE:
             return self.tex.get('img') is not None or self.tex.get('err') is not None
-        if f.type in (0x05, 0x51):
+        if f.type in (0x05, 0x51, 0x50, 0x60):
             res = self.model['result']
             return res is not None and (res[0] == 'error' or self.model['uploaded'] == self.model['key'])
         if f.type == 0x81:
@@ -2002,7 +2043,8 @@ class App(ExplorerUI):
     def export_glb(self, d, res, path):
         lod = self.model['lod'] if self.model['key'] and self.model['key'][1] == res.id else 0
         meshes, _ = mesh.decode_resource(d.b, res, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
-        texs = {m.texture: self.texture_image(d, m.texture, 1 << 14) for m in meshes if m.texture}
+        size = 1024 if res.type == mesh.T_INSTANCELIST else 1 << 14
+        texs = {t: self.texture_image(d, t, size) for t in {m.texture for m in meshes if m.texture}}
         name = self.display_name(d, res)[0]
         ops.write_file(path, gltf.write_glb(meshes, texs, name))
         return len(meshes)
@@ -2662,6 +2704,10 @@ found in the open bundles and in the game's global bundles (SHADERS, GLOBALMATER
 Materials: the shader, the textures by slot (Diffuse, Normal, Specular, ...) with thumbnails, and the shader
 constants by name (PbrMaterialDiffuseColour, ...), editable. Go jumps to an open resource; Open opens the
 bundle that has it (known after Find names).
+
+Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece of the city in 3D (World /
+Collision / World + collision); the PolygonSoupList is the collision, coloured by surface tag. Shared models come
+from the DISTRICT and GLOBALRESOURCES bundles (found faster after Find names).
 
 Vehicle list (VEHICLES\\VEHICLELIST): every car with its name, manufacturer, speed, power, ratings, ...; select a
 car to edit its fields; Duplicate / Delete / arrows change the rows. Export / Import CSV (Excel with ';' and

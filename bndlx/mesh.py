@@ -11,21 +11,35 @@ The vertex layout comes from the material's shader (import at 0x8) -> its first 
 VertexDescriptor (import at 0x9C). Shaders, and many materials and textures, live in the game's global
 bundles (SHADERS*.BNDL, GLOBALMATERIALDICTIONARY.BNDL, ...), which are loaded from the game folder.
 Model chunk 0: u32 offset of the renderable table (imports, one per LOD), renderable count at byte 0x14.
+InstanceList (0x50, the static world of a TRK_UNIT bundle), PC: u32 instances offset (0x10), u32 capacity,
+u32 count, u32 version (3); 0x60-byte instances: model import at +0, f32 at +4, u32 instance id at +8, a 4x4
+row-vector matrix at +0x20 (translation in the 4th row; the 4th column is not used). Shared world models are
+in HAWAII\\GLOBALRESOURCES.BNDL and HAWAII\\DISTRICT_*.BNDL.
+PolygonSoupList (0x60, collision of a TRK_UNIT bundle), PC: f32x3 min, pad, f32x3 max, pad, u32 soup table
+offset, u32 bounding box offset, i32 soup count, u32 data size; soup header (0x10): u32 polygon offset, u32
+vertex offset, u16, i8 x3 vertex offset in 500 m steps, u8 quad count, u8 polygon count, u8 vertex count;
+vertices u16 x3 in 1000/65536 m units; polygons 12 bytes: u32 collision tag, u8 x4 vertex indices (0xFF = a
+triangle; quads first, split 0-1-2 / 1-3-2), u8 x4 edge data.
 """
+import collections
+import glob
 import os
 import struct
 from dataclasses import dataclass
 
 import numpy as np
 
-T_RENDERABLE, T_MODEL, T_MATERIAL = 0x05, 0x51, 0x02
+T_RENDERABLE, T_MODEL, T_MATERIAL, T_INSTANCELIST, T_POLYSOUP = 0x05, 0x51, 0x02, 0x50, 0x60
 GLOBAL_BUNDLES = ('SHADERS.BNDL', 'SHADERS0.BNDL', 'SHADERS1.BNDL', 'GLOBALMATERIALDICTIONARY.BNDL',
                   'GLOBALTEXTUREDICTIONARY.BNDL', os.path.join('VEHICLES', 'VEHICLETEX.BNDL'), 'GLOBALEFFECTS.BNDL')
 PS3_TYPES = {1: ('s16n', 2), 2: ('f32', 4), 3: ('f16', 2), 4: ('u8n', 1), 5: ('s16', 2), 6: ('cmp', 4), 7: ('u8', 1)}
 DXGI = {2: ('f32', 4, 4), 6: ('f32', 3, 4), 16: ('f32', 2, 4), 41: ('f32', 1, 4), 10: ('f16', 4, 2),
         34: ('f16', 2, 2), 13: ('s16n', 4, 2), 11: ('u16n', 4, 2), 37: ('s16n', 2, 2), 35: ('u16n', 2, 2),
         28: ('u8n', 4, 1), 30: ('u8', 4, 1), 31: ('s8n', 4, 1), 14: ('s16', 4, 2), 12: ('u16', 4, 2)}
-DIFFUSE_SLOTS = (0x0E88,)
+# colour texture slots in order of preference: Diffuse, road surface colour (DriveableSurface), first blend layer
+# colour (PlotPBR / TerrainPBR), cat's eyes
+DIFFUSE_SLOTS = (0x0E88, 0x4C95, 0x7703, 0x8F77)
+ALPHA_TEST_WORDS = ('1Bit', 'Translucent', 'Tree', 'Foliage', 'Cutout')     # shaders that cut out by alpha
 S16N_SCALE = 10.0 / 32767.0          # vehicle positions: s16n x 10 m
 
 
@@ -42,8 +56,16 @@ class MeshData:
     texture: int               # diffuse texture id or None
     shader: str = ''
     tint: tuple = (0.72, 0.72, 0.74)
+    nrm: np.ndarray = None     # (N, 3) float32, computed on first use
+    alpha_test: bool = False   # leaves, fences, decals: texels with alpha < 0.5 are holes
+    wire: bool = False         # always drawn as wireframe (collision over the world)
 
     def normals(self):
+        if self.nrm is None:
+            self.nrm = self._normals()
+        return self.nrm
+
+    def _normals(self):
         p = self.pos.astype(np.float64)
         t = self.tris.astype(np.int64)
         fn = np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
@@ -68,10 +90,35 @@ def _index(b):
 
 
 class Library:
-    """Finds resources in the open bundles first, then in the global bundles of the game folder."""
+    """Finds resources in the open bundles first, then in the global bundles of the game folder, then (when a
+    locator is set, e.g. the Find names index) in the bundle that holds them, and for world geometry in
+    GLOBALRESOURCES and the DISTRICT bundles."""
+    EXTRA_LIMIT = 8
 
-    def __init__(self):
+    def __init__(self, locator=None):
         self.globals = {}          # game root -> [Bundle]
+        self.extra = collections.OrderedDict()     # path -> Bundle or None, opened on demand
+        self.locator = locator     # rid -> [bundle paths]
+
+    def open_extra(self, path):
+        if path in self.extra:
+            self.extra.move_to_end(path)
+            return self.extra[path]
+        from .bundle import Bundle
+        try:
+            b = Bundle.open(path)
+        except Exception:
+            b = None
+        self.extra[path] = b
+        while len(self.extra) > self.EXTRA_LIMIT:
+            self.extra.popitem(last=False)
+        return b
+
+    @staticmethod
+    def world_paths(root):
+        out = [os.path.join(root, 'HAWAII', 'GLOBALRESOURCES.BNDL'), os.path.join(root, 'GLOBALRESOURCES.BNDL')]
+        out += sorted(glob.glob(os.path.join(root, 'HAWAII', 'DISTRICT_*.BNDL')))
+        return [p for p in out if os.path.isfile(p)]
 
     def global_bundles(self, root):
         if root is None:
@@ -109,9 +156,25 @@ class Library:
             self.globals[key] = names
         return self.globals[key]
 
-    def find(self, rid, bundles, root):
-        for b in list(bundles) + self.global_bundles(root):
+    def find(self, rid, bundles, root, deep=False):
+        """(bundle, resource) or (None, None). deep: also search the world bundles (slow the first time)."""
+        if not rid:
+            return None, None
+        for b in list(bundles) + self.global_bundles(root) + [x for x in self.extra.values() if x is not None]:
             r = _index(b).get(rid)
+            if r is not None and not r.missing:
+                return b, r
+        if root is None:
+            return None, None
+        paths = []
+        if self.locator is not None:
+            nroot = os.path.normcase(os.path.abspath(root))
+            paths = [p for p in (self.locator(rid) or ()) if os.path.normcase(os.path.abspath(p)).startswith(nroot)]
+        if deep:
+            paths += [p for p in self.world_paths(root) if p not in paths]
+        for p in paths:
+            b = self.open_extra(p)
+            r = _index(b).get(rid) if b is not None else None
             if r is not None and not r.missing:
                 return b, r
         return None, None
@@ -138,7 +201,11 @@ def material_info(b, mat):
 
 
 SLOT_NAMES = {0x0E88: 'Diffuse', 0x0D9C: 'Normal', 0x31F2: 'Specular', 0x2837: 'Effects', 0x27D6: 'Crumple',
-              0x84E0: 'LightmapLights', 0x192D: 'AO', 0x5C7F: 'SpecAndAO'}
+              0x84E0: 'LightmapLights', 0x192D: 'AO', 0x5C7F: 'SpecAndAO',
+              # worked out from the textures (road / terrain blend shaders)
+              0x4C95: 'Road colour', 0xFEC8: 'Road markings', 0x0894: 'Blend mask', 0x7703: 'Layer 1 colour',
+              0xB210: 'Layer 2 colour', 0xED04: 'Layer 3 colour', 0x17D2: 'Layer normal', 0x3221: 'Layer normal',
+              0x8D3B: 'Layer normal', 0x5230: 'Reflection image'}
 
 
 def game_root(path):
@@ -227,10 +294,8 @@ def material_look(b, mat, shader_name=''):
         tp, sp, tip = struct.unpack_from(e + '3I', c, 0x24)
         imps = {i.offset: i.id for i in mat.imports()}
         slots = struct.unpack_from(e + f'{ntex}H', c, tp)
-        for k in range(ntex):
-            if slots[k] in DIFFUSE_SLOTS and imps.get(tip + 4 * k):
-                tex = imps[tip + 4 * k]
-                break
+        have = {slots[k]: imps.get(tip + 4 * k) for k in range(ntex) if imps.get(tip + 4 * k)}
+        tex = next((have[sl] for sl in DIFFUSE_SLOTS if sl in have), None)
         if nconst:
             ip, _, hp, vp = struct.unpack_from(e + '4I', c, 0x0C)
             hs = struct.unpack_from(e + f'{nconst}I', c, hp)
@@ -318,7 +383,8 @@ def decode_renderable(b, res, lib, bundles, root):
                 uv = uv[:, :2]
         tris = strips_to_tris(ib) if strip else ib[:len(ib) // 3 * 3].astype(np.uint32).reshape(-1, 3)
         tex, tint = material_look(mb, mat, sname)
-        out.append(MeshData(pos.astype(np.float32), uv, tris, mat_id, tex, sname, tint))
+        out.append(MeshData(pos.astype(np.float32), uv, tris, mat_id, tex, sname, tint,
+                            alpha_test=any(w in sname for w in ALPHA_TEST_WORDS)))
     if not out and problems:
         raise MeshError('; '.join(sorted(set(problems))) + '. Open the bundles that hold them, or the game folder.')
     return out
@@ -344,5 +410,132 @@ def decode_resource(b, res, lib, bundles, path, lod=0):
         rb, rr = lib.find(rid, [b] + list(bundles), root)
         if rr is None:
             raise MeshError(f'renderable {rid:#x} not found')
-        return decode_renderable(rb, rr, lib, [b] + list(bundles), root), len(rids)
+        return decode_renderable(rb, rr, lib, [rb, b] + list(bundles), root), len(rids)
+    if res.type == T_INSTANCELIST:
+        return decode_instances(b, res, lib, bundles, path, lod)[0], 1
+    if res.type == T_POLYSOUP:
+        return decode_polysoup(b, res)[0], 1
     return decode_renderable(b, res, lib, [b] + list(bundles), root), 1
+
+
+def instance_list(b, res):
+    """[(model id, 4x4 row-vector matrix as float64)] of an InstanceList."""
+    e = b.e
+    c = res.data(0)
+    if len(c) < 16:
+        return []
+    off, cap, n, ver = struct.unpack_from(e + '4I', c, 0)
+    imps = {i.offset: i.id for i in res.imports()}
+    out = []
+    for i in range(n):
+        o = off + 0x60 * i
+        if o + 0x60 > len(c):
+            break
+        m = np.array(struct.unpack_from(e + '16f', c, o + 0x20), np.float64).reshape(4, 4)
+        out.append((imps.get(o), m))
+    return out
+
+
+def decode_instances(b, res, lib, bundles, path, lod=0, progress=None):
+    """World-space meshes of every instance of an InstanceList: (meshes, {'instances', 'shown', 'models',
+    'missing': [model ids]}). Each model is decoded once."""
+    root = game_root(path)
+    insts = instance_list(b, res)
+    if not insts:
+        raise MeshError('this instance list is empty (the PS3 prototype keeps its world elsewhere)')
+    look = [b] + list(bundles)
+    cache = {}
+    out = []
+    shown = 0
+    missing = []
+    for i, (mid, m) in enumerate(insts):
+        if progress:
+            progress(i, len(insts))
+        if mid not in cache:
+            cache[mid] = None
+            mb, mr = lib.find(mid, look, root, deep=True)
+            if mr is not None and mr.type in (T_MODEL, T_RENDERABLE):
+                try:
+                    cache[mid] = decode_resource(mb, mr, lib, [mb] + look, path, lod)[0]
+                except (MeshError, struct.error, ValueError, IndexError):
+                    cache[mid] = None
+            if cache[mid] is None:
+                missing.append(mid)
+        ms = cache[mid]
+        if not ms:
+            continue
+        a, t = m[:3, :3], m[3, :3]
+        try:
+            na = np.linalg.inv(a).T
+        except np.linalg.LinAlgError:
+            continue
+        shown += 1
+        for md in ms:
+            pos = (md.pos.astype(np.float64) @ a + t).astype(np.float32)
+            nrm = md.normals().astype(np.float64) @ na
+            nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+            out.append(MeshData(pos, md.uv, md.tris, md.material, md.texture, md.shader, md.tint,
+                                nrm.astype(np.float32), md.alpha_test))
+    if not out:
+        raise MeshError('none of the instanced models could be found')
+    return out, {'instances': len(insts), 'shown': shown, 'models': len(cache), 'missing': missing}
+
+
+SOUP_UNIT = 1000.0 / 65536.0
+
+
+def tag_colour(tag):
+    """A stable, fairly bright colour for a collision tag."""
+    import colorsys
+    h = ((tag * 2654435761) & 0xFFFFFFFF) / 2 ** 32
+    return colorsys.hsv_to_rgb(h, 0.55, 0.9)
+
+
+def decode_polysoup(b, res):
+    """Collision of a PolygonSoupList: ([MeshData] one per collision tag, {'soups', 'polygons', 'tags':
+    {tag: triangle count}})."""
+    e = b.e
+    d = bytes(res.data(0))
+    if len(d) < 0x30:
+        raise MeshError('this collision list is empty')
+    po, bo, n, size = struct.unpack_from(e + 'IIiI', d, 0x20)
+    if n <= 0:
+        raise MeshError('this collision list is empty (the PS3 prototype keeps its world elsewhere)')
+    offs = struct.unpack_from(e + f'{n}I', d, po)
+    poly_t = np.dtype([('tag', e + 'u4'), ('idx', 'u1', 4), ('edge', 'u1', 4)])
+    verts, tris, tags = [], [], []
+    base = 0
+    npolys = 0
+    for s in offs:
+        pp, vp = struct.unpack_from(e + 'II', d, s)
+        ox, oy, oz = struct.unpack_from('3b', d, s + 10)
+        nq, npl, nv = d[s + 13], d[s + 14], d[s + 15]
+        if not nv or not npl:
+            continue
+        v = np.frombuffer(d, e + 'u2', 3 * nv, vp).reshape(-1, 3).astype(np.float32) * np.float32(SOUP_UNIT)
+        v += np.array([ox, oy, oz], np.float32) * 500.0
+        p = np.frombuffer(d, poly_t, npl, pp)
+        idx = p['idx'].astype(np.int64)
+        q, t = idx[:nq], idx[nq:]
+        tri = np.concatenate([q[:, [0, 1, 2]], q[:, [1, 3, 2]], t[:, :3]])
+        tag = np.concatenate([p['tag'][:nq], p['tag'][:nq], p['tag'][nq:]])
+        ok = (tri < nv).all(1)
+        verts.append(v)
+        tris.append(tri[ok] + base)
+        tags.append(tag[ok])
+        base += nv
+        npolys += npl
+    if not verts:
+        raise MeshError('this collision list has no polygons')
+    pos = np.concatenate(verts)
+    tri = np.concatenate(tris)
+    tag = np.concatenate(tags)
+    out = []
+    counts = {}
+    for tg in np.unique(tag):
+        sel = tri[tag == tg]
+        used, inv = np.unique(sel, return_inverse=True)
+        counts[int(tg)] = len(sel)
+        out.append(MeshData(pos[used], None, inv.reshape(-1, 3).astype(np.uint32), int(tg), None,
+                            f'collision {int(tg):#x}', tag_colour(int(tg))))
+    return out, {'soups': n, 'polygons': npolys, 'tags': counts}

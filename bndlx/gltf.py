@@ -58,6 +58,9 @@ def write_glb(meshes, texture_images, name='model'):
                 tex_index[m.texture] = len(textures) - 1
             mat['pbrMetallicRoughness']['baseColorTexture'] = {'index': tex_index[m.texture]}
             mat['pbrMetallicRoughness']['baseColorFactor'] = [1.0, 1.0, 1.0, 1.0]
+            if getattr(m, 'alpha_test', False):
+                mat['alphaMode'] = 'MASK'
+                mat['alphaCutoff'] = 0.5
         materials.append(mat)
         prims_meshes.append({'name': f'mesh_{i}', 'primitives': [{'attributes': attrs, 'indices': ind,
                                                                    'material': len(materials) - 1}]})

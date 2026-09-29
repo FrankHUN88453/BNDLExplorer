@@ -26,12 +26,15 @@ in vec3 vN;
 in vec2 vUV;
 uniform sampler2D uTex;
 uniform int uUseTex;
+uniform int uAlphaTest;
 uniform vec3 uTint;
 out vec4 frag;
 void main() {
     vec3 n = normalize(vN);
     float l = 0.35 + 0.65 * abs(n.z);
     vec4 c = uUseTex == 1 ? texture(uTex, vUV) : vec4(uTint, 1.0);
+    if (uUseTex == 1 && uAlphaTest == 1 && c.a < 0.5)
+        discard;
     frag = vec4(c.rgb * l, 1.0);
 }
 '''
@@ -66,13 +69,14 @@ class Viewer:
         self.prog = None
         self.fbo = self.color = self.depth = None
         self.size = (0, 0)
-        self.meshes = []            # [(vao, vbo, ibo, count, tex, tint)]
+        self.meshes = []            # [(vao, vbo, ibo, count, tex, tint, alpha test)]
         self.textures = {}          # texture key -> gl id
         self.key = None
         self.yaw, self.pitch, self.dist = 0.6, 0.35, 1.0
         self.center = np.zeros(3, np.float32)
         self.pan = np.zeros(3, np.float32)
         self.radius = 1.0
+        self.fit = 2.6              # start distance in radii
         self.wire = False
         self.use_tex = True
         self.z_up = False
@@ -155,8 +159,8 @@ class Viewer:
         self.meshes = []
         self.key = None
 
-    def set_meshes(self, key, meshes, texture_images):
-        """meshes: [MeshData]; texture_images: {texture id: RGBA array or None}."""
+    def set_meshes(self, key, meshes, texture_images, fit=2.6):
+        """meshes: [MeshData]; texture_images: {texture id: RGBA array or None}; fit: start distance in radii."""
         if self.gl is None:
             self._init()
         GL = self.gl
@@ -166,7 +170,8 @@ class Viewer:
         hi = np.max([m.pos.max(0) for m in meshes], 0) if meshes else np.ones(3)
         self.center = ((lo + hi) / 2).astype(np.float32)
         self.radius = float(max(np.linalg.norm(hi - lo) / 2, 1e-3))
-        self.dist = self.radius * 2.6
+        self.fit = fit
+        self.dist = self.radius * fit
         self.pan = np.zeros(3, np.float32)
         for tid, img in texture_images.items():
             if tid not in self.textures and img is not None:
@@ -188,7 +193,8 @@ class Viewer:
                 GL.glVertexAttribPointer(loc, n, GL.GL_FLOAT, GL.GL_FALSE, 32, ctypes.c_void_p(off))
             GL.glBindVertexArray(0)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-            self.meshes.append((vao, vbo, ibo, len(idx), self.textures.get(m.texture), m.tint))
+            self.meshes.append((vao, vbo, ibo, len(idx), self.textures.get(m.texture), m.tint,
+                                getattr(m, 'alpha_test', False), getattr(m, 'wire', False)))
 
     # -- drawing ----------------------------------------------------------------------------------------------
     def render(self, w, h):
@@ -220,10 +226,13 @@ class Viewer:
         GL.glUniform1i(GL.glGetUniformLocation(self.prog, 'uTex'), 0)
         loc_use = GL.glGetUniformLocation(self.prog, 'uUseTex')
         loc_tint = GL.glGetUniformLocation(self.prog, 'uTint')
+        loc_alpha = GL.glGetUniformLocation(self.prog, 'uAlphaTest')
         GL.glActiveTexture(GL.GL_TEXTURE0)
-        for vao, _, _, count, tex, tint in self.meshes:
-            use = bool(tex) and self.use_tex and not self.wire
+        for vao, _, _, count, tex, tint, alpha, wire in self.meshes:
+            GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE if self.wire or wire else GL.GL_FILL)
+            use = bool(tex) and self.use_tex and not self.wire and not wire
             GL.glUniform1i(loc_use, 1 if use else 0)
+            GL.glUniform1i(loc_alpha, 1 if alpha else 0)
             GL.glUniform3f(loc_tint, *tint)
             GL.glBindTexture(GL.GL_TEXTURE_2D, tex if use else self.white)
             GL.glBindVertexArray(vao)
@@ -264,4 +273,4 @@ class Viewer:
             self.dist *= 0.88 ** io.mouse_wheel
         if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
             self.pan[:] = 0
-            self.dist = self.radius * 2.6
+            self.dist = self.radius * self.fit

@@ -269,6 +269,35 @@ def test_materials(path):
           'material constant edit round-trips')
 
 
+def test_world(path):
+    """Every instance of a track unit is drawn (shared models from GLOBALRESOURCES / DISTRICT_*), inside the
+    unit's area, and exports as glTF."""
+    from bndlx import gltf, mesh
+    b = Bundle.open(path)
+    r = next(x for x in b.resources if x.type == mesh.T_INSTANCELIST)
+    lib = mesh.Library()
+    meshes, st = mesh.decode_instances(b, r, lib, [], path)
+    lo = np.min([m.pos.min(0) for m in meshes], 0)
+    hi = np.max([m.pos.max(0) for m in meshes], 0)
+    check(st['shown'] == st['instances'] and (hi - lo).max() < 2000,
+          f"{st['shown']}/{st['instances']} instances drawn, {len(meshes)} meshes, "
+          f"{(hi - lo).round().tolist()} m ({os.path.basename(path)})")
+    tex = sum(1 for m in meshes if m.texture) / len(meshes)
+    check(tex > 0.9 and any(m.alpha_test for m in meshes), f'{tex:.0%} of the world meshes have a colour texture')
+    ok, js = check_glb(gltf.write_glb(meshes, {}, 'world'))
+    check(ok and len(js['meshes']) == len(meshes), 'track unit exports as glTF')
+    soup = next(x for x in b.resources if x.type == mesh.T_POLYSOUP)
+    cm, cst = mesh.decode_polysoup(b, soup)
+    d = soup.data(0)
+    box_lo = np.array(struct.unpack_from('<3f', d, 0))
+    box_hi = np.array(struct.unpack_from('<3f', d, 16))
+    clo = np.min([m.pos.min(0) for m in cm], 0)
+    chi = np.max([m.pos.max(0) for m in cm], 0)
+    ntri = sum(len(m.tris) for m in cm)
+    check(np.allclose(clo, box_lo, atol=0.02) and np.allclose(chi, box_hi, atol=0.02) and ntri >= cst['polygons'],
+          f"collision: {cst['soups']} soups, {cst['polygons']} polygons, {len(cst['tags'])} tags, fills the list's box")
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -311,6 +340,7 @@ def main():
         test_models(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_materials(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_vehiclelist(os.path.join(PC, 'VEHICLES', 'VEHICLELIST.BNDL'))
+        test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))

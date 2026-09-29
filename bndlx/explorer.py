@@ -1173,7 +1173,7 @@ class ExplorerUI:
             self.action_export(d, r, 'png')
         if r.type == 0x70 and imgui.menu_item('As text...', '', False)[0]:
             self.action_export(d, r, 'text')
-        if r.type in (0x05, 0x51) and imgui.menu_item('As glTF (.glb) with textures...', '', False)[0]:
+        if r.type in (0x05, 0x51, 0x50, 0x60) and imgui.menu_item('As glTF (.glb) with textures...', '', False)[0]:
             self.action_export(d, r, 'glb')
         if r.type == 0x81 and imgui.menu_item('As WAV...', '', False)[0]:
             self.action_export(d, r, 'wav')
