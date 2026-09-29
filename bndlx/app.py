@@ -30,7 +30,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.14'
+VERSION = '0.15'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -442,6 +442,17 @@ class App(ExplorerUI, SoundtrackUI):
             self.status = f'Converted {d.name} to {target}: {rep["converted"]} resources.'
 
         self.run_job(f'Converting to {target}...', job, done)
+
+    def action_plate(self):
+        d = self.cur
+        root = ops.game_root(d.path) if d is not None and d.path else None
+        if root is None:
+            root = next((f for f in self.pinned() if os.path.isfile(os.path.join(f, ops.PLATE_BUNDLES[0]))), None)
+        if root is None:
+            root = filedialog.pick_folder('The game folder (PC)')
+            if not root:
+                return
+        self.modal = {'kind': 'plate', 'root': root, 'state': ops.plate_editing_state(root)}
 
     def action_export_sps(self, src=None):
         """Every .SPS file of a folder (and its sub folders) as WAV files."""
@@ -2785,7 +2796,8 @@ class App(ExplorerUI, SoundtrackUI):
                  'confirm_close': 'Unsaved changes', 'confirm_exit': 'Unsaved changes',
                  'confirm_replace': 'Replace resources', 'change_id': 'Duplicate resource' if m.get('dup') else 'Change id',
                  'texture_options': 'Replace texture', 'wave_options': 'Replace sound', 'open_path': 'Open by path', 'find': 'Find', 'goto': 'Go to id',
-                 'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties'}.get(m['kind'], 'Message')
+                 'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties',
+                 'plate': 'License plate registration'}.get(m['kind'], 'Message')
         popup = f'{title}###modal'
         if not imgui.is_popup_open(popup):
             imgui.open_popup(popup)
@@ -2972,6 +2984,38 @@ class App(ExplorerUI, SoundtrackUI):
             imgui.same_line()
             if imgui.button('Cancel', imgui.ImVec2(120, 0)):
                 close = True
+        elif k == 'plate':
+            root = m['root']
+            imgui.text_wrapped('The plate text ("registration") has its own editor in the game: Easydrive > EDIT LICENSE '
+                               'PLATE > REGISTRATION, typed with the keyboard. The game unlocks it at Speed Level 15 in '
+                               'multiplayer. Enabling it here makes the menu offer it right away (the locked menu list gets '
+                               'the unlocked one\'s items). The bundles are kept once as .orig.')
+            imgui.spacing()
+            for p, state in m['state']:
+                col = {'enabled': imgui.ImVec4(0.4, 0.85, 0.4, 1), 'locked': imgui.ImVec4(0.9, 0.75, 0.35, 1)}.get(
+                    state, imgui.ImVec4(0.6, 0.6, 0.6, 1))
+                imgui.text_colored(col, {'enabled': 'enabled', 'locked': 'locked (Speed Level 15)'}.get(state, 'not found'))
+                imgui.same_line()
+                imgui.text_disabled(os.path.relpath(p, root))
+            imgui.spacing()
+            if imgui.button('Enable plate text editing', imgui.ImVec2(210, 0)):
+                try:
+                    w = ops.set_plate_editing(root, True)
+                    self.status = f'Plate registration editing enabled ({len(w)} bundle(s) changed).'
+                except Exception as ex:
+                    self.status = f'Failed: {ex}'
+                m['state'] = ops.plate_editing_state(root)
+            imgui.same_line()
+            if imgui.button('Restore (locked)', imgui.ImVec2(150, 0)):
+                try:
+                    w = ops.set_plate_editing(root, False)
+                    self.status = f'Plate registration editing restored to the game\'s rule ({len(w)} bundle(s) changed).'
+                except Exception as ex:
+                    self.status = f'Failed: {ex}'
+                m['state'] = ops.plate_editing_state(root)
+            imgui.same_line()
+            if imgui.button('Close', imgui.ImVec2(100, 0)):
+                close = True
         elif k == 'properties':
             d = self.doc_by_uid(m['doc'])
             if d is None:
@@ -3078,6 +3122,8 @@ Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece 
 (World / Collision / World + collision, Neighbours); the PolygonSoupList is the collision, coloured by surface tag.
 Shared models come from the DISTRICT and GLOBALRESOURCES bundles (found faster after Find names).
 HAWAII\\PVS.BNDL: a map of all track units; click one to open it.
+
+License plate text (... menu): enables the game's own plate registration editor without Speed Level 15.
 
 Soundtrack editor (... menu): add songs from audio files, edit artist / title, replace audio, remove, choose
 playlists, reorder; Save writes SONGS.BNDL, the language strings and the .SPS files (originals kept as .orig).

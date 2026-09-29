@@ -463,6 +463,31 @@ def test_soundtrack(pc_root):
           'shared artist renamed for one song only; removing the new song restores the lists')
 
 
+def test_plate(pc_root):
+    """License plate registration editing: enable on a copy (the locked menu list gets the unlocked items, nothing
+    else changes), enable again changes nothing, restore gives the game's files back byte-identically."""
+    root = os.path.join(TMP, 'plate_game')
+    os.makedirs(os.path.join(root, 'UI', 'SCREENS2'), exist_ok=True)
+
+    def pristine(p):
+        return p + '.orig' if os.path.exists(p + '.orig') else p
+
+    for rel in ops.PLATE_BUNDLES:
+        shutil.copy2(pristine(os.path.join(pc_root, rel)), os.path.join(root, rel))
+    before = [s for _, s in ops.plate_editing_state(root)]
+    w = ops.set_plate_editing(root, True)
+    after = [s for _, s in ops.plate_editing_state(root)]
+    b = Bundle.open(os.path.join(root, ops.PLATE_BUNDLES[0]))
+    ob = Bundle.open(pristine(os.path.join(pc_root, ops.PLATE_BUNDLES[0])))
+    others = all(bytes(r.data(0)) == bytes(ob.find(r.id).data(0)) for r in b.resources if r.id != ops.PLATE_LOCKED)
+    again = ops.set_plate_editing(root, True)
+    ops.set_plate_editing(root, False)
+    same = all(open(os.path.join(root, rel), 'rb').read() == open(pristine(os.path.join(pc_root, rel)), 'rb').read()
+               for rel in ops.PLATE_BUNDLES)
+    check(before == ['locked', 'locked'] and after == ['enabled', 'enabled'] and len(w) == 2 and others and not again
+          and same, 'plate registration editing: enable on 2 menus, nothing else changes, restore is identical')
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -510,6 +535,7 @@ def main():
         test_sps(PC)
         test_zones(os.path.join(PC, 'HAWAII'))
         test_soundtrack(PC)
+        test_plate(PC)
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))

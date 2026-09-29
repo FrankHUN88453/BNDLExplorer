@@ -148,8 +148,8 @@ def main():
         elif f > 16 and app.job is None and 'saved' not in state:
             state['saved'] = f
         elif 'saved' in state and f == state['saved'] + 3:
-            app.__dict__.pop('drop_target', None)                # the real drop target again (the mouse position)
             app._paste_target = None
+            app.drop_target = lambda: (app.cur, None, 'window')  # dropped on an empty part of the window
             post_dropfiles(app.hwnd, [sps])                     # an .SPS file dropped on the window opens
         elif 'saved' in state and f == state['saved'] + 6:
             sd = next((x for x in app.docs if getattr(x.b, 'kind', '') == 'sps'), None)

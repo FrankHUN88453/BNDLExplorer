@@ -615,6 +615,8 @@ class ExplorerUI:
             self.action_export_sps()
         if imgui.menu_item('Soundtrack editor (songs and playlists)...', '', False, self.job is None)[0]:
             self.open_soundtrack()
+        if imgui.menu_item('License plate text (registration) editing...', '', False, self.job is None)[0]:
+            self.action_plate()
         imgui.separator()
         if imgui.menu_item('Find names (scan the game folders)...', '', False, self.job is None)[0]:
             self.action_find_names()

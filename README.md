@@ -196,6 +196,15 @@ GAMEMODES) contain the whole licensed soundtrack; the 12-song list is also used 
 by scripted sequences. New objects get ids from 0x0FA00000 up, far from the game's own. Whether a list plays
 in races, pursuits or menus is not known yet: test in the game.
 
+## License plate text
+
+The plate text ("registration") has its own editor in the game (Easydrive > EDIT LICENSE PLATE > REGISTRATION,
+typed with the keyboard), unlocked at Speed Level 15 in multiplayer. The garage menu shows one of two item
+lists depending on `Players.LocalPlayer.CustomiseLicensePlateAvailable`; in the locked list the REGISTRATION item
+is inactive. **... > License plate text (registration) editing...** copies the unlocked list's items into the
+locked one (`PlateLockedItems.json` in `UI\SCREENS2\1347319.BNDL` and `264716.BNDL`), so the editor is offered
+right away; **Restore** puts the game's own list back from the `.orig` files.
+
 ## Vehicle list
 
 `VEHICLES\VEHICLELIST.BNDL` holds the list of every car of the game (PC: 110 rows, PS3 prototype: 188) and of

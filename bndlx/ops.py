@@ -546,3 +546,76 @@ def export_sps_folder(src, dst, locator=None, progress=None):
         except Exception as ex:
             errors.append((p, str(ex)))
     return written, errors
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# license plate registration (the plate text)
+# ---------------------------------------------------------------------------------------------------------------
+# The garage menu (Easydrive) shows Widget.PlateLockedItems or Widget.PlateUnlkedItems depending on
+# Players.LocalPlayer.CustomiseLicensePlateAvailable (Speed Level 15 in multiplayer). In the locked list the
+# "REGISTRATION" item (text entry -> SetLocalPlayerLicenseRegistration) is inactive. Making the locked list the same
+# as the unlocked one gives the game's own plate text editor without the unlock.
+PLATE_BUNDLES = (os.path.join('UI', 'SCREENS2', '1347319.BNDL'), os.path.join('UI', 'SCREENS2', '264716.BNDL'))
+PLATE_LOCKED, PLATE_UNLOCKED = 0xADF88878, 0xDB576CF0
+
+
+def _plate_texts(b):
+    lock, unlock = b.find(PLATE_LOCKED), b.find(PLATE_UNLOCKED)
+    if lock is None or unlock is None:
+        return None, None, None, None
+    return lock, unlock, textfile.read(lock, b.e), textfile.read(unlock, b.e)
+
+
+def _unlocked_as_locked(unlocked_text):
+    return unlocked_text.replace(b'"PlateUnlkedItems"', b'"PlateLockedItems"')
+
+
+def plate_editing_state(root):
+    """[(bundle path, 'enabled' | 'locked' | 'missing')] for the menus that hold the plate items."""
+    from .bundle import Bundle
+    out = []
+    for rel in PLATE_BUNDLES:
+        p = os.path.join(root, rel)
+        if not os.path.isfile(p):
+            out.append((p, 'missing'))
+            continue
+        lock, unlock, lt, ut = _plate_texts(Bundle.open(p))
+        if lock is None:
+            out.append((p, 'missing'))
+        else:
+            out.append((p, 'enabled' if lt == _unlocked_as_locked(ut) else 'locked'))
+    return out
+
+
+def set_plate_editing(root, enable):
+    """Enable (locked list = unlocked list) or restore (the locked list of the .orig bundle) the in-game plate
+    registration editor. Every changed bundle is kept once as .orig. Returns the files written."""
+    import shutil
+    from .bundle import Bundle
+    written = []
+    for rel in PLATE_BUNDLES:
+        p = os.path.join(root, rel)
+        if not os.path.isfile(p):
+            continue
+        b = Bundle.open(p)
+        lock, unlock, lt, ut = _plate_texts(b)
+        if lock is None:
+            continue
+        if enable:
+            new = _unlocked_as_locked(ut)
+        else:
+            if not os.path.isfile(p + '.orig'):
+                continue
+            ob = Bundle.open(p + '.orig')
+            olock = ob.find(PLATE_LOCKED)
+            if olock is None:
+                continue
+            new = textfile.read(olock, ob.e)
+        if new == lt:
+            continue
+        replace_text(b, lock, new)
+        if not os.path.exists(p + '.orig'):
+            shutil.copy2(p, p + '.orig')
+        b.save(p)
+        written.append(p)
+    return written
