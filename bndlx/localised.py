@@ -53,7 +53,13 @@ class StringTable:
                 ent[1] = text
                 found = True
         if not found:
-            self.entries.append([sid, text])
+            # the game's tables are sorted by id (looked up by binary search): keep them sorted
+            ids = [ent[0] for ent in self.entries]
+            if ids == sorted(ids):
+                import bisect
+                self.entries.insert(bisect.bisect_right(ids, sid), [sid, text])
+            else:
+                self.entries.append([sid, text])
 
     # -- text exchange (translations) ------------------------------------------------------------------------
     def to_csv(self):

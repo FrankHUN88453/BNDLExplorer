@@ -175,6 +175,26 @@ bundle** jumps to it, and replacing such a sound is done there (the bundle and t
 folders (for example the whole soundtrack: `UI\SONGS`, named `Artist - Title (id).wav`). An .SPS file can also
 be used as the source when replacing any sound.
 
+## Soundtrack editor
+
+**... > Soundtrack editor (songs and playlists)** opens the game's music (PC): every song of
+`UI\SONGS\SONGS.BNDL` with its artist, title, length and playlists.
+
+- **Add songs...**: pick WAV / FLAC / OGG / MP3 / AIFF (or .SPS) files; they are encoded like the game's songs
+  (EALayer3, stereo) and added to the two soundtrack playlists (or to the playlist shown). File names like
+  `Artist - Title.mp3` give the artist and title.
+- Edit **artist** and **title** in place (Enter applies; a name shared by several songs is changed for this song
+  only), **Replace audio...**, **remove** a song, play it, tick the playlists (the two checkboxes are the two
+  soundtrack lists; **Lists...** shows all 13), reorder a playlist (choose it in the list at the top).
+- **Save** writes `UI\SONGS\SONGS.BNDL`, the artist / title strings into every `UI\LANGUAGE\*.BNDL` (kept sorted
+  by id, as the game expects) and the new `UI\SONGS\<id>.SPS` files; every changed file is kept once as `.orig`.
+
+How it is stored: a Song object points at a Wave that streams `UI\SONGS\<id>.SPS` and holds the string ids of
+its artist and title; a SongList holds references to Songs. The two 42-song lists (one referenced by
+GAMEMODES) contain the whole licensed soundtrack; the 12-song list is also used by GAMEMODES, the one-song lists
+by scripted sequences. New objects get ids from 0x0FA00000 up, far from the game's own. Whether a list plays
+in races, pursuits or menus is not known yet: test in the game.
+
 ## Vehicle list
 
 `VEHICLES\VEHICLELIST.BNDL` holds the list of every car of the game (PC: 110 rows, PS3 prototype: 188) and of

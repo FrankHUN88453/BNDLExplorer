@@ -19,6 +19,7 @@ from . import vehiclelist as VL
 from . import zonelist as ZL
 from . import spsfile
 from .audioplay import Player
+from .soundtrack_ui import SoundtrackUI
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -29,7 +30,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.12'
+VERSION = '0.13'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -157,7 +158,7 @@ def _clock(seconds):
     return f'{int(seconds // 60)}:{seconds % 60:04.1f}'
 
 
-class App(ExplorerUI):
+class App(ExplorerUI, SoundtrackUI):
     def __init__(self, paths=(), select=None):
         self.docs = []
         self.tabs = [Browser()]
@@ -173,6 +174,7 @@ class App(ExplorerUI):
                       'nb': False, 'progress': ''}
         self.zmap = {'key': None}
         self.player = Player()
+        self.st_ui = None                # soundtrack editor window state
         self.wave_cursor = {}            # sound key -> sample where Play starts (set by clicking the waveform)
         self.vlist = {'key': None, 'obj': None, 'sel': 0, 'msel': 0, 'filter': '', 'error': None}
         self.folder_cache = {}
@@ -887,7 +889,8 @@ class App(ExplorerUI):
 
     def exit_guard(self):
         p = hello_imgui.get_runner_params()
-        if p.app_shall_exit and not self.exit_ok and any(d.modified for d in self.docs):
+        st_dirty = self.st_ui is not None and self.st_ui['model'].dirty
+        if p.app_shall_exit and not self.exit_ok and (any(d.modified for d in self.docs) or st_dirty):
             p.app_shall_exit = False
             try:
                 lib = dragdrop._glfw()
@@ -1686,6 +1689,10 @@ class App(ExplorerUI):
         """Stop the sound when its item is no longer the one shown (another item, bundle or tab was selected, or
         the sound was changed)."""
         if not self.player.opened:
+            return
+        if self.player.key and self.player.key[0] == 'song':      # a soundtrack editor preview
+            if self.st_ui is None:
+                self.player.stop()
             return
         d, r = self.focused()
         shown = ('wave', d.uid, r.id, id(r.data(0))) if d is not None and r is not None and r.type == 0x81 else None
@@ -2820,7 +2827,8 @@ class App(ExplorerUI):
             if imgui.button('Cancel', imgui.ImVec2(120, 0)):
                 close = True
         elif k == 'confirm_exit':
-            names = ', '.join(d.name for d in self.docs if d.modified)
+            names = ', '.join([d.name for d in self.docs if d.modified]
+                              + (['the soundtrack editor'] if self.st_ui is not None and self.st_ui['model'].dirty else []))
             imgui.text(f'Unsaved changes in: {names}')
             if imgui.button('Exit without saving', imgui.ImVec2(170, 0)):
                 self.exit_ok = True
@@ -3070,6 +3078,9 @@ Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece 
 (World / Collision / World + collision, Neighbours); the PolygonSoupList is the collision, coloured by surface tag.
 Shared models come from the DISTRICT and GLOBALRESOURCES bundles (found faster after Find names).
 HAWAII\\PVS.BNDL: a map of all track units; click one to open it.
+
+Soundtrack editor (... menu): add songs from audio files, edit artist / title, replace audio, remove, choose
+playlists, reorder; Save writes SONGS.BNDL, the language strings and the .SPS files (originals kept as .orig).
 
 Sound streams (.SPS files: music, ambience, sequence and video sound): open them like bundles; play, export WAV,
 replace and save. ... > Export sound streams (.SPS) of a folder as WAV converts a whole folder.

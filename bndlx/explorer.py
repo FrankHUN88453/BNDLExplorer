@@ -240,6 +240,7 @@ class ExplorerUI:
         self.status_bar()
         self.modals()
         self.results_window()
+        self.soundtrack_window()
         if self.drag is not None:
             payload = imgui.get_drag_drop_payload_py_id()
             if payload is None or payload.type != PAYLOAD:
@@ -612,6 +613,8 @@ class ExplorerUI:
             self.action_import_folder(d)
         if imgui.menu_item('Export sound streams (.SPS) of a folder as WAV...', '', False, self.job is None)[0]:
             self.action_export_sps()
+        if imgui.menu_item('Soundtrack editor (songs and playlists)...', '', False, self.job is None)[0]:
+            self.open_soundtrack()
         imgui.separator()
         if imgui.menu_item('Find names (scan the game folders)...', '', False, self.job is None)[0]:
             self.action_find_names()

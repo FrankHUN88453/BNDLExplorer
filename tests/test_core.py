@@ -391,6 +391,64 @@ def test_proto_world(seacrest):
     check(cst['polygons'] > 1000, f"prototype collision: {cst['soups']} soups, {cst['polygons']} polygons")
 
 
+def test_soundtrack(pc_root):
+    """Soundtrack editor back end on a copy of UI\\SONGS + UI\\LANGUAGE: every Song / SongList rebuilds
+    byte-identically, an unchanged save is identical, a new song (strings in every language, sorted) saves and
+    reads back, a shared artist is renamed for one song only, removing restores the lists."""
+    from bndlx import eal3, soundtrack as ST
+    from bndlx.localised import StringTable as ST2
+    root = os.path.join(TMP, 'st_game')
+    os.makedirs(os.path.join(root, 'UI', 'SONGS'), exist_ok=True)
+    os.makedirs(os.path.join(root, 'UI', 'LANGUAGE'), exist_ok=True)
+    shutil.copy2(os.path.join(pc_root, 'UI', 'SONGS', 'SONGS.BNDL'), os.path.join(root, 'UI', 'SONGS'))
+    for f in os.listdir(os.path.join(pc_root, 'UI', 'LANGUAGE')):
+        if f.lower().endswith('.bndl'):
+            shutil.copy2(os.path.join(pc_root, 'UI', 'LANGUAGE', f), os.path.join(root, 'UI', 'LANGUAGE'))
+    songs_path = os.path.join(root, 'UI', 'SONGS', 'SONGS.BNDL')
+    orig = open(songs_path, 'rb').read()
+    st = ST.Soundtrack(root)
+    same = 0
+    for obj in st.songs + st.lists:
+        r = st.b.find(obj.rid)
+        c = r.copy()
+        body, imps = (ST.build_song if isinstance(obj, ST.Song) else ST.build_list)(obj.fields, st.e)
+        c.set_body(body, imps, st.e)
+        same += bytes(c.data(0)) == bytes(r.data(0))
+    check(same == len(st.songs) + len(st.lists), f'{len(st.songs)} songs and {len(st.lists)} playlists rebuild identical')
+    st.save()
+    check(open(songs_path, 'rb').read() == orig, 'unchanged soundtrack save is byte-identical')
+    wav = os.path.join(TMP, 'song.wav')
+    t = np.arange(44100 * 12) / 44100
+    tone = (np.stack([np.sin(2 * np.pi * 330 * t), np.sin(2 * np.pi * 440 * t)], 1) * 8000).astype(np.int16)
+    ops.write_file(wav, eal3.wav_bytes(tone, 44100))
+    st = ST.Soundtrack(root)
+    s = st.add_song(wav, 'Test Artist', 'Test Title')
+    st.save()
+    st2 = ST.Soundtrack(root)
+    n = st2.song(s.rid)
+    audio, rate, head = eal3.decode_sps(open(n.file, 'rb').read())
+    ok_lang = True
+    for f in os.listdir(os.path.join(root, 'UI', 'LANGUAGE')):
+        if not f.lower().endswith('.bndl'):
+            continue
+        lb = Bundle.open(os.path.join(root, 'UI', 'LANGUAGE', f))
+        tb = ST2.read(next(r for r in lb.resources if r.type == 0x201), lb.e)
+        d = dict(tb.entries)
+        ids = [i for i, _ in tb.entries]
+        ok_lang &= d.get(n.fields['artist']) == 'Test Artist' and d.get(n.fields['title']) == 'Test Title' and ids == sorted(ids)
+    check(n is not None and n.title == 'Test Title' and abs(len(audio) / rate - 12) < 0.05 and ok_lang
+          and all(s.rid in li.songs for li in st2.lists if li.fields['own'] in ST.MAIN_LISTS),
+          f'new song saved: in both soundtrack lists, {len(audio) / rate:.1f} s, strings in every language (sorted)')
+    sc = [x for x in st2.songs if x.artist == 'Silent Code']
+    st2.set_text(sc[0], artist='Renamed')
+    st2.remove_song(st2.song(s.rid))
+    st2.save()
+    st3 = ST.Soundtrack(root)
+    check(sorted(x.artist for x in st3.songs if x.rid in {y.rid for y in sc}) == ['Renamed', 'Silent Code', 'Silent Code']
+          and len(st3.songs) == 58 and len(st3.lists[0].songs) == 42 and os.path.exists(songs_path + '.orig'),
+          'shared artist renamed for one song only; removing the new song restores the lists')
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -437,6 +495,7 @@ def main():
         test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
         test_sps(PC)
         test_zones(os.path.join(PC, 'HAWAII'))
+        test_soundtrack(PC)
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
