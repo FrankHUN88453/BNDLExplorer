@@ -7,7 +7,7 @@ import time
 
 from imgui_bundle import hello_imgui, imgui
 
-from . import filedialog, ops, theme, winclip
+from . import filedialog, mesh, ops, theme, winclip
 from . import names as N
 from .restypes import T_TEXTURE, name as type_name
 from .theme import I, icon_text
@@ -1195,9 +1195,9 @@ class ExplorerUI:
             self.action_export(d, r, 'png')
         if r.type == 0x70 and imgui.menu_item('As text...', '', False)[0]:
             self.action_export(d, r, 'text')
-        if r.type in (0x05, 0x51, 0x50, 0x60, 0x106) and imgui.menu_item('As glTF (.glb) with textures...', '', False)[0]:
+        if r.type in mesh.MODEL_TYPES and imgui.menu_item('As glTF (.glb) with textures...', '', False)[0]:
             self.action_export(d, r, 'glb')
-        if r.type in (0x05, 0x51, 0x50, 0x60, 0x106) and imgui.menu_item('As FBX with textures...', '', False)[0]:
+        if r.type in mesh.MODEL_TYPES and imgui.menu_item('As FBX with textures...', '', False)[0]:
             self.action_export(d, r, 'fbx')
         if r.type in (0x80, 0x81) and imgui.menu_item('As WAV...', '', False)[0]:
             self.action_export(d, r, 'wav')

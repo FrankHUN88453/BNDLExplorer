@@ -34,6 +34,8 @@ from dataclasses import dataclass
 import numpy as np
 
 T_RENDERABLE, T_MODEL, T_MATERIAL, T_INSTANCELIST, T_POLYSOUP = 0x05, 0x51, 0x02, 0x50, 0x60
+T_CONTROLMESH = 0x210
+MODEL_TYPES = (0x05, 0x51, 0x50, 0x60, 0x106, 0x210)      # shown in the 3D view, exported as glTF / FBX
 GLOBAL_BUNDLES = ('SHADERS.BNDL', 'SHADERS0.BNDL', 'SHADERS1.BNDL', 'GLOBALMATERIALDICTIONARY.BNDL',
                   'GLOBALTEXTUREDICTIONARY.BNDL', os.path.join('VEHICLES', 'VEHICLETEX.BNDL'), 'GLOBALEFFECTS.BNDL')
 PS3_TYPES = {1: ('s16n', 2), 2: ('f32', 4), 3: ('f16', 2), 4: ('u8n', 1), 5: ('s16', 2), 6: ('cmp', 4), 7: ('u8', 1)}
@@ -66,6 +68,7 @@ class MeshData:
     src: tuple = None          # (renderable id, mesh record index) the geometry comes from
     xform: np.ndarray = None   # 4x4 row-vector matrix from the renderable's space to this mesh's (None = same)
     uvs: list = None           # further UV sets [(N, 2)] after `uv` (lightmap, AO, ...), for export
+    overlay: bool = False      # drawn over everything else (markers that must stay visible)
 
     def placed(self, m, flip=False):
         """This mesh moved by the 4x4 row-vector matrix m (normals follow; flip reverses the triangles)."""
@@ -501,6 +504,8 @@ def decode_resource(b, res, lib, bundles, path, lod=0):
         return decode_polysoup(b, res)[0], 1
     if res.type == T_VGS:
         return decode_vgs(b, res, lib, bundles, path, lod)[0], 1
+    if res.type == T_CONTROLMESH:
+        return decode_control_mesh(b, res, lib, bundles, path, lod)[0], 1
     return decode_renderable(b, res, lib, [b] + list(bundles), root), 1
 
 
@@ -740,6 +745,93 @@ def vgs_layout(b, res):
                        'pos_off': o + 0x20 if short else o,
                        'scale_off': o + 0x40 if short else o + 0x20})
     return imps.get(0x30), wheels
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# ControlMesh (PS3 prototype cars): the crash deformation lattice
+# ---------------------------------------------------------------------------------------------------------------
+_OCTA_V = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]], np.float32)
+_OCTA_T = np.array([[0, 2, 4], [2, 1, 4], [1, 3, 4], [3, 0, 4], [2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5]], np.uint32)
+DENT_TOP = 0.2                        # the deepest dent of the prototype cars (m), red in the view
+RIGID = 9.319018e-09                  # what most rigid points store instead of 0
+
+
+def read_control_mesh(b, res):
+    """(positions (N, 3), directions (N, 3), max displacements (N,), offset of the displacement array) of a
+    ControlMesh (type 0x210, PS3 prototype cars): u32 version 1, u32 size, 0, 0, then N vec4 positions on the car's
+    body, N unit vec4 directions (the way a point moves when the car is hit, mostly inward) and N vec4 maximum
+    displacements in metres (all four components alike; rigid points hold 0 or a tiny value like RIGID). N = 64 in
+    every car; cars with fewer points leave the rest all zero (see control_points_used)."""
+    c = res.data(0)
+    n = (len(c) - 16) // 48
+    v = np.frombuffer(c, b.e + 'f4', n * 12, 16).reshape(3, n, 4).astype(np.float64)
+    return v[0, :, :3], v[1, :, :3], v[2, :, 0], 16 + 32 * n
+
+
+def control_points_used(pos, dirs):
+    """False for the all-zero slots of cars with fewer than 64 control points."""
+    return (np.abs(pos).sum(1) > 0) | (np.abs(dirs).sum(1) > 0)
+
+
+def dent_colour(dv):
+    """Grey for a rigid point, yellow .. red for a shallow .. deep dent."""
+    if dv < 1e-4:
+        return (0.55, 0.57, 0.62)
+    t = min(dv / DENT_TOP, 1.0)
+    return (1.0, 0.85 - 0.7 * t, 0.2 - 0.1 * t)
+
+
+def control_mesh_meshes(pos, dirs, disp, size=0.045):
+    """Markers (octahedra coloured by the max displacement) and, for points that can move, a line along the
+    point's direction as long as its max displacement; drawn over the car so that every point shows."""
+    groups = {}
+    used = control_points_used(pos, dirs)
+    for i, dv in enumerate(disp):
+        if used[i]:
+            groups.setdefault(round(float(dv), 4), []).append(i)
+    out = []
+    for dv, idx in sorted(groups.items()):
+        col = dent_colour(dv)
+        n = len(idx)
+        p = (pos[idx][:, None, :] + _OCTA_V[None] * size).reshape(-1, 3)
+        t = (_OCTA_T[None] + 6 * np.arange(n)[:, None, None]).reshape(-1, 3)
+        out.append(MeshData(p.astype(np.float32), None, t.astype(np.uint32), 0, None, tint=col,
+                            nrm=np.tile(_OCTA_V, (n, 1)), overlay=True))
+        if dv >= 1e-4:
+            ends = np.concatenate([pos[idx], pos[idx] + dirs[idx] * dv]).astype(np.float32)
+            k = np.arange(n)
+            lines = np.stack([k, k + n, k + n], 1).astype(np.uint32)       # (a, b, b): drawn as the line a-b
+            out.append(MeshData(ends, None, lines, 0, None, tint=col, wire=True,
+                                nrm=np.full((2 * n, 3), 0.577, np.float32), overlay=True))
+    return out
+
+
+def vgs_control_mesh(b, res):
+    """The ControlMesh a VehicleGraphicsSpec imports (PS3 prototype: at 0x8), or None."""
+    for i in res.imports():
+        r = b.find(i.id)
+        if r is not None and r.type == T_CONTROLMESH:
+            return r
+    return None
+
+
+def decode_control_mesh(b, res, lib, bundles, path, lod=0):
+    """The control points over their car (plain grey): (meshes, {'points', 'moving', 'deepest', 'car'})."""
+    pos, dirs, disp, _ = read_control_mesh(b, res)
+    out = []
+    owner = next((x for x in b.resources if x.type == T_VGS and any(i.id == res.id for i in x.imports())), None)
+    if owner is not None:
+        try:
+            car, _ = decode_vgs(b, owner, lib, bundles, path, lod)
+            for m in car:
+                m.texture, m.tint = None, (0.36, 0.38, 0.42)
+            out += car
+        except MeshError:
+            pass
+    out += control_mesh_meshes(pos, dirs, disp)
+    return out, {'points': int(control_points_used(pos, dirs).sum()), 'moving': int((disp >= 1e-4).sum()),
+                 'deepest': float(disp.max(initial=0.0)),
+                 'car': owner is not None}
 
 
 def decode_vgs(b, res, lib, bundles, path, lod=0):

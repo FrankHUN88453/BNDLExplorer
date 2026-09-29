@@ -558,7 +558,6 @@ def test_fbx(path, root):
     fms = fbx.load_meshes(data)
     check(len(fms) == len(meshes) and sum(len(m.tris) for m in fms) == sum(len(m.tris) for m in meshes),
           f'FBX export: {len(fms)} objects, {sum(len(m.tris) for m in fms)} triangles ({os.path.basename(path)})')
-    before = {r.id: (r.data(0), r.data(b.gfx_chunk)) for r in b.resources if r.type == mesh.T_RENDERABLE}
 
     def rows(bb):
         out = {}
@@ -607,6 +606,41 @@ def test_fbx(path, root):
 
 def _unit(v):
     return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-12)
+
+
+def test_control_mesh(folder):
+    """PS3 prototype ControlMesh (0x210): 64 points on each car's body with unit directions and dents of
+    0-0.2 m; the view puts them over the car; a dent edit lands in the displacement array."""
+    from bndlx import mesh
+    good, cars = 0, 0
+    for f in sorted(os.listdir(folder)):
+        if not f.upper().endswith('_MS.BNDL'):
+            continue
+        b = Bundle.open(os.path.join(folder, f))
+        r = next((x for x in b.resources if x.type == mesh.T_CONTROLMESH), None)
+        if r is None:
+            continue
+        cars += 1
+        pos, dirs, disp, _ = mesh.read_control_mesh(b, r)
+        ln = np.linalg.norm(dirs, axis=1)
+        used = mesh.control_points_used(pos, dirs)         # unused slots are all zero
+        good += (len(pos) == 64 and np.all(np.abs(ln[used] - 1) < 1e-3) and np.all(disp[~used] == 0)
+                 and np.abs(pos[:, 0]).max() < 1.3 and np.abs(pos[:, 2]).max() < 3 and 0 <= disp.min()
+                 and disp.max() <= 0.5 and mesh.vgs_control_mesh(b, next(x for x in b.resources
+                                                                          if x.type == mesh.T_VGS)) is r)
+    check(cars == 24 and good == cars, f'{good}/{cars} prototype cars: 64 control point slots, directions, dents')
+    p = os.path.join(folder, 'VEH_122672_MS.BNDL')
+    b = Bundle.open(p)
+    r = next(x for x in b.resources if x.type == mesh.T_CONTROLMESH)
+    ms, st = mesh.decode_control_mesh(b, r, mesh.Library(), [], p)
+    _, _, disp, off = mesh.read_control_mesh(b, r)
+    c = bytearray(r.data(0))
+    struct.pack_into(b.e + '4f', c, off + 16 * 5, 0.15, 0.15, 0.15, 0.15)
+    r.set_data(0, bytes(c))
+    _, _, disp2, _ = mesh.read_control_mesh(b, r)
+    check(st['car'] and st['points'] == 64 and any(m.overlay for m in ms) and abs(disp2[5] - 0.15) < 1e-6
+          and np.array_equal(np.delete(disp2, 5), np.delete(disp, 5)),
+          f"control points shown over the car ({st['moving']} can dent), a dent edit lands on its point")
 
 
 def test_vehiclelist(path):
@@ -674,6 +708,7 @@ def main():
         test_ginsu(os.path.join(PS3, 'VEHICLES', 'VEH_122672_EN.BNDL'))
         test_fbx(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'), PS3)
         test_proto_world(os.path.join(PS3, 'SEACREST'))
+        test_control_mesh(os.path.join(PS3, 'VEHICLES'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2

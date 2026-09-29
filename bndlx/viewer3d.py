@@ -69,7 +69,7 @@ class Viewer:
         self.prog = None
         self.fbo = self.color = self.depth = None
         self.size = (0, 0)
-        self.meshes = []            # [(vao, vbo, ibo, count, tex, tint, alpha test)]
+        self.meshes = []            # [(vao, vbo, ibo, count, tex, tint, alpha test, wire, overlay)]
         self.textures = {}          # texture key -> gl id
         self.key = None
         self.yaw, self.pitch, self.dist = 0.6, 0.35, 1.0
@@ -196,7 +196,8 @@ class Viewer:
             GL.glBindVertexArray(0)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
             self.meshes.append((vao, vbo, ibo, len(idx), self.textures.get(m.texture), m.tint,
-                                getattr(m, 'alpha_test', False), getattr(m, 'wire', False)))
+                                getattr(m, 'alpha_test', False), getattr(m, 'wire', False),
+                                getattr(m, 'overlay', False)))
 
     # -- drawing ----------------------------------------------------------------------------------------------
     def render(self, w, h):
@@ -230,7 +231,11 @@ class Viewer:
         loc_tint = GL.glGetUniformLocation(self.prog, 'uTint')
         loc_alpha = GL.glGetUniformLocation(self.prog, 'uAlphaTest')
         GL.glActiveTexture(GL.GL_TEXTURE0)
-        for vao, _, _, count, tex, tint, alpha, wire in self.meshes:
+        cleared = False
+        for vao, _, _, count, tex, tint, alpha, wire, over in sorted(self.meshes, key=lambda x: x[8]):
+            if over and not cleared:          # overlays last, over the rest (markers inside a car stay visible)
+                GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
+                cleared = True
             GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE if self.wire or wire else GL.GL_FILL)
             use = bool(tex) and self.use_tex and not self.wire and not wire
             GL.glUniform1i(loc_use, 1 if use else 0)

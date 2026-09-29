@@ -35,7 +35,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.17'
+VERSION = '0.18'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -187,7 +187,7 @@ class App(ExplorerUI, SoundtrackUI):
         self.mesh_lib = mesh.Library(lambda rid: self.names.where.get(rid))
         self.viewer = None
         self.model = {'key': None, 'result': None, 'uploaded': None, 'lod': 0, 'show': 0, 'stats': None,
-                      'nb': False, 'progress': ''}
+                      'nb': False, 'progress': '', 'cm': False}
         self.zmap = {'key': None}
         self.player = Player()
         self.st_ui = None                # soundtrack editor window state
@@ -1544,7 +1544,7 @@ class App(ExplorerUI, SoundtrackUI):
             self.wave_view(d, r)
         elif t == ginsu.T_GINSU:
             self.ginsu_view(d, r)
-        elif t in (0x05, 0x51, 0x50, 0x60, 0x106):
+        elif t in mesh.MODEL_TYPES:
             self.model_view(d, r)
         elif t == 0x02:
             self.material_view(d, r)
@@ -1932,12 +1932,14 @@ class App(ExplorerUI, SoundtrackUI):
         st = self.model
         show = st['show'] if r.type == mesh.T_INSTANCELIST else 0
         nb = st['nb'] and r.type == mesh.T_INSTANCELIST
-        key = (d.uid, r.id, id(r.data(0)), st['lod'], show, nb)
+        cmr = mesh.vgs_control_mesh(d.b, r) if r.type == mesh.T_VGS else None
+        cm = bool(st['cm'] and cmr is not None)
+        key = (d.uid, r.id, id(r.data(0)), st['lod'], show, nb, cm, id(cmr.data(0)) if cm else 0)
         if st['key'] != key:
             st['key'] = key
             st['result'] = None
 
-            def work(key=key, lod=st['lod'], show=show, nb=nb):
+            def work(key=key, lod=st['lod'], show=show, nb=nb, cm=cm):
                 try:
                     if r.type == mesh.T_INSTANCELIST:
                         meshes, size = [], 128 if nb else 256        # whole track units: small textures
@@ -1983,7 +1985,13 @@ class App(ExplorerUI, SoundtrackUI):
                         stats, nlod, size = {'collision': cst}, 1, 256
                     elif r.type == mesh.T_VGS:
                         meshes, vst = mesh.decode_vgs(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
+                        if cm:
+                            meshes = meshes + mesh.control_mesh_meshes(*mesh.read_control_mesh(d.b, cmr)[:3])
                         stats, nlod, size = {'car': vst}, 4, 1024
+                    elif r.type == mesh.T_CONTROLMESH:
+                        meshes, cst = mesh.decode_control_mesh(d.b, r, self.mesh_lib, self.model_bundles(d)[1:],
+                                                               d.path, lod)
+                        stats, nlod, size = {'control': cst}, 1, 256
                     else:
                         meshes, nlod = mesh.decode_resource(d.b, r, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
                         stats, size = None, 1024
@@ -2019,8 +2027,9 @@ class App(ExplorerUI, SoundtrackUI):
             old = st['uploaded'][0] if st['uploaded'] else None
             same = old is not None and old[:2] == key[:2] and old[3:] == key[3:]
             try:
-                self.viewer.set_meshes(key, meshes, texs, 1.1 if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP) else 2.6,
-                                       keep_view=same)
+                fit = (1.1 if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP) else
+                       2.1 if r.type == mesh.T_CONTROLMESH else 2.6)
+                self.viewer.set_meshes(key, meshes, texs, fit, keep_view=same)
             except Exception as e:
                 traceback.print_exc()
                 st['result'] = ('error', f'OpenGL: {e}')
@@ -2029,7 +2038,8 @@ class App(ExplorerUI, SoundtrackUI):
         v = self.viewer
         ntri = sum(len(m.tris) for m in meshes)
         nvert = sum(len(m.pos) for m in meshes)
-        stats = st.get('stats') if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP, mesh.T_VGS) else None
+        stats = st.get('stats') if r.type in (mesh.T_INSTANCELIST, mesh.T_POLYSOUP, mesh.T_VGS,
+                                              mesh.T_CONTROLMESH) else None
         cst = (stats or {}).get('collision')
         if r.type == mesh.T_POLYSOUP and cst:
             imgui.text(f'{cst["soups"]} soups, {cst["polygons"]:,} polygons, {len(cst["tags"])} surface tags'.replace(',', ' '))
@@ -2041,6 +2051,16 @@ class App(ExplorerUI, SoundtrackUI):
             imgui.text(f'Body + {cs["wheels"]} wheels ({cs["parts"]} wheel parts), {ntri:,} triangles'.replace(',', ' '))
             if cs['missing'] and imgui.is_item_hovered():
                 imgui.set_tooltip('Models not found: ' + ', '.join(ops.id_text(x) for x in cs['missing'][:12]))
+            if cmr is not None:
+                imgui.same_line()
+                _, st['cm'] = imgui.checkbox('Control points', st['cm'])
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip('The prototype crash deformation lattice (ControlMesh): 64 points on the body; '
+                                      'grey = rigid, yellow .. red = how deep it can dent, the line = the way it moves')
+        elif stats and 'control' in stats:
+            cs = stats['control']
+            imgui.text(f'{cs["points"]} control points, {cs["moving"]} can dent (deepest {cs["deepest"] * 100:.0f} cm)'
+                       + (' (shown over the car)' if cs['car'] else ''))
         elif stats and 'instances' in stats:
             units = f'{stats["units"]} units, ' if stats.get('units', 1) > 1 else ''
             imgui.text(f'{units}{stats["shown"]} of {stats["instances"]} instances ({stats["models"]} models), '
@@ -2096,12 +2116,53 @@ class App(ExplorerUI, SoundtrackUI):
         if missing:
             imgui.text_disabled(f'{missing} mesh(es) use textures that are not in the open bundles or the global ones.')
         avail = imgui.get_content_region_avail()
-        extra = int(imgui.get_frame_height_with_spacing() * 6.6) + 8 if r.type == mesh.T_VGS else 0   # wheel table
+        extra = (int(imgui.get_frame_height_with_spacing() * 6.6) + 8 if r.type == mesh.T_VGS else    # wheel table
+                 int(imgui.get_frame_height_with_spacing() * 8.5) + 8 if r.type == mesh.T_CONTROLMESH else 0)
         w, h = max(64, int(avail.x) - 4), max(64, int(avail.y) - 24 - extra)
         v.widget(w, h)
         imgui.text_disabled('Left drag: turn, right / middle drag: move, wheel: zoom, double click: fit')
         if r.type == mesh.T_VGS:
             self.wheel_editor(d, r)
+        elif r.type == mesh.T_CONTROLMESH:
+            self.control_point_table(d, r)
+
+    def control_point_table(self, d, r):
+        """The points of a ControlMesh; the max displacement (how deep the body can dent there) is editable."""
+        try:
+            pos, dirs, disp, doff = mesh.read_control_mesh(d.b, r)
+        except (ValueError, IndexError):
+            return
+        flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.scroll_y
+                 | imgui.TableFlags_.resizable)
+        if not imgui.begin_table('ctrlpts', 4, flags, imgui.ImVec2(0, imgui.get_content_region_avail().y)):
+            return
+        imgui.table_setup_scroll_freeze(0, 1)
+        imgui.table_setup_column('#', imgui.TableColumnFlags_.width_fixed, 28)
+        imgui.table_setup_column('Position (x left, y up, z forward; m)', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column('Direction', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column('Max dent (m)', imgui.TableColumnFlags_.width_fixed, 110)
+        imgui.table_headers_row()
+        ro = d.b.truncated
+        used = mesh.control_points_used(pos, dirs)
+        for i in range(len(pos)):
+            imgui.table_next_row()
+            imgui.table_next_column()
+            col = mesh.dent_colour(disp[i])
+            imgui.text_colored(imgui.ImVec4(col[0], col[1], col[2], 1.0), str(i))
+            imgui.table_next_column()
+            if not used[i]:
+                imgui.text_disabled('unused')
+                continue
+            imgui.text('%.3f  %.3f  %.3f' % tuple(pos[i]))
+            imgui.table_next_column()
+            imgui.text('%.2f  %.2f  %.2f' % tuple(dirs[i]))
+            imgui.table_next_column()
+            imgui.set_next_item_width(-1)
+            ch, v = imgui.drag_float(f'##dent{i}', float(disp[i]), 0.001, 0.0, 1.0, '%.3f')
+            if ch and not ro:
+                v = v if v >= 1e-4 else mesh.RIGID          # rigid: the tiny value the game's own data holds
+                self.write(d, r, doff + 16 * i, d.b.e + '4f', v, v, v, v)
+        imgui.end_table()
 
     def wheel_editor(self, d, r):
         """Wheel positions and scales of a VehicleGraphicsSpec (metres; x = left, y = up, z = forward)."""
@@ -2151,7 +2212,7 @@ class App(ExplorerUI, SoundtrackUI):
             return True
         if f.type == T_TEXTURE:
             return self.tex.get('img') is not None or self.tex.get('err') is not None
-        if f.type in (0x05, 0x51, 0x50, 0x60, 0x106):
+        if f.type in mesh.MODEL_TYPES:
             res = self.model['result']
             return res is not None and (res[0] == 'error' or self.model['uploaded'] == (self.model['key'], id(res)))
         if f.type == 0x81:
@@ -3382,6 +3443,10 @@ bundle that has it (known after Find names).
 Cars: select the VehicleGraphicsSpec of a VEH_* bundle to see the assembled car (body + wheels) in 3D; drag the
 wheel positions / scales below the view (track width, wheelbase, ride height, wheel size; Mirror keeps it
 symmetric), then Save.
+
+ControlMesh (PS3 prototype cars): the crash deformation lattice, up to 64 points on the body drawn over the car
+(grey = rigid, yellow .. red = how deep it can dent, the line = the way it moves); the max dent of each point
+is editable in the table. The car view has a Control points switch for the same.
 
 Track units (HAWAII\\TRK_UNIT*): select the InstanceList to see the whole piece of the city in 3D with its props
 (World / Collision / World + collision, Neighbours); the PolygonSoupList is the collision, coloured by surface tag.

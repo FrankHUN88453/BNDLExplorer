@@ -193,6 +193,7 @@ TYPE_ICONS = {
     0x203: (fa.ICON_FA_ROAD, (0.40, 0.40, 0.40, 1)),
     0x205: (fa.ICON_FA_MAP, (0.20, 0.60, 0.30, 1)),
     0x20F: (fa.ICON_FA_TREE, (0.20, 0.60, 0.30, 1)),
+    0x210: (fa.ICON_FA_CAR_BURST, (0.90, 0.52, 0.14, 1)),
     0x214: (fa.ICON_FA_TREE, (0.20, 0.60, 0.30, 1)),
     0x303: (fa.ICON_FA_SHAPES, (0.45, 0.45, 0.45, 1)),
 }

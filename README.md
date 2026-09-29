@@ -89,6 +89,7 @@ that happens to match a model id would also "match" its renderables; such names 
 | .SPS sound stream files | opened like a bundle with one sound: play, waveform, replace, save | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF / .SPS; a whole folder as WAV |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / pause / stop with a play head on the waveform; click or drag on it to jump; time, channels, rate, length; stops when another item is selected | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
+| ControlMesh (PS3 prototype cars) | the crash deformation lattice: up to 64 points on the body over the car, coloured by how deep each can dent, with the direction it moves; the car view has a **Control points** switch | max dent per point editable; glTF / FBX |
 | GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
 
@@ -149,6 +150,16 @@ InstanceList) writes an edited file back:
 
 The per-mesh bounds words (record 0x00-0x0F) are kept: centre = three s16 × 2^-14 (a scale code in the top
 bits of the first word selects 2^-10 for large meshes), the extents are packed in a way not solved yet.
+
+### ControlMesh (PS3 prototype)
+
+The prototype's cars have a crash deformation lattice, resource type 0x210, imported by the
+VehicleGraphicsSpec at 0x8: `u32 version 1, u32 size, 0, 0`, then 64 positions on the car's body, 64 unit
+directions (the way each point moves when hit, mostly inward) and 64 maximum displacements in metres (vec4s,
+the displacement repeated four times; rigid points hold 0 or about 1e-8). Cars with fewer points leave the
+remaining slots all zero. The retail game has no such resources and no slot for them (its cars dent through
+the damage skeleton alone); the `Genesys.Gen.ControlMesh` tuning object of the same name is still in every
+retail car. BNDL Explorer draws the points over the car and edits the max dent per point.
 
 ### Materials
 
