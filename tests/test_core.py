@@ -6,6 +6,7 @@
 """
 import os
 import shutil
+import struct
 import sys
 import tempfile
 
@@ -225,6 +226,42 @@ def test_models(path, expect_textures=True):
           f'glTF export is well formed ({len(js["meshes"])} meshes, {len(js.get("images", []))} images)')
 
 
+def test_materials(path):
+    """Every material parses; its textures resolve; constant names come from the shaders; editing a constant
+    changes exactly its 16 bytes."""
+    from bndlx import mesh
+    b = Bundle.open(path)
+    lib = mesh.Library()
+    root = mesh.game_root(path)
+    names = lib.constant_names(root)
+    mats = [r for r in b.resources if r.type == 0x02]
+    texs = found = consts = named = 0
+    for r in mats:
+        info = mesh.material_info(b, r)
+        for slot, tid, sid, off in info['textures']:
+            texs += 1
+            found += lib.find(tid, [b], root)[1] is not None if tid else 0
+        for h, vals, off in info['constants']:
+            consts += 1
+            named += h in names
+    check(mats and found == texs, f'{len(mats)} materials, {found}/{texs} textures found ({os.path.basename(path)})')
+    check(consts and named * 10 >= consts * 9, f'{named}/{consts} material constants named')
+    r = next(r for r in mats if mesh.material_info(b, r)['constants'])
+    h, vals, off = mesh.material_info(b, r)['constants'][0]
+    before = bytes(r.data(0))
+    out = os.path.join(TMP, 'mat.bndl')
+    c = bytearray(before)
+    struct.pack_into(b.e + '4f', c, off, 0.25, 0.5, 0.75, 1.0)
+    r.set_data(0, bytes(c))
+    b.save(out)
+    b2 = Bundle.open(out)
+    r2 = b2.find(r.id)
+    diff = [i for i, (x, y) in enumerate(zip(before, r2.data(0))) if x != y]
+    got = mesh.material_info(b2, r2)['constants'][0][1]
+    check(diff and min(diff) >= off and max(diff) < off + 16 and got == (0.25, 0.5, 0.75, 1.0),
+          'material constant edit round-trips')
+
+
 def main():
     if PC:
         g = os.path.join(PC, 'GLOBALEFFECTS.BNDL')
@@ -237,6 +274,7 @@ def main():
         test_sounds(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'))
         test_prefetch(PC)
         test_models(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
+        test_materials(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
     if PS3:
         test_unchanged_save(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
@@ -245,6 +283,7 @@ def main():
         test_strings(os.path.join(PS3, 'UI', 'LANGUAGE', '0001.BNDL'))
         test_sounds(os.path.join(PS3, 'UI', 'SCREENS2', 'BLACKLISTHUD.BNDL'))
         test_models(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
+        test_materials(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')
         return 2

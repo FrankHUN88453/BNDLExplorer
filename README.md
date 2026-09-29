@@ -81,8 +81,9 @@ that happens to match a model id would also "match" its renderables; such names 
 | LocalisedText (UI\LANGUAGE) | searchable string table, edit in place | CSV (`id,text`) for translations |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
 | Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) with the diffuse textures, opens in Blender |
+| Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / stop, waveform, channels, rate, length | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
-| every type | imports (edit the ids, jump to the target), hex view with byte editing | .bres, raw chunks (.bin) |
+| every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
 
 Field names of Genesys data are hashes; short names are stored as text, a few are known, and any field can be
 named (right click; the names are saved in `%APPDATA%\BNDLExplorer\labels.json`).
@@ -115,6 +116,17 @@ Positions: float32 for the world and effects, s16 normalised × 10 m for vehicle
 triangle strips with 0xFFFF restarts (topology field in the mesh record).
 
 **Export glTF** writes a `.glb` (positions, normals, UVs, indices, diffuse textures as PNG, base colours).
+
+### Materials
+
+A Material (same layout on PC and PS3) imports its shader (at 0x8), and per texture slot a texture and a
+sampler state. Slots are 16-bit numbers (`0x0E88` Diffuse, `0x0D9C` Normal, `0x31F2` Specular, `0x2837`
+Effects, ...). The material also holds shader constants, four floats each, keyed by a 32-bit hash: the hash is
+the inverted CRC32 of the constant's name in the shader (`~crc32("PbrMaterialDiffuseColour")` =
+`0x067923B3`), so the names are read from the game's own shaders and every constant of the game is named.
+Constants can be edited in place (drag or type the numbers). Every texture has **Go** (select it, when its
+bundle is open) or **Open** (open the bundle that has it: **Find names** also records where each resource
+lives).
 
 ## Sounds
 

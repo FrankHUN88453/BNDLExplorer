@@ -255,6 +255,7 @@ class NameDB:
         self.cars = {}           # bundle file name (upper case) -> car name
         self.bases = set()       # asset path bases (gamedb://...), for new bundles
         self.scanned = []        # folders scanned
+        self.where = {}          # id -> [bundle paths] (up to 3)
         self.stats = {}
         self.dirty = False
 
@@ -271,12 +272,17 @@ class NameDB:
                 db.bases = set(js.get('bases', []))
                 db.scanned = js.get('scanned', [])
                 db.stats = js.get('stats', {})
+                files = js.get('files', [])
+                db.where = {int(k, 16): [files[i] for i in v] for k, v in js.get('where', {}).items()}
         except (OSError, ValueError, KeyError):
             pass
         return db
 
     def save(self):
-        js = {'version': self.VERSION, 'scanned': self.scanned, 'stats': self.stats,
+        files = sorted({p for v in self.where.values() for p in v})
+        fidx = {p: i for i, p in enumerate(files)}
+        js = {'version': self.VERSION, 'scanned': self.scanned, 'stats': self.stats, 'files': files,
+              'where': {f'{k:x}': [fidx[p] for p in v] for k, v in self.where.items()},
               'exact': {f'{k:x}': v for k, v in self.exact.items()},
               'objnames': {f'{k:x}': v for k, v in self.objnames.items()},
               'cars': self.cars, 'bases': sorted(self.bases)}
@@ -321,14 +327,15 @@ class NameDB:
 
     # -- full scan ----------------------------------------------------------------------------------------------
     def scan(self, folders, progress=None, workers=None, exe_paths=()):
-        self.exact, self.objnames, self.cars = {}, {}, {}
         """Scan every bundle under `folders` and work out as many names as possible."""
+        self.exact, self.objnames, self.cars = {}, {}, {}
         t0 = time.time()
         files = []
         for root in folders:
             for dp, _, fn in os.walk(root):
                 files += [os.path.join(dp, f) for f in fn if f.lower().endswith(('.bndl', '.bundle'))]
         ids = {}
+        where = {}
         debug = {}
         strings = set()
         nums = set()
@@ -340,6 +347,9 @@ class NameDB:
                     progress(i, n)
                 for rid, t in h['ids']:
                     ids.setdefault(rid, t)
+                    w = where.setdefault(rid, [])
+                    if len(w) < 3 and h['path'] not in w:
+                        w.append(h['path'])
                 debug.update(h['debug'])
                 strings |= h['strings']
                 for rid, nm in h['objnames'].items():
@@ -413,6 +423,7 @@ class NameDB:
         named = sum(1 for r in ids if r in self.exact or r in self.objnames)
         self.stats = {'resources': len(ids), 'named': named, 'exact': sum(1 for r in ids if r in self.exact),
                       'files': len(files), 'seconds': round(time.time() - t0)}
+        self.where = where
         self.scanned = sorted(set(self.scanned) | set(folders))
         self.dirty = True
         self.save()

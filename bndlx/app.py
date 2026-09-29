@@ -25,7 +25,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.4'
+VERSION = '0.5'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -1237,10 +1237,10 @@ class App(ExplorerUI):
                     where = '' if od is d else f'  in {od.name}'
                     imgui.text(f'{self.display_name(od, orr)[0]}  ({type_name(orr.type)}){where}')
                 else:
-                    imgui.text_disabled('not in an open bundle')
+                    paths = self.names.where.get(imp.id)
+                    imgui.text_disabled(f'in {os.path.basename(paths[0])} (not open)' if paths else 'not in an open bundle')
                 imgui.table_next_column()
-                if orr is not None and imgui.small_button(f'Go##g{i}'):
-                    self.goto(imp.id, od)
+                self.locate(imp.id, f'g{i}')
             imgui.end_table()
 
     def hex_tab(self, d, r):
@@ -1315,6 +1315,8 @@ class App(ExplorerUI):
             self.wave_view(d, r)
         elif t in (0x05, 0x51):
             self.model_view(d, r)
+        elif t == 0x02:
+            self.material_view(d, r)
         else:
             imgui.text_wrapped(f'{type_name(t)}: no viewer for this type yet. The Imports and Hex tabs show its data; '
                                'Export / Replace work for every type (.bres or raw chunks).')
@@ -1629,6 +1631,98 @@ class App(ExplorerUI):
             hit = self.gcache.get(('wave', d.uid, f.id, id(f.data(0))))
             return hit is not None and not isinstance(hit, str)
         return True
+
+    def locate(self, rid, key, fallback=None):
+        """A link to a resource: go to it if open, else offer to open the bundle that has it (from the Find names
+        index, or `fallback`)."""
+        od, orr = self.where(rid)
+        if orr is not None:
+            if imgui.small_button(f'Go##{key}'):
+                self.goto(rid, od)
+            return
+        paths = [p for p in self.names.where.get(rid, []) + ([fallback] if fallback else []) if os.path.isfile(p)]
+        if paths:
+            if imgui.small_button(f'Open##{key}'):
+                d = self.open_path(paths[0])
+                if d is not None:
+                    self.goto(rid, d)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Open ' + paths[0])
+        else:
+            imgui.text_disabled('-')
+
+    def material_view(self, d, r):
+        info = mesh.material_info(d.b, r)
+        root = mesh.game_root(d.path)
+        bundles = self.model_bundles(d)
+        sb, sh = self.mesh_lib.find(info['shader'], bundles, root) if info['shader'] else (None, None)
+        sname = ''
+        if sh is not None:
+            sc = sh.data(0)
+            np_ = struct.unpack_from(sb.e + 'I', sc, 8)[0]
+            sname = bytes(sc[np_:np_ + 128]).split(b'\0')[0].decode('latin1', 'replace')
+        imgui.text(f'Shader: {sname or "?"}')
+        if info['shader']:
+            imgui.same_line()
+            self.locate(info['shader'], 'msh', sb.path if sb is not None else None)
+        imgui.text_disabled(f'{info["shader"] or 0:016X}' + (f'  in {os.path.basename(sb.path or "")}' if sb is not None and sb is not d.b else ''))
+        imgui.spacing()
+        imgui.text('Textures')
+        flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.resizable
+        if info['textures'] and imgui.begin_table('mtex', 4, flags):
+            imgui.table_setup_column('', imgui.TableColumnFlags_.width_fixed, 72)
+            imgui.table_setup_column('Slot', imgui.TableColumnFlags_.width_fixed, 110)
+            imgui.table_setup_column('Texture', imgui.TableColumnFlags_.width_stretch)
+            imgui.table_setup_column('', imgui.TableColumnFlags_.width_fixed, 50)
+            imgui.table_headers_row()
+            for k, (slot, tid, sid, off) in enumerate(info['textures']):
+                imgui.table_next_row()
+                imgui.table_next_column()
+                tb, tr = self.mesh_lib.find(tid, bundles, root) if tid else (None, None)
+                if tr is not None and tr.type == T_TEXTURE:
+                    gl = self.thumbs.get(('mat', tid, id(tr.data(0))), tr, tb.platform, opaque=True)
+                    if gl is not None:
+                        self.thumbs.draw(gl, 64)
+                    else:
+                        imgui.dummy(imgui.ImVec2(64, 64))
+                else:
+                    imgui.dummy(imgui.ImVec2(64, 64))
+                imgui.table_next_column()
+                imgui.text(mesh.SLOT_NAMES.get(slot, f'slot {slot:04x}'))
+                imgui.table_next_column()
+                if tid:
+                    od, orr = self.where(tid)
+                    if orr is not None:
+                        nm = self.display_name(od, orr)[0]
+                    else:
+                        full = self.names.exact.get(tid)
+                        nm = N.short(full) if full else ops.id_text(tid)
+                    imgui.text(nm)
+                    if tb is not None and orr is None:
+                        imgui.text_disabled(f'in {os.path.basename(tb.path or "")}')
+                else:
+                    imgui.text_disabled('none')
+                imgui.table_next_column()
+                if tid:
+                    self.locate(tid, f'mt{k}', tb.path if tb is not None else None)
+            imgui.end_table()
+        imgui.spacing()
+        imgui.text('Constants')
+        names = self.mesh_lib.constant_names(root)
+        if info['constants'] and imgui.begin_table('mconst', 2, flags):
+            imgui.table_setup_column('Name', imgui.TableColumnFlags_.width_fixed, 240)
+            imgui.table_setup_column('Value (Enter / drag)', imgui.TableColumnFlags_.width_stretch)
+            imgui.table_headers_row()
+            for k, (h, vals, off) in enumerate(info['constants']):
+                imgui.table_next_row()
+                imgui.table_next_column()
+                imgui.text(names.get(h, f'{h:08x}'))
+                imgui.table_next_column()
+                imgui.set_next_item_width(-1)
+                ch, nv = imgui.drag_float4(f'##c{k}', list(vals), 0.005, 0.0, 0.0, '%.4g')
+                if ch and not d.b.truncated:
+                    self.write(d, r, off, d.b.e + '4f', *nv)
+            imgui.end_table()
 
     def export_glb(self, d, res, path):
         lod = self.model['lod'] if self.model['key'] and self.model['key'][1] == res.id else 0
@@ -2289,6 +2383,10 @@ Copy and paste, drag and drop (like Explorer):
 Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms), LOD
 choice for models, Export glTF (.glb with textures, opens in Blender). Shaders, materials and shared textures are
 found in the open bundles and in the game's global bundles (SHADERS, GLOBALMATERIALDICTIONARY, ...).
+
+Materials: the shader, the textures by slot (Diffuse, Normal, Specular, ...) with thumbnails, and the shader
+constants by name (PbrMaterialDiffuseColour, ...), editable. Go jumps to an open resource; Open opens the
+bundle that has it (known after Find names).
 
 Sounds (Wave): Play / Stop and a waveform in the preview; Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
 AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound

@@ -23,7 +23,7 @@ class Thumbs:
 
     def _work(self):
         while True:
-            key, res, platform = self.jobs.get()
+            key, res, platform, opaque = self.jobs.get()
             img = None
             try:
                 inf = raster.info(res, platform)
@@ -34,6 +34,8 @@ class Thumbs:
                 h, w = img.shape[:2]
                 step = max(1, max(h, w) // SIZE)
                 img = np.ascontiguousarray(img[::step, ::step])
+                if opaque:
+                    img[..., 3] = 255
             except Exception:
                 img = None
             self.done.put((key, img))
@@ -50,14 +52,15 @@ class Thumbs:
             while len(self.tex) > LIMIT:
                 self.tex.popitem(last=False)
 
-    def get(self, key, res, platform):
-        """GlTexture or None (not ready / failed); queues the decode on first request."""
+    def get(self, key, res, platform, opaque=False):
+        """GlTexture or None (not ready / failed); queues the decode on first request. opaque: ignore alpha
+        (normal maps keep X in alpha)."""
         if key in self.tex:
             self.tex.move_to_end(key)
             return self.tex[key]
         if key not in self.pending:
             self.pending.add(key)
-            self.jobs.put((key, res, platform))
+            self.jobs.put((key, res, platform, opaque))
         return None
 
     def draw(self, gl, box):

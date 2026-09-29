@@ -89,12 +89,56 @@ class Library:
             self.globals[root] = out
         return self.globals[root]
 
+    def constant_names(self, root):
+        """{~crc32(name): name} for every identifier in the game's shaders (material constant names)."""
+        import re
+        import zlib
+        key = ('consts', root)
+        if key not in self.globals:
+            names = {}
+            for b in self.global_bundles(root):
+                if not os.path.basename(b.path or '').upper().startswith('SHADERS'):
+                    continue
+                for r in b.resources:
+                    if r.type not in (0x08, 0x53):
+                        continue
+                    for k in range(2):
+                        for m in re.finditer(rb'[A-Za-z_][A-Za-z0-9_]{2,63}', r.data(k)):
+                            n = m.group(0).decode('latin1')
+                            names[(~zlib.crc32(m.group(0))) & 0xFFFFFFFF] = n
+            self.globals[key] = names
+        return self.globals[key]
+
     def find(self, rid, bundles, root):
         for b in list(bundles) + self.global_bundles(root):
             r = _index(b).get(rid)
             if r is not None and not r.missing:
                 return b, r
         return None, None
+
+
+def material_info(b, mat):
+    """{'shader': id, 'textures': [(slot hash, texture id, sampler id, import offset)],
+    'constants': [(hash, (4 floats), value offset)]} of a Material (same layout on PC and PS3)."""
+    c = mat.data(0)
+    e = b.e
+    imps = {i.offset: i.id for i in mat.imports()}
+    ntex, nconst = c[0x20], c[0x1C]
+    tp, sp, tip = struct.unpack_from(e + '3I', c, 0x24)
+    slots = struct.unpack_from(e + f'{ntex}H', c, tp) if ntex else ()
+    texs = [(slots[k], imps.get(tip + 4 * k), imps.get(sp + 4 * k), tip + 4 * k) for k in range(ntex)]
+    consts = []
+    if nconst:
+        ip, _, hp, vp = struct.unpack_from(e + '4I', c, 0x0C)
+        hs = struct.unpack_from(e + f'{nconst}I', c, hp)
+        for k, h in enumerate(hs):
+            off = vp + 16 * c[ip + k]
+            consts.append((h, struct.unpack_from(e + '4f', c, off), off))
+    return {'shader': imps.get(0x8), 'textures': texs, 'constants': consts}
+
+
+SLOT_NAMES = {0x0E88: 'Diffuse', 0x0D9C: 'Normal', 0x31F2: 'Specular', 0x2837: 'Effects', 0x27D6: 'Crumple',
+              0x84E0: 'LightmapLights', 0x192D: 'AO', 0x5C7F: 'SpecAndAO'}
 
 
 def game_root(path):
