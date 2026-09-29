@@ -187,9 +187,11 @@ def vehicles_from_csv(b, res, text):
     return n
 
 
-def find_stream_file(bundle_path, rel=None, name=None):
+def find_stream_file(bundle_path, rel=None, name=None, platform=None):
     """External .SPS file of a sound: `rel` = path relative to the game folder (stream references), or
-    `name` = file name looked up anywhere in the game folder (prefetched streams: <GameChanger id>.SPS)."""
+    `name` = file name looked up anywhere in the game folder (prefetched streams: <GameChanger id>.SPS).
+    A bundle outside any game folder uses the pinned game folder of its platform."""
+    from .roots import FALLBACK
     if rel:
         rel = rel.replace('\\', os.sep).replace('/', os.sep)
         cur = os.path.dirname(os.path.abspath(bundle_path or '.'))
@@ -201,8 +203,11 @@ def find_stream_file(bundle_path, rel=None, name=None):
             if parent == cur:
                 break
             cur = parent
+        fb = FALLBACK.get(platform) if platform and game_root(bundle_path) is None else None
+        if fb and os.path.isfile(os.path.join(fb, rel)):
+            return os.path.join(fb, rel)
         return None
-    root = game_root(bundle_path)
+    root = game_root(bundle_path) or (FALLBACK.get(platform) if platform else None)
     if root is None or not name:
         return None
     idx = _SPS_INDEX.get(root)
@@ -219,9 +224,9 @@ def find_stream_file(bundle_path, rel=None, name=None):
 def stream_file_of(b, res, bundle_path):
     f = eal3.wave_fields(res.data(0), b.e)
     if f['kind'] == 'stream':
-        return f, find_stream_file(bundle_path, rel=f['stream_ref'])
+        return f, find_stream_file(bundle_path, rel=f['stream_ref'], platform=b.platform)
     if f['kind'] == 'prefetch':
-        return f, find_stream_file(bundle_path, name=f'{res.id & 0xFFFFFFFF}.SPS')
+        return f, find_stream_file(bundle_path, name=f'{res.id & 0xFFFFFFFF}.SPS', platform=b.platform)
     return f, None
 
 

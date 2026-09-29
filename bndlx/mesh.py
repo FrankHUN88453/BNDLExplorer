@@ -378,6 +378,20 @@ def decode_renderable(b, res, lib, bundles, root):
         if not len(valid):
             continue
         nv = int(valid.max()) + 1
+        vsize = w[22]
+        if vsize and vsize % nv == 0 and 8 <= vsize // nv < stride:
+            # the data comes from another build of the shaders (e.g. a PS3 car bundle read with the prototype's
+            # shaders: 8 bytes of tangent data less per vertex). The position is first and the UV sets are last,
+            # so read those at the data's own stride.
+            new = vsize // nv
+            uv_start = min((x[3] for x in layout if x[0].startswith('uv')), default=stride)
+            shift = stride - new
+            if uv_start - shift >= pos_el[3] + 6:
+                layout = [(x[0], x[1], x[2], x[3] - shift if x[0].startswith('uv') else x[3], new) for x in layout
+                          if x[0] == 'pos' or x[0].startswith('uv')]
+                pos_el = layout[0]
+                stride = new
+                problems.append('vertex layout adapted to the data')
         if vb_off + nv * stride > len(gfx):
             problems.append('vertex buffer out of range')
             continue
@@ -416,7 +430,8 @@ def model_renderables(b, res):
 
 def decode_resource(b, res, lib, bundles, path, lod=0):
     """Meshes of a Renderable, or of LOD `lod` of a Model."""
-    root = game_root(path)
+    from .roots import root_for
+    root = root_for(path, b.platform)
     if res.type == T_MODEL:
         rids = [x for x in model_renderables(b, res) if x]
         if not rids:
@@ -516,7 +531,8 @@ def decode_instances(b, res, lib, bundles, path, lod=0, progress=None, objects=T
     """World-space meshes of every instance of an InstanceList (and of the bundle's props, dynamic and compound
     objects): (meshes, {'instances', 'shown', 'models', 'missing': [model ids], 'kinds': {kind: count}}).
     Each model is decoded once."""
-    root = game_root(path)
+    from .roots import root_for
+    root = root_for(path, b.platform)
     look = [b] + list(bundles)
     insts = unit_instances(b, res, lib, look, root, objects)
     if not insts:
@@ -637,21 +653,29 @@ def vgs_layout(b, res):
     PC: wheels offset at 0x0C, count at byte 0x13, 0x90-byte wheel records (position f32x4, rotation quaternion,
     scale, 18 texture imports, u32 part table offset at +0x78, u16 part count at +0x80, name at +0x82).
     PS3 prototype: wheels offset at 0x10, count at byte 0x17, 0x50-byte records (u32 part table offset, u32 7,
-    u32 part count, name at +0x0C, position at +0x20, rotation +0x30, scale +0x40). The body model is the
+    u32 part count, name at +0x0C, position at +0x20, rotation +0x30, scale +0x40). Other PS3 builds mix them
+    (offset at 0x0C, 0x50-byte records), so the layout is taken from the data. The body model is the
     import at 0x30; a part table holds one Model import per part (tyre, disc, rim, caliper)."""
     e = b.e
     c = res.data(0)
     imps = {i.offset: i.id for i in res.imports()}
     wheels = []
-    if b.platform == 'PC':
-        wo, n, stride = struct.unpack_from(e + 'I', c, 0x0C)[0], c[0x13], 0x90
-    else:
-        wo, n, stride = struct.unpack_from(e + 'I', c, 0x10)[0], c[0x17], 0x50
+    # the wheel table offset is at 0x0C (PC retail, some PS3 builds) or 0x10 (PS3 prototype); the count is the byte
+    # 7 bytes after it; the record kind is told by where the wheel name is (+0x0C: 0x50-byte records, else 0x90)
+    wo, n = 0, 0
+    for fo in (0x0C, 0x10):
+        v = struct.unpack_from(e + 'I', c, fo)[0] if len(c) >= fo + 8 else 0
+        if 0x20 <= v < len(c) and 0 < c[fo + 7] <= 16:
+            wo, n = v, c[fo + 7]
+            break
+    short = bool(n) and bytes(c[wo + 0x0C:wo + 0x10]) in (b'Fron', b'Rear') or (
+        bool(n) and b.platform != 'PC' and bytes(c[wo + 0x82:wo + 0x86]) not in (b'Fron', b'Rear'))
+    stride = 0x50 if short else 0x90
     for i in range(n):
         o = wo + stride * i
         if o + stride > len(c):
             break
-        if b.platform == 'PC':
+        if not short:
             pos, quat, scale = (struct.unpack_from(e + '3f', c, o), struct.unpack_from(e + '4f', c, o + 0x10),
                                 struct.unpack_from(e + '3f', c, o + 0x20))
             tbl = struct.unpack_from(e + 'I', c, o + 0x78)[0]
@@ -666,15 +690,16 @@ def vgs_layout(b, res):
             break
         wheels.append({'name': name.split(b'\0')[0].decode('latin1', 'replace'), 'pos': pos, 'quat': quat,
                        'scale': scale, 'parts': [imps.get(tbl + 4 * k) for k in range(cnt)],
-                       'pos_off': o if b.platform == 'PC' else o + 0x20,
-                       'scale_off': o + 0x20 if b.platform == 'PC' else o + 0x40})
+                       'pos_off': o + 0x20 if short else o,
+                       'scale_off': o + 0x40 if short else o + 0x20})
     return imps.get(0x30), wheels
 
 
 def decode_vgs(b, res, lib, bundles, path, lod=0):
     """The assembled car: body model + every wheel part at its wheel's place. Right-hand wheels (negative x) use
     the same models mirrored, as the game does. Returns (meshes, {'wheels', 'parts', 'missing'})."""
-    root = game_root(path)
+    from .roots import root_for
+    root = root_for(path, b.platform)
     look = [b] + list(bundles)
     body, wheels = vgs_layout(b, res)
     out = []

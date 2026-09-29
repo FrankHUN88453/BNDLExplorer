@@ -19,6 +19,7 @@ from . import vehiclelist as VL
 from . import zonelist as ZL
 from . import spsfile
 from . import platetext
+from . import roots
 from .audioplay import Player
 from .soundtrack_ui import SoundtrackUI
 from .explorer import Browser, ExplorerUI
@@ -1801,6 +1802,13 @@ class App(ExplorerUI, SoundtrackUI):
             except OSError as ex:
                 self.status = str(ex)
 
+    def update_roots(self):
+        """Keep the per-platform fallback game folders in step with the pinned folders."""
+        key = tuple(self.pinned())
+        if key != getattr(self, '_roots_key', None):
+            self._roots_key = key
+            roots.set_fallbacks(key)
+
     def audio_guard(self):
         """Stop the sound when its item is no longer the one shown (another item, bundle or tab was selected, or
         the sound was changed)."""
@@ -1823,7 +1831,7 @@ class App(ExplorerUI, SoundtrackUI):
         """RGBA array of a texture found in the open bundles or the game's global bundles (None if missing)."""
         if not tid:
             return None
-        b, r = self.mesh_lib.find(tid, self.model_bundles(d), mesh.game_root(d.path))
+        b, r = self.mesh_lib.find(tid, self.model_bundles(d), roots.root_for(d.path, d.b.platform))
         if r is None or r.type != T_TEXTURE:
             return None
         try:
@@ -2077,7 +2085,7 @@ class App(ExplorerUI, SoundtrackUI):
 
     def material_view(self, d, r):
         info = mesh.material_info(d.b, r)
-        root = mesh.game_root(d.path)
+        root = roots.root_for(d.path, d.b.platform)
         bundles = self.model_bundles(d)
         sb, sh = self.mesh_lib.find(info['shader'], bundles, root) if info['shader'] else (None, None)
         sname = ''

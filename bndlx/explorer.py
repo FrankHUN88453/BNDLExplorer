@@ -13,7 +13,7 @@ from .restypes import T_TEXTURE, name as type_name
 from .theme import I, icon_text
 
 PAYLOAD = 'BNDLX_RES'
-BUNDLE_EXT = ('.bndl', '.bundle')
+BUNDLE_EXT = ('.bndl', '.bundle', '.bin')
 SPS_EXT = ('.sps',)
 
 
@@ -85,6 +85,8 @@ def folder_entries(path, cache):
                                 plat = {1: 'PC', 2: 'PS3'}.get(p, '?')
                         except OSError:
                             pass
+                        if not plat and e.name.lower().endswith('.bin'):
+                            continue                  # .bin files are listed only when they are bundles
                         out.append((e.name, False, st.st_size, st.st_mtime, plat))
                 except OSError:
                     continue
@@ -192,6 +194,7 @@ class ExplorerUI:
             theme.apply(self.cfg.get('theme', 'dark') == 'dark')
             self._themed = True
         self.pump_job()
+        self.update_roots()
         self.pump_drops()
         self.audio_guard()
         self.thumbs.pump()

@@ -31,7 +31,8 @@ class BROWSEINFOW(ctypes.Structure):
                 ('lParam', wintypes.LPARAM), ('iImage', ctypes.c_int)]
 
 
-BUNDLES = [('Bundles and sound streams (*.BNDL, *.BUNDLE, *.SPS)', '*.BNDL;*.bndl;*.BUNDLE;*.bundle;*.SPS;*.sps'),
+BUNDLES = [('Bundles and sound streams (*.BNDL, *.BUNDLE, *.BIN, *.SPS)',
+            '*.BNDL;*.bndl;*.BUNDLE;*.bundle;*.BIN;*.bin;*.SPS;*.sps'),
            ('Bundles (*.BNDL, *.BUNDLE)', '*.BNDL;*.bndl;*.BUNDLE;*.bundle'), ('Sound streams (*.SPS)', '*.SPS;*.sps'),
            ('All files', '*.*')]
 SPS = [('Sound streams (*.SPS)', '*.SPS;*.sps'), ('All files', '*.*')]
