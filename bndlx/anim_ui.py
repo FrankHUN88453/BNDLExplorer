@@ -153,7 +153,7 @@ class AnimUI:
         base = (d.uid, r.id, id(r.data(0)))
         if st.get('base') != base:                     # another resource: start at its first animation
             st.update(base=base, sel=0, t=0.0, play=False)
-        key = base + (st['sel'],)
+        key = base + (st['sel'], d.edits)
         if st['key'] != key:
             st['key'], st['posed'], st['error'] = key, None, None
             try:

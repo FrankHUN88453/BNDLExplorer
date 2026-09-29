@@ -71,10 +71,18 @@ def main():
             names = __import__('bndlx.meshimport', fromlist=['x']).export_names(before)
             i = names.index(body)
             state['shift'] = float(after[i].pos[:, 1].mean() - before[i].pos[:, 1].mean())
+            state['i'], state['y0'], state['y1'] = i, before[i].pos[:, 1].mean(), after[i].pos[:, 1].mean()
             app.modal = None
+            state['moved'] = f
+        elif 'moved' in state and 'done' not in state and f > state['moved'] + 20 and app.preview_ready():
+            # the car view shows the imported geometry (it is drawn from the renderables, not the spec itself)
+            res = app.model.get('result')
+            shown = res[1][state['i']].pos[:, 1].mean() if res and res[0] == 'ok' else None
+            state['preview'] = None if shown is None else float(shown - state['y0'])
+            r = d.b.find(state['vgs'])
             d.do_undo()
             back = app.model_meshes(d, r)
-            state['undo'] = float(abs(back[i].pos[:, 1].mean() - before[i].pos[:, 1].mean()))
+            state['undo'] = float(abs(back[state['i']].pos[:, 1].mean() - state['y0']))
             state['done'] = f
         elif 'done' in state and f > state['done'] + 3 or f > 3000:
             hello_imgui.get_runner_params().app_shall_exit = True
@@ -97,6 +105,8 @@ def main():
           'Import FBX of the exported file reports the replaced meshes: '
           + state.get('report', '').split(chr(10))[0])
     check(abs(state.get('shift', 0) - 0.1) < 2e-3, f"an object moved in the FBX moves in the car ({state.get('shift')})")
+    check(state.get('preview') is not None and abs(state['preview'] - 0.1) < 2e-3,
+          f"the car view shows the imported geometry ({state.get('preview')})")
     check(state.get('undo', 1) < 1e-6, 'Ctrl+Z undoes the import')
     shutil.rmtree(TMP, ignore_errors=True)
     print(f'{len(failures)} failure(s)')

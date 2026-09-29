@@ -83,6 +83,7 @@ class Doc:
         self.back = []
         self.fwd = []
         self.last_edit = (None, 0.0)
+        self.edits = 0                      # counts changes (views drawn from several resources re-read on it)
 
     @property
     def name(self):
@@ -136,6 +137,7 @@ class Doc:
                     self.b.add(old.copy())
         self.b.root_id, self.b.flags = root, flags
         self.b.modified = True
+        self.edits += 1
         self.invalidate()
         self.summary.clear()
 
@@ -343,6 +345,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         return False
 
     def changed(self, d, res=None):
+        d.edits += 1
         d.invalidate()
         d.dname.clear()
         self.build_users(d)
@@ -1987,7 +1990,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         nb = st['nb'] and r.type == mesh.T_INSTANCELIST
         cmr = mesh.vgs_control_mesh(d.b, r) if r.type == mesh.T_VGS else None
         cm = bool(st['cm'] and cmr is not None)
-        key = (d.uid, r.id, id(r.data(0)), st['lod'], show, nb, cm, id(cmr.data(0)) if cm else 0)
+        # the car is drawn from its renderables, materials, ...: an edit of any of them (FBX import) re-reads it
+        key = (d.uid, r.id, (id(r.data(0)), d.edits), st['lod'], show, nb, cm, id(cmr.data(0)) if cm else 0)
         if st['key'] != key:
             st['key'] = key
             st['result'] = None
