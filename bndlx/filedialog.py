@@ -47,6 +47,7 @@ CSV = [('CSV (*.csv)', '*.csv'), ('All files', '*.*')]
 AUDIO = [('Audio (*.wav, *.flac, *.ogg, *.mp3, *.aiff, *.sps)', '*.wav;*.flac;*.ogg;*.mp3;*.aif;*.aiff;*.sps;*.SPS'),
          ('All files', '*.*')]
 WAV = [('WAV (*.wav)', '*.wav')]
+FBX = [('FBX (*.fbx)', '*.fbx;*.FBX'), ('All files', '*.*')]
 ANY = [('All files', '*.*')]
 
 

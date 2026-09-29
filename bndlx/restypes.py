@@ -5,7 +5,7 @@ NAMES = {
     0x005: 'Renderable', 0x006: 'MaterialState', 0x007: 'SamplerState', 0x008: 'ShaderProgramBuffer',
     0x014: 'GenesysType', 0x015: 'GenesysObject', 0x030: 'Font', 0x050: 'InstanceList', 0x051: 'Model',
     0x052: 'ColourCube', 0x053: 'Shader', 0x060: 'PolygonSoupList', 0x068: 'Type 0x68', 0x070: 'TextFile',
-    0x074: 'LuaData', 0x080: 'Type 0x80', 0x081: 'Wave', 0x082: 'WaveContainerTable', 0x090: 'ZoneList',
+    0x074: 'LuaData', 0x080: 'GinsuEngineSound', 0x081: 'Wave', 0x082: 'WaveContainerTable', 0x090: 'ZoneList',
     0x091: 'WorldPaintMap', 0x0B0: 'AnimationList', 0x0B1: 'PathAnimation', 0x0B2: 'Skeleton',
     0x0B3: 'Animation', 0x0C0: 'CgsVertexProgramState', 0x0C1: 'CgsProgramBuffer',
     0x105: 'VehicleList', 0x106: 'VehicleGraphicsSpec', 0x200: 'AIData', 0x201: 'LocalisedText',

@@ -520,6 +520,95 @@ def test_plate_texts(pc_root):
           'plate text checks (8 characters, the font\'s letters) and the preview image')
 
 
+def test_ginsu(path):
+    """Ginsu engine sounds (type 0x80): header, RPM / grain tables and EA-XAS v0 audio that runs on smoothly across
+    the 32-sample frames."""
+    from bndlx import ginsu
+    b = Bundle.open(path)
+    rs = [r for r in b.resources if r.type == ginsu.T_GINSU]
+    good, sweeps = 0, set()
+    for r in rs:
+        g = ginsu.read(r, b.e)
+        pcm = g.pcm()
+        fr = pcm[:len(pcm) // 32 * 32].reshape(-1, 32).astype(np.int64)
+        inner = np.abs(np.diff(fr[:, 2:], axis=1)).mean()
+        bound = np.abs(fr[1:, 0] - fr[:-1, -1]).mean()
+        good += (len(pcm) == g.samples and bound < 1.2 * inner and 500 < g.min_rpm < g.max_rpm < 12000
+                 and np.all(np.diff(g.grain_pos) >= 0))
+        sweeps.add(g.decel)
+    check(rs and good == len(rs), f'{good}/{len(rs)} engine sounds decode smoothly ({os.path.basename(path)})')
+    hold = g.hold((g.min_rpm + g.max_rpm) / 2, 2.0)
+    check(len(hold) == 2 * g.rate and sweeps == {False, True},
+          f'held-RPM preview {len(hold) / g.rate:.1f} s; on-load and off-load sweeps present')
+
+
+def test_fbx(path, root):
+    """FBX export / import of a car: an unchanged round trip keeps every vertex byte; a moved object moves, a turned
+    object's stored normals (PC tangent-frame quaternions, PS3 11:11:10) turn with it; the bundle saves and
+    reopens. Works on a copy."""
+    from bndlx import fbx, mesh, meshimport, roots
+    roots.set_fallbacks([root])
+    tmp = os.path.join(TMP, 'fbx_' + os.path.basename(path))
+    shutil.copyfile(path, tmp)
+    b = Bundle.open(tmp)
+    vgs = next(x for x in b.resources if x.type == mesh.T_VGS)
+    lib = mesh.Library()
+    meshes, _ = mesh.decode_vgs(b, vgs, lib, [], tmp)
+    data = fbx.write_fbx(meshes, {}, 'car', meshimport.export_names(meshes))
+    fms = fbx.load_meshes(data)
+    check(len(fms) == len(meshes) and sum(len(m.tris) for m in fms) == sum(len(m.tris) for m in meshes),
+          f'FBX export: {len(fms)} objects, {sum(len(m.tris) for m in fms)} triangles ({os.path.basename(path)})')
+    before = {r.id: (r.data(0), r.data(b.gfx_chunk)) for r in b.resources if r.type == mesh.T_RENDERABLE}
+
+    def rows(bb):
+        out = {}
+        for r in bb.resources:
+            if r.type == mesh.T_RENDERABLE:
+                parts = {}
+                try:
+                    mesh.decode_renderable(bb, r, mesh.Library(), [bb], root, parts)
+                except mesh.MeshError:
+                    continue
+                for k, p in parts.items():
+                    out[(r.id, k)] = sorted(bytes(x) for x in p[3])
+        return out
+
+    old_rows = rows(b)
+    done, _ = meshimport.import_fbx_meshes(b, meshes, fms, lib, [b], root)
+    new_rows = rows(b)
+    same = sum(old_rows[k] == new_rows.get(k) for k in old_rows)
+    check(done and same == len(old_rows), f'unchanged FBX import keeps the vertex data: {same}/{len(old_rows)} meshes')
+    again, _ = mesh.decode_vgs(b, vgs, mesh.Library(), [], tmp)
+    strips = all(mr['strip'] for r in b.resources if r.type == mesh.T_RENDERABLE for mr in mesh.mesh_records(b, r))
+    check(strips and [len(m.tris) for m in again] == [len(m.tris) for m in meshes],
+          'imported meshes are triangle strips (as every game mesh) drawing the same triangles')
+    # move one object 0.1 m up, turn another 90 degrees about the car's up axis
+    body = [i for i, m in enumerate(fms) if meshimport.parse_name(m.name)[2] == 0][:2]
+    fms[body[0]].pos = fms[body[0]].pos + np.array([0.0, 0.1, 0.0])
+    turn = np.array([[0.0, 0, -1], [0, 1, 0], [1, 0, 0]])
+    fms[body[1]].pos = fms[body[1]].pos @ turn
+    fms[body[1]].normal = fms[body[1]].normal @ turn
+    meshimport.import_fbx_meshes(b, meshes, fms, lib, [b], root)
+    b.save(tmp)
+    b2 = Bundle.open(tmp)
+    after, _ = mesh.decode_vgs(b2, b2.find(vgs.id), mesh.Library(), [], tmp)
+    names = meshimport.export_names(meshes)
+    i0, i1 = (names.index(fms[i].name) for i in body)
+    shift = after[i0].pos.mean(0) - meshes[i0].pos.mean(0)
+    want = _unit(meshes[i1].normals().astype(np.float64) @ turn)
+    got = _unit(after[i1].normals().astype(np.float64))
+    order0 = np.lexsort(np.round(meshes[i1].pos.astype(np.float64) @ turn, 3).T)
+    order1 = np.lexsort(np.round(after[i1].pos.astype(np.float64), 3).T)
+    n_ok = len(order0) == len(order1) and np.mean(np.sum(want[order0] * got[order1], 1)) > 0.97
+    check(abs(shift[1] - 0.1) < 2e-3 and abs(shift[0]) < 2e-3 and n_ok and after[i1].nrm is not None,
+          f'edited objects: moved {shift.round(3).tolist()} m, turned mesh keeps its stored normals turned; '
+          'saved and reopened')
+
+
+def _unit(v):
+    return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-12)
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -563,6 +652,8 @@ def main():
         test_materials(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_vehiclelist(os.path.join(PC, 'VEHICLES', 'VEHICLELIST.BNDL'))
         test_car(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
+        test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
+        test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
         test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
         test_sps(PC)
         test_zones(os.path.join(PC, 'HAWAII'))
@@ -580,6 +671,8 @@ def main():
         test_materials(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
         test_vehiclelist(os.path.join(PS3, 'VEHICLES', 'VEHICLELIST.BNDL'))
         test_car(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))
+        test_ginsu(os.path.join(PS3, 'VEHICLES', 'VEH_122672_EN.BNDL'))
+        test_fbx(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'), PS3)
         test_proto_world(os.path.join(PS3, 'SEACREST'))
     if not (PC or PS3):
         print('set BNDLX_PC and / or BNDLX_PS3')

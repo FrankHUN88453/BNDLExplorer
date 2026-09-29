@@ -19,6 +19,9 @@ from . import vehiclelist as VL
 from . import zonelist as ZL
 from . import spsfile
 from . import platetext
+from . import ginsu
+from . import fbx
+from . import meshimport
 from . import roots
 from .audioplay import Player
 from .soundtrack_ui import SoundtrackUI
@@ -32,7 +35,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.16'
+VERSION = '0.17'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -154,10 +157,21 @@ class Doc:
         return desc
 
 
+MODEL_IMPORT_TYPES = (0x05, 0x51, 0x106, 0x50)     # Renderable, Model, car, track unit: Import FBX
+
+
 def _clock(seconds):
     """m:ss.s"""
     seconds = max(0.0, seconds)
     return f'{int(seconds // 60)}:{seconds % 60:04.1f}'
+
+
+def waveform(audio, cols=1024):
+    """(min, max) per column of a sound, for drawing its waveform."""
+    mono = audio.astype(np.float32).mean(1) / 32768.0
+    parts = np.array_split(mono, cols) if len(mono) >= cols else [mono]
+    return (np.array([p.min() if len(p) else 0 for p in parts]),
+            np.array([p.max() if len(p) else 0 for p in parts]))
 
 
 class App(ExplorerUI, SoundtrackUI):
@@ -670,10 +684,18 @@ class App(ExplorerUI, SoundtrackUI):
                 if p:
                     n = self.export_glb(d, res, p)
                     self.status = f'Exported {n} mesh(es) to {p}.'
+            elif kind == 'fbx':
+                p = filedialog.save_file('Export model as FBX', base + '.fbx', filedialog.FBX, 'fbx')
+                if p:
+                    n, nt = self.export_fbx(d, res, p)
+                    self.status = f'Exported {n} mesh(es) and {nt} texture(s) to {p}.'
             elif kind == 'wav':
                 from . import eal3
                 p = filedialog.save_file('Export sound as WAV', base + '.wav', filedialog.WAV, 'wav')
-                if p:
+                if p and res.type == ginsu.T_GINSU:
+                    g = ginsu.read(res, d.b.e)
+                    ops.write_file(p, eal3.wav_bytes(g.pcm().reshape(-1, 1), g.rate))
+                elif p:
                     audio, rate, _, _ = self.wave_audio(d, res)
                     ops.write_file(p, eal3.wav_bytes(audio, rate))
             elif kind.startswith('chunk'):
@@ -696,6 +718,8 @@ class App(ExplorerUI, SoundtrackUI):
         ext = os.path.splitext(path)[1].lower()
         with open(path, 'rb') as f:
             data = f.read()
+        if ext == '.fbx' and res.type in MODEL_IMPORT_TYPES:
+            return self.import_fbx(d, res, path)
         d.checkpoint(f'replace {res.id:#x}', [res.id])
         try:
             if resfile.is_resfile(data):
@@ -755,7 +779,8 @@ class App(ExplorerUI, SoundtrackUI):
         if res is None:
             return
         flt = {T_TEXTURE: filedialog.IMAGES, T_CUBE: filedialog.PNG, T_TEXT: filedialog.TEXT,
-               T_STRINGS: filedialog.CSV, 0x81: filedialog.AUDIO, VL.T_VEHICLELIST: filedialog.CSV}.get(res.type, filedialog.RES)
+               T_STRINGS: filedialog.CSV, 0x81: filedialog.AUDIO, VL.T_VEHICLELIST: filedialog.CSV,
+               **{t: filedialog.FBX + filedialog.RES for t in MODEL_IMPORT_TYPES}}.get(res.type, filedialog.RES)
         p = filedialog.open_file(f'Replace {type_name(res.type)} {res.id:#x}', self.cfg.get('last_import', ''), flt)
         if not p:
             return
@@ -1517,6 +1542,8 @@ class App(ExplorerUI, SoundtrackUI):
             self.cube_view(d, r)
         elif t == 0x81:
             self.wave_view(d, r)
+        elif t == ginsu.T_GINSU:
+            self.ginsu_view(d, r)
         elif t in (0x05, 0x51, 0x50, 0x60, 0x106):
             self.model_view(d, r)
         elif t == 0x02:
@@ -1694,13 +1721,7 @@ class App(ExplorerUI, SoundtrackUI):
             def work():
                 try:
                     res = ops.wave_audio(d.b, r, d.path)
-                    audio = res[0]
-                    cols = 1024
-                    mono = audio.astype(np.float32).mean(1) / 32768.0
-                    parts = np.array_split(mono, cols) if len(mono) >= cols else [mono]
-                    wave = (np.array([p.min() if len(p) else 0 for p in parts]),
-                            np.array([p.max() if len(p) else 0 for p in parts]))
-                    self.gcache[('wavegfx',) + key[1:]] = wave
+                    self.gcache[('wavegfx',) + key[1:]] = waveform(res[0])
                     self.gcache[key] = res
                 except Exception as e:
                     self.gcache[key] = e
@@ -1722,6 +1743,12 @@ class App(ExplorerUI, SoundtrackUI):
         elif head.get('prefetch_only'):
             imgui.text_colored(imgui.ImVec4(1, 0.7, 0.3, 1), 'Only the start of this streamed sound is in the bundle; '
                                f'its {r.id & 0xFFFFFFFF}.SPS file was not found in the game folder.')
+        self.audio_panel(d, r, key, audio, rate, replace=True)
+
+    def audio_panel(self, d, r, key, audio, rate, replace=False):
+        """Play / Pause / Stop, the clock, Export WAV (and Replace) and the waveform with its play head for the
+        sound `audio` (int16 (n, channels)) of the shown resource."""
+        n = len(audio)
         pl = self.player
         mine = pl.opened and pl.key == key
         if mine and pl.done:                 # played to the end: back to the start
@@ -1756,10 +1783,14 @@ class App(ExplorerUI, SoundtrackUI):
         imgui.same_line()
         if imgui.button('Export WAV...'):
             self.action_export(d, r, 'wav')
-        imgui.same_line()
-        if imgui.button('Replace...') and not d.b.truncated:
-            self.action_replace(d, r)
-        lo, hi = self.gcache.get(('wavegfx',) + key[1:], (np.zeros(1), np.zeros(1)))
+        if replace:
+            imgui.same_line()
+            if imgui.button('Replace...') and not d.b.truncated:
+                self.action_replace(d, r)
+        gkey = ('wavegfx',) + key[1:]
+        if gkey not in self.gcache:
+            self.gcache[gkey] = waveform(audio)
+        lo, hi = self.gcache[gkey]
         avail = imgui.get_content_region_avail()
         w, h = max(100, int(avail.x) - 8), 140
         p0 = imgui.get_cursor_screen_pos()
@@ -1788,6 +1819,59 @@ class App(ExplorerUI, SoundtrackUI):
         if released:
             self.wave_seek(key, audio, rate, target)
         imgui.text_disabled('Click or drag on the waveform to move the play position.')
+
+    def ginsu_view(self, d, r):
+        """Ginsu engine sound: what it holds, the whole rev sweep, and the engine held at a chosen RPM."""
+        key = ('wave', d.uid, r.id, id(r.data(0)))
+        g = self.gcache.get(key)
+        if g is None:
+            try:
+                g = ginsu.read(r, d.b.e)
+                g.pcm()
+            except Exception as e:
+                g = e
+            self.gcache[key] = g
+        if isinstance(g, Exception):
+            imgui.text_wrapped(f'Cannot read this engine sound: {g}')
+            return
+        imgui.text(g.describe())
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_disabled('Ginsu granular engine sound: a recording of the engine sweeping through its revs, cut '
+                            'into grains of one engine cycle; the game plays the grains of the current RPM.')
+        imgui.pop_text_wrap_pos()
+        imgui.spacing()
+        audio = g.pcm().reshape(-1, 1)
+        self.audio_panel(d, r, key, audio, g.rate)
+        pl = self.player
+        mine = pl.opened and pl.key == key
+        pos = pl.position() if mine else self.wave_cursor.get(key, 0)
+        imgui.text(f'Play position: {g.rpm_at(pos):.0f} RPM, grain {g.grain_at(pos) + 1} / {g.grains}')
+        imgui.separator()
+        imgui.text('Hold the engine at a steady RPM:')
+        st = self.ginsu_ui if getattr(self, 'ginsu_ui', None) and self.ginsu_ui['key'] == key[1:] else None
+        if st is None:
+            st = self.ginsu_ui = {'key': key[1:], 'rpm': round((g.min_rpm + g.max_rpm) / 2)}
+        imgui.set_next_item_width(min(420, imgui.get_content_region_avail().x - 160))
+        ch, rpm = imgui.slider_float('RPM##ginsu', float(st['rpm']), g.min_rpm, g.max_rpm, '%.0f')
+        if ch:
+            st['rpm'] = rpm
+        hkey = key + ('hold',)
+        holding = pl.opened and pl.key == hkey and not pl.done
+        imgui.same_line()
+        if imgui.button((f'{theme.I.ICON_FA_STOP}  Stop' if holding else f'{theme.I.ICON_FA_PLAY}  Play') + '##hold'):
+            if holding:
+                pl.stop()
+            else:
+                try:
+                    pl.play(g.hold(st['rpm']), g.rate, 0, hkey)
+                except OSError as ex:
+                    self.status = str(ex)
+        if holding and imgui.is_item_hovered():
+            imgui.set_tooltip('Move the slider, then press Play again for another RPM')
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_disabled('Plays the few grains at that RPM in turn for 3 s (a rough preview; the game blends and '
+                            'pitches them).')
+        imgui.pop_text_wrap_pos()
 
     def wave_seek(self, key, audio, rate, target):
         """Move the play position of a sound; if it is playing (or paused) it continues from there."""
@@ -1819,8 +1903,9 @@ class App(ExplorerUI, SoundtrackUI):
                 self.player.stop()
             return
         d, r = self.focused()
-        shown = ('wave', d.uid, r.id, id(r.data(0))) if d is not None and r is not None and r.type == 0x81 else None
-        if shown != self.player.key or not self.cfg.get('preview', True):
+        shown = (('wave', d.uid, r.id, id(r.data(0))) if d is not None and r is not None
+                 and r.type in (0x81, ginsu.T_GINSU) else None)
+        if shown != (self.player.key or ())[:4] or not self.cfg.get('preview', True):
             self.player.stop()
 
     # -- 3D models ---------------------------------------------------------------------------------------------
@@ -1994,9 +2079,19 @@ class App(ExplorerUI, SoundtrackUI):
             v.pan[:] = 0
             v.dist = v.radius * v.fit
             v.yaw, v.pitch = 0.6, 0.35
-        imgui.same_line()
-        if imgui.button('Export glTF...'):
+        if imgui.button('Export glTF...'):             # own row: the view toolbar above is full
             self.action_export(d, r, 'glb')
+        imgui.same_line()
+        if imgui.button('Export FBX...'):
+            self.action_export(d, r, 'fbx')
+        if r.type in MODEL_IMPORT_TYPES:
+            imgui.same_line()
+            if imgui.button('Import FBX...') and not d.b.truncated:
+                self.action_import_fbx(d, r)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Write an edited FBX back: objects keep the names Export FBX gave them (R<id>_<n>); '
+                                  'positions, UVs and normals are replaced, the rest comes from the nearest original '
+                                  'vertex')
         missing = sum(1 for m in meshes if m.texture and texs.get(m.texture) is None)
         if missing:
             imgui.text_disabled(f'{missing} mesh(es) use textures that are not in the open bundles or the global ones.')
@@ -2529,13 +2624,96 @@ class App(ExplorerUI, SoundtrackUI):
                 self.goto(rid, nd)
 
     def export_glb(self, d, res, path):
-        lod = self.model['lod'] if self.model['key'] and self.model['key'][1] == res.id else 0
-        meshes, _ = mesh.decode_resource(d.b, res, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)
+        meshes = self.model_meshes(d, res)
         size = 1024 if res.type == mesh.T_INSTANCELIST else 1 << 14
         texs = {t: self.texture_image(d, t, size) for t in {m.texture for m in meshes if m.texture}}
         name = self.display_name(d, res)[0]
         ops.write_file(path, gltf.write_glb(meshes, texs, name))
         return len(meshes)
+
+    def model_meshes(self, d, res):
+        """The meshes of a model resource as shown (the LOD chosen in the 3D view)."""
+        lod = self.model['lod'] if self.model['key'] and self.model['key'][1] == res.id else 0
+        return mesh.decode_resource(d.b, res, self.mesh_lib, self.model_bundles(d)[1:], d.path, lod)[0]
+
+    def export_fbx(self, d, res, path):
+        """FBX with every mesh named after its renderable mesh (for Import FBX), the textures as PNG files in
+        <name>_textures next to it. Returns (meshes, textures)."""
+        meshes = self.model_meshes(d, res)
+        name = self.display_name(d, res)[0]
+        size = 1024 if res.type == mesh.T_INSTANCELIST else 1 << 14
+        folder = os.path.splitext(path)[0] + '_textures'
+        files = {}
+        for t in sorted({m.texture for m in meshes if m.texture and m.uv is not None}):
+            img = self.texture_image(d, t, size)
+            if img is None:
+                continue
+            os.makedirs(folder, exist_ok=True)
+            fn = f'{t:016X}.png'
+            ops.save_png(img, os.path.join(folder, fn))
+            files[t] = os.path.basename(folder) + '/' + fn
+        ops.write_file(path, fbx.write_fbx(meshes, files, name, meshimport.export_names(meshes, 'mesh')))
+        return len(meshes), len(files)
+
+    def import_targets(self, d, res):
+        """The meshes of every LOD of a model, for finding where an imported object belongs."""
+        look = self.model_bundles(d)[1:]
+        meshes, nlod = mesh.decode_resource(d.b, res, self.mesh_lib, look, d.path, 0)
+        for lod in range(1, 4 if res.type == mesh.T_VGS else nlod):
+            try:
+                meshes = meshes + mesh.decode_resource(d.b, res, self.mesh_lib, look, d.path, lod)[0]
+            except mesh.MeshError:
+                break
+        return meshes
+
+    def import_fbx(self, d, res, path):
+        """Write the objects of an FBX exported from this model (and edited) back into its renderables. Undoable."""
+        try:
+            with open(path, 'rb') as f:
+                fms = fbx.load_meshes(f.read())
+            targets = self.import_targets(d, res)
+        except Exception as e:
+            self.modal = {'kind': 'message', 'title': 'Import FBX', 'text': f'Cannot read {os.path.basename(path)}: {e}'}
+            return False
+        rids = sorted({k[0] for k in (meshimport.parse_name(m.name) for m in fms) if k and d.b.find(k[0])})
+        if not rids:
+            self.modal = {'kind': 'message', 'title': 'Import FBX', 'text':
+                          'None of the objects in this file belongs to this model. Export FBX first, edit the objects '
+                          '(keep their names, R<id>_<n>), then import that file here.'}
+            return False
+        d.checkpoint(f'import FBX {os.path.basename(path)}', rids)
+        try:
+            done, skipped = meshimport.import_fbx_meshes(d.b, targets, fms, self.mesh_lib, self.model_bundles(d),
+                                                         roots.root_for(d.path, d.b.platform))
+        except Exception as e:
+            traceback.print_exc()
+            d.do_undo()
+            d.redo.clear()
+            self.modal = {'kind': 'message', 'title': 'Import FBX failed', 'text': str(e)}
+            return False
+        for rid in done:
+            self.changed(d, d.b.find(rid))
+        nm = sum(len(v) for v in done.values())
+        lines = [f'{nm} mesh(es) in {len(done)} renderable(s) replaced:']
+        for rid, rep in done.items():
+            for k, nv, nt, notes in rep:
+                lines.append(f'  R{rid:016X}_{k}: {nv} vertices, {nt} triangles' + (f' ({"; ".join(notes)})' if notes else ''))
+        copies = [s for s in skipped if (meshimport.parse_name(s) or (0, 0, 0))[2] > 0]
+        other = [s for s in skipped if s not in copies]
+        if copies:
+            lines.append(f'{len(copies)} further copies (other wheels, ~n) follow their first object.')
+        if other:
+            lines.append(f'{len(other)} object(s) skipped (not from this model or in another bundle): '
+                         + ', '.join(other[:8]) + (' ...' if len(other) > 8 else ''))
+        self.modal = {'kind': 'message', 'title': 'Import FBX', 'text': chr(10).join(lines)}
+        self.status = f'Imported {nm} mesh(es) from {os.path.basename(path)} (Ctrl+Z to undo).'
+        return True
+
+    def action_import_fbx(self, d, res):
+        p = filedialog.open_file('Import FBX into this model', self.cfg.get('last_import', ''), filedialog.FBX)
+        if p:
+            self.remember('last_import', p)
+            self.import_fbx(d, res, p)
 
     def cube_view(self, d, r):
         lut = ops.cube_lut(d.b, r)
@@ -3190,7 +3368,11 @@ Copy and paste, drag and drop (like Explorer):
 - drag resources out of the window into Explorer to save them (textures as PNG or DDS: ... > Options).
 
 Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms), LOD
-choice for models, Export glTF (.glb with textures, opens in Blender). Shaders, materials and shared textures are
+choice for models, Export glTF (.glb with textures, opens in Blender) and Export FBX (textures as PNG files in
+<name>_textures). Import FBX (or Replace with an .fbx) writes an edited FBX back: keep the object names Export
+FBX gave (R<id>_<n>); join new parts into an existing object. Positions, UV sets and normals are replaced, the
+rest (tangents, colours, damage weights) comes from the nearest original vertex. Works for renderables, models,
+cars (VehicleGraphicsSpec) and track units; Ctrl+Z undoes it. Shaders, materials and shared textures are
 found in the open bundles and in the game's global bundles (SHADERS, GLOBALMATERIALDICTIONARY, ...).
 
 Materials: the shader, the textures by slot (Diffuse, Normal, Specular, ...) with thumbnails, and the shader
@@ -3218,11 +3400,15 @@ Vehicle list (VEHICLES\\VEHICLELIST): every car with its name, manufacturer, spe
 car to edit its fields; Duplicate / Delete / arrows change the rows. Export / Import CSV (Excel with ';' and
 decimal commas works too).
 
+Engine sounds (GinsuEngineSound, in car bundles): the rev sweep with its RPM range and grains; play it,
+Export WAV, or hold the engine at an RPM chosen with the slider.
+
 Sounds (Wave): Play / Pause / Stop and a waveform with the play position (click it to jump); Export WAV; Replace (or drop) a WAV / FLAC / OGG / MP3 /
 AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound
 by default). Streamed sounds are read from and written to their .SPS files (the original is kept as .orig).
 
-Export / Replace / Import buttons: DDS, PNG, WAV, text, CSV, .bres (one resource with all its data), raw chunks.
+Export / Replace / Import buttons: DDS, PNG, WAV, FBX, glTF, text, CSV, .bres (one resource with all its data),
+raw chunks.
 ... (See more) > Extract all / Import resources from folder work on whole bundles.
 
 Convert: saves a PS3 bundle for PC or a PC bundle for PS3: textures, Genesys types and objects, colour cubes,

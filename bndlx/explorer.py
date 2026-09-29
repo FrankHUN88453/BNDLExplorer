@@ -1197,7 +1197,9 @@ class ExplorerUI:
             self.action_export(d, r, 'text')
         if r.type in (0x05, 0x51, 0x50, 0x60, 0x106) and imgui.menu_item('As glTF (.glb) with textures...', '', False)[0]:
             self.action_export(d, r, 'glb')
-        if r.type == 0x81 and imgui.menu_item('As WAV...', '', False)[0]:
+        if r.type in (0x05, 0x51, 0x50, 0x60, 0x106) and imgui.menu_item('As FBX with textures...', '', False)[0]:
+            self.action_export(d, r, 'fbx')
+        if r.type in (0x80, 0x81) and imgui.menu_item('As WAV...', '', False)[0]:
             self.action_export(d, r, 'wav')
         if r.type == 0x201 and imgui.menu_item('As CSV (translations)...', '', False)[0]:
             self.action_export(d, r, 'csv')

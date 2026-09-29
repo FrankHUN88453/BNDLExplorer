@@ -63,6 +63,20 @@ class MeshData:
     nrm: np.ndarray = None     # (N, 3) float32, computed on first use
     alpha_test: bool = False   # leaves, fences, decals: texels with alpha < 0.5 are holes
     wire: bool = False         # always drawn as wireframe (collision over the world)
+    src: tuple = None          # (renderable id, mesh record index) the geometry comes from
+    xform: np.ndarray = None   # 4x4 row-vector matrix from the renderable's space to this mesh's (None = same)
+    uvs: list = None           # further UV sets [(N, 2)] after `uv` (lightmap, AO, ...), for export
+
+    def placed(self, m, flip=False):
+        """This mesh moved by the 4x4 row-vector matrix m (normals follow; flip reverses the triangles)."""
+        a, t = m[:3, :3], m[3, :3]
+        pos = (self.pos.astype(np.float64) @ a + t).astype(np.float32)
+        nrm = self.normals().astype(np.float64) @ np.linalg.inv(a).T
+        nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+        tris = self.tris[:, ::-1].copy() if flip else self.tris
+        x = m if self.xform is None else self.xform @ m
+        return MeshData(pos, self.uv, tris, self.material, self.texture, self.shader, self.tint,
+                        nrm.astype(np.float32), self.alpha_test, self.wire, self.src, x, self.uvs)
 
     def normals(self):
         if self.nrm is None:
@@ -83,14 +97,22 @@ class MeshData:
 # ---------------------------------------------------------------------------------------------------------------
 # resource lookup
 # ---------------------------------------------------------------------------------------------------------------
-def _index(b):
-    key = (id(b.resources), len(b.resources))
-    if getattr(b, '_mesh_idx_key', None) != key:
-        b._mesh_idx = {}
-        for r in b.resources:
-            b._mesh_idx.setdefault(r.id, r)
-        b._mesh_idx_key = key
-    return b._mesh_idx
+def _lookup(b, rid):
+    """The resource `rid` of bundle b (or None) through a position index, rebuilt when the resource list changes
+    size or an entry's place no longer holds its id (resources replaced, removed or restored by undo)."""
+    for _ in range(2):
+        if getattr(b, '_mesh_idx_list', None) is not b.resources or b._mesh_idx_n != len(b.resources):
+            b._mesh_idx = {}
+            for i, r in enumerate(b.resources):
+                b._mesh_idx.setdefault(r.id, i)
+            b._mesh_idx_list, b._mesh_idx_n = b.resources, len(b.resources)
+        i = b._mesh_idx.get(rid)
+        if i is None:
+            return None
+        if b.resources[i].id == rid:
+            return b.resources[i]
+        b._mesh_idx_list = None
+    return None
 
 
 class Library:
@@ -176,7 +198,7 @@ class Library:
         if not rid:
             return None, None
         for b in list(bundles) + self.global_bundles(root) + [x for x in self.extra.values() if x is not None]:
-            r = _index(b).get(rid)
+            r = _lookup(b, rid)
             if r is not None and not r.missing:
                 return b, r
         if root is None:
@@ -189,7 +211,7 @@ class Library:
             paths += [p for p in self.world_paths(root, deep if isinstance(deep, str) else None) if p not in paths]
         for p in paths:
             b = self.open_extra(p)
-            r = _index(b).get(rid) if b is not None else None
+            r = _lookup(b, rid) if b is not None else None
             if r is not None and not r.missing:
                 return b, r
         return None, None
@@ -329,27 +351,38 @@ def material_look(b, mat, shader_name=''):
 # ---------------------------------------------------------------------------------------------------------------
 # decoding
 # ---------------------------------------------------------------------------------------------------------------
-def decode_renderable(b, res, lib, bundles, root):
-    """-> [MeshData] (meshes whose material / shader cannot be found are skipped; raises if none decode)."""
+def mesh_records(b, res):
+    """Mesh records of a Renderable: [{k, rec, w (24 words), strip, icount, ib_off, ib_size, vb_off, vb_size,
+    material}]. PC records are 0x60 bytes (index buffer description at +0x30, vertex buffer at +0x48), PS3 0x60
+    too with other word positions."""
     e = b.e
     c = res.data(0)
-    gfx = res.data(1 if b.platform == 'PC' else 2)
     n = struct.unpack_from(e + 'H', c, 0x12)[0]
     table = struct.unpack_from(e + 'I', c, 0x14)[0]
     imps = {i.offset: i.id for i in res.imports()}
     out = []
-    problems = []
     for k in range(n):
         rec = struct.unpack_from(e + 'I', c, table + 4 * k)[0]
         w = struct.unpack_from(e + '24I', c, rec)
         if b.platform == 'PC':
-            topo, icount, ib_off, vb_off = w[4], w[7], w[15], w[21]
-            strip = topo == 5
-            mat_id = imps.get(rec + 0x20)
+            out.append({'k': k, 'rec': rec, 'w': w, 'strip': w[4] == 5, 'icount': w[7], 'ib_off': w[15],
+                        'ib_size': w[16], 'vb_off': w[21], 'vb_size': w[22], 'material': imps.get(rec + 0x20)})
         else:
-            prim, icount, ib_off, vb_off = w[6] >> 24, w[5], w[12], w[20]
-            strip = prim == 6
-            mat_id = imps.get(rec + 0x1C)
+            out.append({'k': k, 'rec': rec, 'w': w, 'strip': (w[6] >> 24) == 6, 'icount': w[5], 'ib_off': w[12],
+                        'ib_size': 2 * w[14], 'vb_off': w[20], 'vb_size': w[22], 'material': imps.get(rec + 0x1C)})
+    return out
+
+
+def decode_renderable(b, res, lib, bundles, root, parts=None):
+    """-> [MeshData] (meshes whose material / shader cannot be found are skipped; raises if none decode).
+    `parts`, when given, collects {record index: (record, layout, stride, raw vertex bytes)} for re-encoding."""
+    e = b.e
+    gfx = res.data(1 if b.platform == 'PC' else 2)
+    out = []
+    problems = []
+    for mr in mesh_records(b, res):
+        k, w, strip, icount, ib_off, vb_off = mr['k'], mr['w'], mr['strip'], mr['icount'], mr['ib_off'], mr['vb_off']
+        mat_id = mr['material']
         mb, mat = lib.find(mat_id, bundles, root) if mat_id else (None, None)
         if mat is None:
             problems.append(f'material {mat_id or 0:#x} not found')
@@ -412,11 +445,32 @@ def decode_renderable(b, res, lib, bundles, root):
                 uv = uv[:, :2]
         tris = strips_to_tris(ib) if strip else ib[:len(ib) // 3 * 3].astype(np.uint32).reshape(-1, 3)
         tex, tint = material_look(mb, mat, sname)
-        out.append(MeshData(pos.astype(np.float32), uv, tris, mat_id, tex, sname, tint,
-                            alpha_test=any(w in sname for w in ALPHA_TEST_WORDS)))
+        md = MeshData(pos.astype(np.float32), uv, tris, mat_id, tex, sname, tint,
+                      alpha_test=any(x in sname for x in ALPHA_TEST_WORDS), src=(res.id, k))
+        md.nrm = stored_normals(raw, e, layout, md)
+        md.uvs = [x for x in (_read(raw, e, u[1], u[2], u[3]) for u in uv_sets(layout)[1:]) if x is not None] or None
+        out.append(md)
+        if parts is not None:
+            parts[k] = (mr, layout, stride, raw)
     if not out and problems:
         raise MeshError('; '.join(sorted(set(problems))) + '. Open the bundles that hold them, or the game folder.')
     return out
+
+
+def uv_sets(layout):
+    """The vertex elements that are 2-component texture coordinates, first UV set first."""
+    return [x for x in sorted((x for x in layout if x[0].startswith('uv')), key=lambda x: x[0]) if x[2] == 2]
+
+
+def stored_normals(raw, e, layout, md):
+    """The mesh's own normals when its vertex format holds them where they can be read (plain vectors, PC tangent
+    frame quaternions, PS3 11:11:10), else None (computed from the triangles on use)."""
+    from .meshimport import frame_normals, normal_frames
+    try:
+        frame = normal_frames(raw, e, layout, md.normals().astype(np.float64))
+        return None if frame is None else frame_normals(raw, e, frame).astype(np.float32)
+    except (ValueError, IndexError):
+        return None
 
 
 def model_renderables(b, res):
@@ -558,18 +612,11 @@ def decode_instances(b, res, lib, bundles, path, lod=0, progress=None, objects=T
         ms = cache[mid]
         if not ms:
             continue
-        a, t = m[:3, :3], m[3, :3]
-        try:
-            na = np.linalg.inv(a).T
-        except np.linalg.LinAlgError:
+        if abs(np.linalg.det(m[:3, :3])) < 1e-12:
             continue
         shown += 1
         for md in ms:
-            pos = (md.pos.astype(np.float64) @ a + t).astype(np.float32)
-            nrm = md.normals().astype(np.float64) @ na
-            nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
-            out.append(MeshData(pos, md.uv, md.tris, md.material, md.texture, md.shader, md.tint,
-                                nrm.astype(np.float32), md.alpha_test))
+            out.append(md.placed(m))
     if not out:
         raise MeshError('none of the instanced models could be found')
     return out, {'instances': len(insts), 'shown': shown, 'models': len(cache), 'missing': missing,
@@ -726,16 +773,11 @@ def decode_vgs(b, res, lib, bundles, path, lod=0):
         a = _quat_matrix(w['quat']) * np.array(w['scale'], np.float64)[:, None]
         if w['pos'][0] < 0:
             a = np.diag([-1.0, 1.0, 1.0]) @ a          # right-hand side: mirrored left wheel
-        t = np.array(w['pos'], np.float64)
-        na = np.linalg.inv(a).T
+        m = np.eye(4)
+        m[:3, :3], m[3, :3] = a, w['pos']
         for mid in w['parts']:
             for md in model(mid) or []:
-                pos = (md.pos.astype(np.float64) @ a + t).astype(np.float32)
-                nrm = md.normals().astype(np.float64) @ na
-                nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
-                tris = md.tris[:, ::-1].copy() if np.linalg.det(a) < 0 else md.tris
-                out.append(MeshData(pos, md.uv, tris, md.material, md.texture, md.shader, md.tint,
-                                    nrm.astype(np.float32), md.alpha_test))
+                out.append(md.placed(m, flip=np.linalg.det(a) < 0))
             parts += 1
     if not out:
         raise MeshError('neither the body nor the wheels of this car could be found')

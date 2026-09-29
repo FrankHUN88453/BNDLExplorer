@@ -81,14 +81,15 @@ that happens to match a model id would also "match" its renderables; such names 
 | LocalisedText (UI\LANGUAGE) | searchable string table, edit in place | CSV (`id,text`) for translations |
 | VehicleList (VEHICLES\VEHICLELIST) | every car and manufacturer with names from the game's strings; edit any field, duplicate / delete / reorder cars | CSV (one row per car, then the manufacturers) |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
-| Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) with the diffuse textures, opens in Blender |
-| VehicleGraphicsSpec (VEH_*) | the whole car in 3D: body and the four wheels (tyre, disc, rim, caliper) at their places; LOD choice; wheel positions and scales editable (mirrored left / right) | glTF (.glb) of the assembled car |
-| InstanceList (TRK_UNIT) | the whole track unit in 3D: every model instance in place, with its textures; collision over it | glTF (.glb) of the whole unit |
-| PolygonSoupList (TRK_UNIT) | collision in 3D, coloured by surface tag | glTF (.glb) |
+| Renderable, Model | 3D view: textured, lit, turn / move / zoom with the mouse, wireframe, LOD choice | glTF binary (.glb) or FBX with the diffuse textures; **Import FBX** writes edited geometry back |
+| VehicleGraphicsSpec (VEH_*) | the whole car in 3D: body and the four wheels (tyre, disc, rim, caliper) at their places; LOD choice; wheel positions and scales editable (mirrored left / right) | glTF (.glb) of the assembled car; FBX export / **Import FBX** (body and wheels) |
+| InstanceList (TRK_UNIT) | the whole track unit in 3D: every model instance in place, with its textures; collision over it | glTF (.glb) or FBX of the whole unit; Import FBX for the unit's own models |
+| PolygonSoupList (TRK_UNIT) | collision in 3D, coloured by surface tag | glTF (.glb), FBX |
 | ZoneList (HAWAII\PVS) | map of all 169 track units by district; click a zone to open its TRK_UNIT | |
 | .SPS sound stream files | opened like a bundle with one sound: play, waveform, replace, save | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF / .SPS; a whole folder as WAV |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / pause / stop with a play head on the waveform; click or drag on it to jump; time, channels, rate, length; stops when another item is selected | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
+| GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
 
 Field names of Genesys data are hashes; short names are stored as text, a few are known, and any field can be
@@ -117,11 +118,37 @@ in the window's own context). The vertex layout of a mesh comes from its materia
 bundle itself, so they are also looked up in the game's global bundles (`SHADERS*.BNDL`,
 `GLOBALMATERIALDICTIONARY.BNDL`, `GLOBALTEXTUREDICTIONARY.BNDL`, `VEHICLES\VEHICLETEX.BNDL`, ...) of the game
 folder the bundle is in. Meshes show their Diffuse texture, or the material's diffuse colour constant; car paint
-(chosen by the player in the game) shows as silver, glass as dark glass. Normals are computed from the triangles.
+(chosen by the player in the game) shows as silver, glass as dark glass. Normals are the mesh's own where the
+vertex format holds them in a readable form (plain vectors; PC cars: a tangent-frame quaternion whose z axis,
+flipped where w < 0, is the normal; PS3: 11:11:10 `CMP` normals), else computed from the triangles.
 Positions: float32 for the world and effects, s16 normalised × 10 m for vehicles. Index buffers are u16
-triangle strips with 0xFFFF restarts (topology field in the mesh record).
+triangle strips with 0xFFFF restarts (topology field in the mesh record; every retail mesh uses strips).
 
 **Export glTF** writes a `.glb` (positions, normals, UVs, indices, diffuse textures as PNG, base colours).
+
+**Export FBX** writes a binary FBX 7.4 (metres, Y up; Blender, 3ds Max, Maya, Unity) with every UV set,
+the mesh's own normals, a Phong material per game material and the diffuse textures as PNG files in
+`<name>_textures` next to it. Each object is named `R<renderable id>_<mesh index>`; further uses of the same
+mesh (the other wheels) get `~1`, `~2`. An extra UV layer `bndlx_id` (leave it in place) keeps each vertex's
+index in the game mesh.
+
+**Import FBX** (in the 3D view, or Replace… with an `.fbx` on a Renderable, Model, VehicleGraphicsSpec or
+InstanceList) writes an edited file back:
+
+- every object named `R<id>_<n>` replaces that mesh; `~n` copies are skipped (they follow the first, e.g.
+  edit the front left wheel); new parts must be joined into an existing object (in Blender: select the new
+  part, then the object, Ctrl+J), since new meshes would need new materials;
+- positions, all UV sets and normals are encoded in the mesh's own vertex format (tangent frames are turned
+  with the normal); every other attribute (tangents, vertex colours, damage weights / zones, ...) is taken
+  from the nearest original vertex. Vertices that kept their `bndlx_id` and place keep their exact bytes, so
+  an unchanged round trip, even through Blender, leaves the data as it was;
+- triangles are written as u16 triangle strips with 0xFFFF restarts, like every mesh of the game (at most
+  65 535 vertices per mesh), the renderable's buffers are laid out again (PC: 32-byte aligned, index buffers
+  padded to 16; PS3: 16-byte aligned) and its bounding sphere grows if needed;
+- Ctrl+Z undoes it; Save writes the bundle (the original is kept as `.orig`).
+
+The per-mesh bounds words (record 0x00-0x0F) are kept: centre = three s16 × 2^-14 (a scale code in the top
+bits of the first word selects 2^-10 for large meshes), the extents are packed in a way not solved yet.
 
 ### Materials
 
@@ -234,7 +261,19 @@ CSV files from Excel work with any regional setting: `;` separators and decimal 
 
 ## Sounds
 
-Every sound of the game (PC and PS3) is an EA **SPS** stream with the **EALayer3 v1** codec (MP3 based):
+### Engine sounds (Ginsu)
+
+Type 0x80 is EA's granular engine synthesis, **Ginsu**: every car bundle (PC `VEH_*_HI`, PS3 `VEH_*_EN`) has
+several, each one recording of the engine sweeping through its revs (on-load: accelerating; off-load: engine
+braking) cut into grains of one engine cycle each; the game plays the grains of the current RPM. The header
+(`Gnsu30` PC / `Gnsu20` PS3) gives the RPM range, 51 RPM steps (sample position of each), the grain start
+positions and the sample rate; the audio is EA-XAS v0 (19-byte frames of 32 mono samples). BNDL Explorer
+shows the RPM range and grains, plays the sweep (the RPM at the play position is shown), exports WAV, and
+previews the engine held at a chosen RPM.
+
+### Waves
+
+Every other sound of the game (PC and PS3) is an EA **SPS** stream with the **EALayer3 v1** codec (MP3 based):
 blocks `H` (SNR header: codec, channels, sample rate, samples), `D` (EALayer3 frames), `E` (end). An EALayer3
 frame is one MPEG Layer III granule of a mono or stereo stream; 6-channel sounds are three stereo streams whose
 frames alternate. Decoding rebuilds standard MP3 frames (bit reservoir) and decodes them with libsndfile
@@ -291,6 +330,7 @@ set BNDLX_PS3=...\NPXX00207\USRDIR\HAWAII_MAIN
 python tests\test_core.py                 :: library: saves, edits, conversion, strings
 python tests\test_gui.py                  :: the real window: drops, copy between bundles, clipboard, undo, save
 python tests\test_audio_gui.py            :: sound preview: jump to a position, stop when another item is selected (silent)
+python tests\test_fbx_gui.py              :: FBX export with textures, import back, an edited object, undo
 python tests\roundtrip_all.py "%BNDLX_PC%" "%BNDLX_PS3%"   :: every bundle saves byte-identical
 ```
 
