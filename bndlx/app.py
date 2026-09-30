@@ -20,6 +20,7 @@ from . import zonelist as ZL
 from . import spsfile
 from . import platetext
 from . import ginsu
+from . import gnames
 from . import anim
 from .anim_ui import AnimUI
 from . import fbx
@@ -37,7 +38,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.23'
+VERSION = '0.24'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -206,6 +207,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         self.focus = None                   # (doc uid, resource id)
         self.types = TypeDB()
         self.labels = Labels()
+        self.labels.found = self.names.gnames
         self.cfg = self.load_cfg()
         self.status = 'Open a bundle: the Open button, double click one in a folder, or drop .BNDL files on the window.'
         self.dropped = []
@@ -1270,11 +1272,16 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             for d in self.docs:
                 d.dname.clear()
                 d.rows = None
+            self.labels.found = db.gnames
+            self.gcache.clear()
+            gtext = (f'\n\nGenesys field names: {st["gnamed"]} of {st["gfields"]} found (the real names: their hashes '
+                     'match).' if st.get('gfields') else '')
             self.modal = {'kind': 'message', 'title': 'Resource names',
                           'text': f'Scanned {st["files"]} bundles in {st["seconds"]} s.\n\n'
                                   f'{st["resources"]} different resources, {st["named"]} of them named '
                                   f'({st["exact"]} exact names from the game data, the rest from object names).\n'
-                                  'Other resources get names from what uses them (models, materials, vehicles).'}
+                                  'Other resources get names from what uses them (models, materials, vehicles).'
+                                  + gtext}
             self.status = f'Names: {st["named"]} of {st["resources"]} resources.'
 
         label = ', '.join(os.path.basename(r.rstrip('\\/')) or r for r in roots)
@@ -3132,13 +3139,14 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         n = self.labels.name(h)
         imgui.text(n if n else f'{h:08x}')
         if imgui.is_item_hovered():
-            imgui.set_tooltip(f'name hash {h:08x}; right click to name it')
+            imgui.set_tooltip(f'name hash {h:08x}: {self.labels.source(h)}')
         if imgui.begin_popup_context_item(f'lbl{h}'):
             key = ('rename', h)
             if self.gcache.get(key) is None:
                 self.gcache[key] = self.labels.name(h) or ''
             imgui.text(f'Name for {h:08x} (saved for every field with this hash):')
             ch, self.gcache[key] = imgui.input_text('##rename', self.gcache[key], imgui.InputTextFlags_.enter_returns_true)
+            self.hash_check(h, self.gcache[key])
             if ch or imgui.button('OK'):
                 self.labels.rename(h, self.gcache[key])
                 self.gcache.pop(key, None)
@@ -3159,6 +3167,11 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         imgui.text(self.types.name(node.type))
         imgui.same_line()
         imgui.text_disabled('(drag a number to change it, Ctrl+click to type; right click a field to name it)')
+        if not self.labels.found:
+            imgui.push_text_wrap_pos(0.0)
+            imgui.text_colored(imgui.ImVec4(1.0, 0.75, 0.3, 1.0), 'Most field names are hashes until Find names '
+                               '(Home, or ... menu) has scanned the game folder: it finds their real names.')
+            imgui.pop_text_wrap_pos()
         flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.resizable
                  | imgui.TableFlags_.scroll_y)
         if imgui.begin_table('obj', 3, flags):
@@ -3191,6 +3204,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             if self.expand_all:
                 imgui.set_next_item_open(True, imgui.Cond_.always)
             opened = imgui.tree_node_ex(f'{name}##{path}', imgui.TreeNodeFlags_.span_full_width)
+            self.label_tip(f.name_hash)
             self.label_menu(f.name_hash, path)
             imgui.table_next_column()
             imgui.text_disabled(f'[{n}]' if n is not None else '{...}')
@@ -3218,12 +3232,27 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             return
         imgui.tree_node_ex(f'{name}##{path}', imgui.TreeNodeFlags_.leaf | imgui.TreeNodeFlags_.no_tree_push_on_open
                            | imgui.TreeNodeFlags_.span_full_width | imgui.TreeNodeFlags_.bullet)
+        if not label:
+            self.label_tip(f.name_hash)
         self.label_menu(f.name_hash, path)
         imgui.table_next_column()
         imgui.set_next_item_width(-1)
         self.leaf_widget(d, r, f, ft, v, loc, path)
         imgui.table_next_column()
         imgui.text_disabled(tname)
+
+    def label_tip(self, h):
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(f'name hash {h:08x}: {self.labels.source(h)}')
+
+    @staticmethod
+    def hash_check(h, text):
+        """Under a rename box: whether the typed name is the real one (its Genesys hash matches)."""
+        if text.strip():
+            ok = gnames.name_hash(text.strip()) == h
+            imgui.text_colored(imgui.ImVec4(0.4, 0.85, 0.4, 1) if ok else imgui.ImVec4(0.6, 0.6, 0.6, 1),
+                               'this is the real name: its hash matches' if ok else
+                               f'not the real name (its hash is {gnames.name_hash(text.strip()):08x})')
 
     def label_menu(self, h, path):
         if imgui.begin_popup_context_item(f'ctx{path}'):
@@ -3232,6 +3261,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 self.gcache[key] = self.labels.name(h) or ''
             imgui.text(f'Name for field {h:08x} (used everywhere this hash appears):')
             ch, self.gcache[key] = imgui.input_text('##rename', self.gcache[key], imgui.InputTextFlags_.enter_returns_true)
+            self.hash_check(h, self.gcache[key])
             if ch or imgui.button('OK'):
                 self.labels.rename(h, self.gcache[key])
                 self.gcache.pop(key, None)
@@ -3709,7 +3739,9 @@ folder too if you have it (its debug data names many retail resources). Hover a 
 Browse: Details or Large icons view (textures show thumbnails), search box, Sort, Back / Forward / Up
 (Alt+Left / Alt+Right / Alt+Up). The pane on the right shows the selected resource: textures (zoom, mips,
 channels), Genesys objects (every field, editable), Genesys types, text files, the game's strings, colour
-cubes, imports and the raw bytes (Hex).
+cubes, imports and the raw bytes (Hex). Genesys field names are hashes in the data: Find names recovers their real
+names (hover a field for its source); right click a field to name it yourself (the box shows whether your name is
+the real one).
 
 Edit: values in the object view, strings, text, bytes in Hex; Rename (F2) changes a resource id (imports in
 the bundle follow); Delete; Ctrl+Z / Ctrl+Y undo and redo. Save (Ctrl+S) keeps the original as .orig the first

@@ -95,8 +95,19 @@ that happens to match a model id would also "match" its renderables; such names 
 | GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV; replace from a recording (WAV / FLAC / OGG / MP3): RPM tracked from its pitch or a steady sweep |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
 
-Field names of Genesys data are hashes; short names are stored as text, a few are known, and any field can be
-named (right click; the names are saved in `%APPDATA%\BNDLExplorer\labels.json`).
+Field and enum value names of Genesys data are stored as hashes. The hash is known (found in the PS3
+prototype's debug build, `rw::core::stdc::CalculateCrc32`): an MSB-first CRC-32 (polynomial 0x04C11DB7) whose
+register starts as the complement of the name's first four bytes, result complemented, so names of four
+characters or fewer hash to themselves (`Name`, `Tint`). The names themselves are not stored, but **Find names**
+recovers them: every identifier of NFS13.exe, of the PS3 debug SELF (when the prototype folder is scanned too)
+and of the bundles' objects, scripts and text, and every run of words inside them (`GetMaxDisplacement` ->
+`MaxDisplacement`), is hashed and matched against the fields of every type; a hash that several candidates match
+takes the one sharing the most words with its type and its sibling fields, array counts are tried as
+`<array>Count`, and pairs of words from found names fill in more. Retail PC, all types: about half of the fields
+in use get their real name from the PC files alone, three quarters with the PS3 debug build (3859 of 6880 field
+hashes); chance matches are rare (~0.1 % of single words, ~2 % of pairs). Hover a field for where its name comes
+from; any field can also be named by hand (right click; saved in `%APPDATA%\BNDLExplorer\labels.json`), and the
+rename box tells whether a typed name is the real one (its hash matches).
 
 Other operations: **Rename** (change a resource id; imports of it in the bundle follow), duplicate with a new
 id, delete, copy resources between bundles, find the resources that import a resource, find in all open

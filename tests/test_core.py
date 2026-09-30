@@ -520,6 +520,38 @@ def test_plate_texts(pc_root):
           'plate text checks (8 characters, the font\'s letters) and the preview image')
 
 
+def test_gnames(pc_root):
+    """Genesys names: the hash (the primitive types store their name hash in the schema, short names are their own
+    hash) and names found from NFS13.exe's identifiers for a car bundle's types."""
+    from bndlx import genesys, gnames
+    b = Bundle.open(os.path.join(pc_root, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
+    T = genesys.TypeDB()
+    T.add_bundle(b)
+    prim = [t for t in T.types.values() if t.kind < 5 and t.name]
+    ok = sum(gnames.name_hash(t.name) == t.schema[1] for t in prim)
+    many = gnames.hash_many([t.name for t in T.types.values() if t.name])
+    same = all(many[t.name] == gnames.name_hash(t.name) for t in T.types.values() if t.name)
+    check(prim and ok == len(prim) and same and gnames.name_hash('Tint') == 0x54696E74,
+          f'Genesys name hash: {ok}/{len(prim)} primitive type names match their stored hash')
+    gtypes = {}
+    for t in T.types.values():
+        if t.fields:
+            gtypes[t.name or hex(t.id)] = [(f.name_hash, t.count_field(f).name_hash if t.kind == 7 and f.flags & 8
+                                            and t.count_field(f) is not None else None) for f in t.fields]
+    with open(os.path.join(pc_root, 'NFS13.exe'), 'rb') as f:
+        idents = gnames.identifiers(f.read())
+    found = gnames.solve(gtypes, idents | set(gtypes))
+    hs = {h for fl in gtypes.values() for h, _ in fl}
+    named = sum(1 for h in hs if h in found or gnames.ascii_name(h))
+    want = {0x543527D0: 'InitiallyOn', 0x3F33EA3E: 'MixerChannel'}
+    nitro = next(t for t in T.types.values() if t.name.endswith('NitrousParameters.TrafficOncoming'))
+    nn = [found.get(f.name_hash) for f in nitro.fields]
+    # the PC exe alone names about half of the fields in use (with the PS3 debug build, three quarters)
+    check(named > 0.15 * len(hs) and all(found.get(h) == n for h, n in want.items() if h in found)
+          and 'MinimumSpeed' in nn and 'IsEnabled' in nn and all(gnames.name_hash(n) == h for h, n in found.items()),
+          f'Genesys field names from the exe: {named} of {len(hs)} in a car bundle (e.g. {", ".join(n for n in nn if n)})')
+
+
 def test_ginsu(path):
     """Ginsu engine sounds (type 0x80): header, RPM / grain tables and EA-XAS v0 audio that runs on smoothly across
     the 32-sample frames."""
@@ -843,6 +875,7 @@ def main():
         test_materials(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_vehiclelist(os.path.join(PC, 'VEHICLES', 'VEHICLELIST.BNDL'))
         test_car(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
+        test_gnames(PC)
         test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
         test_animations(PC)

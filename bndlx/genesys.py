@@ -14,7 +14,8 @@ Field flags: 0 inline, 2 inline array (count), 1 pointer to one struct, 8|1 poin
 field the descriptor points at), 16|8|1 pointer to an array of pointers to objects (each with its header).
 StringBase = {u32 relative offset of the characters, u32 length incl. NUL}; Handle = 8 bytes set by an import.
 
-Names are hashed; names of 4 characters or fewer are stored as ASCII (big-endian packed).
+Names are hashed (gnames.name_hash: a CRC-32); names of 4 characters or fewer hash to themselves (big-endian
+ASCII).
 """
 import re
 import struct

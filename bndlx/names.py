@@ -13,6 +13,8 @@ Bundles store resources by id only. Names come from:
   derived  - Genesys objects: their name-like string field, else "<type> <GameChanger number>";
            - vehicles: the car name from the bundle's behaviour objects;
            - textures / materials: the model or object that uses them.
+  Genesys field and enum value names (hashed in the data): gnames.solve over the identifiers of the executables
+  (NFS13.exe, the PS3 debug SELFs when their folder is scanned) and the bundles' strings.
 The scan result is kept in %APPDATA%\\BNDLExplorer\\names.json.gz.
 """
 import gzip
@@ -24,6 +26,7 @@ import time
 import zlib
 from concurrent.futures import ProcessPoolExecutor
 
+from . import gnames as gn
 from .labels import config_dir
 
 GC_RE = re.compile(r'^GameChanger \(ID=(\d+),type=(\d+),index=(\d+)\)$')
@@ -149,7 +152,7 @@ def bundle_names(b, types=None):
     """Names that can be worked out inside one bundle.
     Returns {'exact': {id: name}, 'objnames': {id: name}, 'strings': set, 'car': str|None, 'typenames': {}}."""
     from . import genesys
-    out = {'exact': {}, 'objnames': {}, 'strings': set(), 'car': None, 'typenames': {}}
+    out = {'exact': {}, 'objnames': {}, 'strings': set(), 'car': None, 'typenames': {}, 'gtypes': {}}
     T = types
     if T is None:
         T = genesys.TypeDB()
@@ -165,6 +168,12 @@ def bundle_names(b, types=None):
             if t is not None and t.name:
                 out['typenames'][r.id] = t.name
                 out['strings'].add(t.name)
+            if t is not None and t.fields:
+                fl = []
+                for f in t.fields:
+                    cf = t.count_field(f) if t.kind == 7 and f.flags & 8 else None
+                    fl.append((f.name_hash, cf.name_hash if cf is not None else None))
+                out['gtypes'][t.name or f'{r.id:x}'] = fl
         elif r.type == 0x15:
             try:
                 node = rd.read_resource(r)
@@ -224,7 +233,7 @@ def harvest(path):
     """Everything a scan needs from one bundle file (a plain dict so it pickles cheaply)."""
     from .bundle import Bundle
     out = {'path': path, 'ids': [], 'debug': {}, 'strings': set(), 'objnames': {}, 'typenames': {}, 'car': None,
-           'exact': {}}
+           'exact': {}, 'gtypes': {}, 'idents': set()}
     try:
         b = Bundle.open(path)
     except Exception:
@@ -237,8 +246,16 @@ def harvest(path):
         bn = bundle_names(b)
     except Exception:
         return out
-    for k in ('strings', 'objnames', 'typenames', 'car', 'exact'):
+    for k in ('strings', 'objnames', 'typenames', 'car', 'exact', 'gtypes'):
         out[k] = bn[k]
+    idents = set()
+    for r in b.resources:
+        if r.type in (0x15, 0x70, 0x74, 0x105) and not r.missing:
+            try:
+                idents |= gn.identifiers(bytes(r.data(0)))
+            except Exception:
+                pass
+    out['idents'] = idents
     return out
 
 
@@ -256,6 +273,7 @@ class NameDB:
         self.bases = set()       # asset path bases (gamedb://...), for new bundles
         self.scanned = []        # folders scanned
         self.where = {}          # id -> [bundle paths] (up to 3)
+        self.gnames = {}         # Genesys field / enum value name hash -> name
         self.stats = {}
         self.dirty = False
 
@@ -274,6 +292,7 @@ class NameDB:
                 db.stats = js.get('stats', {})
                 files = js.get('files', [])
                 db.where = {int(k, 16): [files[i] for i in v] for k, v in js.get('where', {}).items()}
+                db.gnames = {int(k, 16): v for k, v in js.get('gnames', {}).items()}
         except (OSError, ValueError, KeyError):
             pass
         return db
@@ -285,7 +304,8 @@ class NameDB:
               'where': {f'{k:x}': [fidx[p] for p in v] for k, v in self.where.items()},
               'exact': {f'{k:x}': v for k, v in self.exact.items()},
               'objnames': {f'{k:x}': v for k, v in self.objnames.items()},
-              'cars': self.cars, 'bases': sorted(self.bases)}
+              'cars': self.cars, 'bases': sorted(self.bases),
+              'gnames': {f'{k:x}': v for k, v in self.gnames.items()}}
         tmp = self.path + '.tmp'
         with gzip.open(tmp, 'wt', encoding='utf-8') as f:
             json.dump(js, f)
@@ -325,21 +345,43 @@ class NameDB:
     def name(self, rid):
         return self.exact.get(rid)
 
+    @staticmethod
+    def genesys_names(gtypes, strings, exe_paths=(), selfs=()):
+        """Names of the Genesys fields / enum values of gtypes from the identifiers of the executables (the PC
+        exe, the largest PS3 debug SELF: it has the most symbols) and the bundles' strings."""
+        idents = set()
+        for s in strings:
+            idents.update(m.decode('latin1') for m in gn.IDENT.findall(s.encode('latin1', 'replace')))
+        bins = [p for p in exe_paths if os.path.basename(p).lower() != 'eboot.bin']
+        big = sorted(selfs, key=lambda p: ('INTERNAL' not in os.path.basename(p).upper(), -os.path.getsize(p)))
+        for p in bins + big[:1]:
+            try:
+                with open(p, 'rb') as f:
+                    idents |= gn.identifiers(f.read())
+            except OSError:
+                pass
+        idents.update(tn for tn in gtypes)
+        return gn.solve(gtypes, idents) if gtypes and idents else {}
+
     # -- full scan ----------------------------------------------------------------------------------------------
     def scan(self, folders, progress=None, workers=None, exe_paths=()):
         """Scan every bundle under `folders` and work out as many names as possible."""
         self.exact, self.objnames, self.cars = {}, {}, {}
         t0 = time.time()
         files = []
+        selfs = []
         for root in folders:
             for dp, _, fn in os.walk(root):
                 files += [os.path.join(dp, f) for f in fn if f.lower().endswith(('.bndl', '.bundle'))]
+                selfs += [os.path.join(dp, f) for f in fn if f.lower().endswith('.self')]
         ids = {}
         where = {}
         debug = {}
         strings = set()
         nums = set()
         widget = []
+        gtypes = {}
+        idents = set()
         n = max(len(files), 1)
         with ProcessPoolExecutor(max_workers=workers) as ex:
             for i, h in enumerate(ex.map(harvest, files, chunksize=4)):
@@ -352,6 +394,7 @@ class NameDB:
                         w.append(h['path'])
                 debug.update(h['debug'])
                 strings |= h['strings']
+                idents |= h.get('idents', set())
                 for rid, nm in h['objnames'].items():
                     self.objnames.setdefault(rid, nm)
                     widget.append((nm, rid & 0xFFFFFFFF))
@@ -359,6 +402,8 @@ class NameDB:
                     self.exact.setdefault(rid, nm)
                 for rid, nm in h['exact'].items():
                     self.exact.setdefault(rid, nm)
+                for tn, fl in h.get('gtypes', {}).items():
+                    gtypes.setdefault(tn, fl)
                 fname = os.path.basename(h['path']).upper()
                 if h['car']:
                     self.cars[fname] = h['car']
@@ -420,9 +465,12 @@ class NameDB:
                 if c in unknown and ids[c] == T_RENDERABLE:
                     self.exact[c] = nm + suf
                     unknown.discard(c)
+        self.gnames = self.genesys_names(gtypes, strings | idents, exe_paths, selfs)
         named = sum(1 for r in ids if r in self.exact or r in self.objnames)
+        nf = {h for fl in gtypes.values() for h, _ in fl}
         self.stats = {'resources': len(ids), 'named': named, 'exact': sum(1 for r in ids if r in self.exact),
-                      'files': len(files), 'seconds': round(time.time() - t0)}
+                      'files': len(files), 'seconds': round(time.time() - t0),
+                      'gfields': len(nf), 'gnamed': sum(1 for h in nf if h in self.gnames or gn.ascii_name(h))}
         self.where = where
         self.scanned = sorted(set(self.scanned) | set(folders))
         self.dirty = True
