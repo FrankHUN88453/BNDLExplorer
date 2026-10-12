@@ -220,6 +220,7 @@ class Viewer:
         self.flip_y = -1.0          # normal map green: DirectX convention
         self.lights_on = [0.0, 0.0, 0.0, 0.0]    # light mask channels lit: R brake, G running, B head, A tail
         self.textures = {}          # texture key -> gl id
+        self.tex_src = {}           # texture key -> the image uploaded (a new image is uploaded again)
         self.key = None
         self.yaw, self.pitch, self.dist = 0.6, 0.35, 1.0
         self.center = np.zeros(3, np.float32)
@@ -343,8 +344,12 @@ class Viewer:
             self.dist = self.radius * fit
             self.pan = np.zeros(3, np.float32)
         for tid, img in texture_images.items():
-            if tid not in self.textures and img is not None:
-                self.textures[tid] = self._texture(img)
+            if img is None or (tid in self.textures and self.tex_src.get(tid) is img):
+                continue
+            if tid in self.textures:                   # replaced: the new image goes up
+                GL.glDeleteTextures([self.textures[tid]])
+            self.textures[tid] = self._texture(img)
+            self.tex_src[tid] = img
         for i, m in enumerate(meshes):
             nrm = m.normals()
             uv = m.uv if m.uv is not None else np.zeros((len(m.pos), 2), np.float32)

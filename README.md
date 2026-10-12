@@ -74,7 +74,7 @@ that happens to match a model id would also "match" its renderables; such names 
 
 | Resource | Preview / editor | Export / import |
 |---|---|---|
-| Texture (RwRaster) | zoom, pan, mip levels, cube faces, R / G / B / A channels, sRGB flag | DDS (lossless, all mips), PNG; replace from PNG / DDS / TGA / JPG / BMP (BC1 / BC2 / BC3 / RGBA encoder, mip chain, format and sRGB choice) |
+| Texture (RwRaster) | zoom, pan, mip levels, cube faces, R / G / B / A channels, sRGB flag; **Full size** (or double click): the texture at its full resolution in a window over the whole app (1:1, 2:1, 4:1, fit, pixel values); Replace / Export right in the preview | DDS (lossless, all mips), PNG; replace from PNG / DDS / TGA / JPG / BMP (any size; BC1 / BC2 / BC3 / RGBA encoder, mip chain, format and sRGB choice), or drop an image on the preview |
 | GenesysObject | every field as a tree: numbers, vectors, colours, enums, flags, strings, references (click to jump) | .bres |
 | GenesysType | schema: fields, types, offsets, flags; enum values | .bres |
 | TextFile | text editor (JSON / XML) | .txt |
@@ -162,6 +162,11 @@ channel in its material's `LightmappedLights{Red,Green,Blue,Alpha}ChannelColour`
 `mSelfIlluminationMultiplier` (R brake, G running / plate lights, B headlights, A tail lights; a channel without
 a colour stays dark): `Emissive` shaders glow (UV set 0), `Lightmap` shaders are lit by the lamps (UV set 3).
 `Alpha1bit` shaders cut out by the alpha test (the wheels' crest).
+
+**Textures...** lists every texture the model uses (colour, normal, specular, light maps) with its size: View
+opens it at full size, Replace swaps it (the 3D view shows the new one at once; Ctrl+Z undoes, Save keeps it).
+Textures in bundles that are not open (`VEHICLETEX`, ...) get an Open button first. The Material view has View /
+Replace next to each texture slot too.
 
 **Export glTF** writes a `.glb` (positions, normals, UVs, indices, diffuse textures as PNG, base colours).
 

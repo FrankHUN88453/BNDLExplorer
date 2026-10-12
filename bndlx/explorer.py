@@ -241,6 +241,8 @@ class ExplorerUI:
         else:
             self.details_rect = None
         self.status_bar()
+        self.texture_window()
+        self.model_textures_window()
         self.modals()
         self.results_window()
         self.soundtrack_window()

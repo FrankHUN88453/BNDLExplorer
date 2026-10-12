@@ -1,5 +1,6 @@
 """BNDL Explorer: view, edit, import / export and convert the .BNDL bundles of NFS Most Wanted (2012),
 PC retail and PS3 prototype. Dear ImGui (imgui-bundle) front end."""
+import collections
 import itertools
 import re
 import json
@@ -38,7 +39,7 @@ from . import names as N
 from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 
 APP = 'BNDL Explorer'
-VERSION = '0.24'
+VERSION = '0.25'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 
@@ -221,6 +222,11 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         self.drag = None                    # (doc uid, [ids]) being dragged
         self.drag_out_done = False
         self.tex = {'key': None, 'img': None, 'thread': None, 'params': None, 'mip': 0, 'face': 0, 'err': None}
+        self.tex_full = None             # the full-size texture window: {'doc', 'rid', ...}
+        self.tex_cache = collections.OrderedDict()   # decoded textures of the 3D views (texture_image)
+        self.tex_cache_lock = threading.Lock()
+        self.model_tex = None            # the textures-of-a-model window: {'doc', 'rid'}
+        self.edit_gen = 0                # counts edits in every open bundle (views built from several bundles)
         self.tex_lock = threading.Lock()
         self.gcache = {}
         self.text_edit = {'key': None, 'text': ''}
@@ -348,6 +354,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
 
     def changed(self, d, res=None):
         d.edits += 1
+        self.edit_gen += 1
         d.invalidate()
         d.dname.clear()
         self.build_users(d)
@@ -1669,6 +1676,20 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             if on:
                 imgui.pop_style_color()
             imgui.same_line(0, 2)
+        imgui.same_line(0, 12)
+        if imgui.button(f'{theme.I.ICON_FA_UP_RIGHT_AND_DOWN_LEFT_FROM_CENTER}  Full size'):
+            self.open_texture_window(d, r)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('Show the texture at its full resolution in a big window (or double click it)')
+        imgui.same_line(0, 2)
+        if imgui.button('Replace...') and not b.truncated:
+            self.action_replace(d, r)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('Replace it with a PNG / JPG / TGA / BMP / DDS (any size; format, mip maps and sRGB '
+                              'can be chosen); or drop an image file on the preview')
+        imgui.same_line(0, 2)
+        if imgui.button('Export...'):
+            self.action_export(d, r)
         imgui.new_line()
         imgui.pop_style_var()
         avail = imgui.get_content_region_avail()
@@ -1699,6 +1720,13 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             p.refresh_image = True
         immvision.image(f'##tex{r.id}', img, p)
         mi = p.mouse_info
+        if mi.is_mouse_hovering and imgui.is_mouse_double_clicked(imgui.MouseButton_.left):
+            self.open_texture_window(d, r)
+        self.pixel_line(img, mi, 'Mouse wheel: zoom, drag: pan, double click: full size')
+
+    @staticmethod
+    def pixel_line(img, mi, hint):
+        h, w = img.shape[:2]
         if mi.is_mouse_hovering:
             x, y = int(mi.mouse_position[0]), int(mi.mouse_position[1])
             if 0 <= x < w and 0 <= y < h:
@@ -1708,7 +1736,221 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             else:
                 imgui.text_disabled(' ')
         else:
-            imgui.text_disabled('Mouse wheel: zoom, drag: pan')
+            imgui.text_disabled(hint)
+
+    # -- full-size texture window ---------------------------------------------------------------------------
+    def open_texture_window(self, d, r):
+        self.tex_full = {'doc': d.uid, 'rid': r.id, 'focus': True, 'mip': 0, 'face': 0, 'channel': -1,
+                         'key': None, 'img': None, 'err': None, 'params': None, 'zoom': 'auto'}
+
+    def decode_texture(self, st, d, r):
+        """(image or None while decoding, error) of st's mip / face of a texture, decoded on a thread."""
+        key = (d.uid, r.id, id(r.data(0)), id(r.data(d.b.gfx_chunk)), st['mip'], st['face'])
+        if st.get('key') != key:
+            st.update(key=key, img=None, err=None, params=None)
+            plat, mip, face = d.b.platform, st['mip'], st['face']
+
+            def work():
+                try:
+                    img = np.ascontiguousarray(raster.decode(r, plat, mip, face))
+                    with self.tex_lock:
+                        if st.get('key') == key:
+                            st['img'] = img
+                except Exception as e:
+                    with self.tex_lock:
+                        if st.get('key') == key:
+                            st['err'] = str(e)
+
+            threading.Thread(target=work, daemon=True).start()
+        with self.tex_lock:
+            return st.get('img'), st.get('err')
+
+    def texture_window(self):
+        """The texture at full resolution in a window over the whole app (1:1 to start, wheel zooms)."""
+        st = self.tex_full
+        if not st:
+            return
+        d = self.doc_by_uid(st['doc'])
+        r = d.b.find(st['rid']) if d is not None else None
+        if r is None or r.type != T_TEXTURE:
+            self.tex_full = None
+            return
+        inf = raster.info(r, d.b.platform)
+        st['mip'] = min(st['mip'], inf.mips - 1)
+        st['face'] = min(st['face'], inf.faces - 1)
+        vp = imgui.get_main_viewport()
+        imgui.set_next_window_pos(imgui.ImVec2(vp.work_pos.x + 16, vp.work_pos.y + 16))
+        imgui.set_next_window_size(imgui.ImVec2(vp.work_size.x - 32, vp.work_size.y - 32))
+        if st['focus']:
+            imgui.set_next_window_focus()
+            st['focus'] = False
+        flags = (imgui.WindowFlags_.no_collapse | imgui.WindowFlags_.no_move | imgui.WindowFlags_.no_resize
+                 | imgui.WindowFlags_.no_saved_settings | imgui.WindowFlags_.no_scrollbar)
+        _, keep = imgui.begin(f'{self.display_name(d, r)[0]}  -  {inf.describe()}###texfull', True, flags)
+        if not keep or (imgui.is_window_focused() and imgui.is_key_pressed(imgui.Key.escape)):
+            imgui.end()
+            self.tex_full = None
+            return
+        zoom = None
+        if imgui.button('Fit'):
+            zoom = 'fit'
+        imgui.same_line(0, 2)
+        if imgui.button('1:1'):
+            zoom = 'one'
+        imgui.same_line(0, 2)
+        if imgui.button('2:1'):
+            zoom = 2.0
+        imgui.same_line(0, 2)
+        if imgui.button('4:1'):
+            zoom = 4.0
+        imgui.same_line(0, 12)
+        for c, lbl in ((-1, 'RGBA'), (0, 'R'), (1, 'G'), (2, 'B'), (3, 'A')):
+            on = st['channel'] == c
+            if on:
+                imgui.push_style_color(imgui.Col_.button, imgui.get_style_color_vec4(imgui.Col_.header))
+            if imgui.button(f'{lbl}##fch{c}'):
+                st['channel'] = c
+                zoom = zoom or 'keep'
+            if on:
+                imgui.pop_style_color()
+            imgui.same_line(0, 2)
+        if inf.mips > 1:
+            imgui.same_line(0, 12)
+            imgui.set_next_item_width(150)
+            ch, st['mip'] = imgui.slider_int('mip##full', st['mip'], 0, inf.mips - 1)
+        if inf.faces > 1:
+            imgui.same_line(0, 12)
+            imgui.set_next_item_width(150)
+            ch, st['face'] = imgui.slider_int('face##full', st['face'], 0, inf.faces - 1)
+        imgui.same_line(0, 12)
+        if imgui.button('Replace...') and not d.b.truncated:
+            self.action_replace(d, r)
+        imgui.same_line(0, 2)
+        if imgui.button('Export...'):
+            self.action_export(d, r)
+        imgui.same_line(0, 12)
+        if imgui.button('Close (Esc)'):
+            self.tex_full = None
+            imgui.end()
+            return
+        img, err = self.decode_texture(st, d, r)
+        if err:
+            imgui.text_colored(imgui.ImVec4(1, 0.4, 0.3, 1), f'Cannot decode: {err}')
+        elif img is None:
+            imgui.text_disabled('decoding...')
+        else:
+            h, w = img.shape[:2]
+            avail = imgui.get_content_region_avail()
+            size = (max(64, int(avail.x)), max(64, int(avail.y - imgui.get_text_line_height_with_spacing() - 4)))
+            p = st['params']
+            if p is None or tuple(p.image_display_size) != size:
+                p = immvision.ImageParams()
+                p.image_display_size = size
+                p.show_options_button = False
+                p.show_zoom_buttons = False
+                p.show_pixel_info = False
+                p.show_image_info = False
+                p.show_school_paper_background = False
+                p.zoom_key = 'texfull'
+                p.refresh_image = True
+                if st['zoom'] == 'auto':                 # full resolution; small textures as big as they fit
+                    k = max(1, int(min(size[0] / w, size[1] / h)))
+                    zoom = 'one' if k == 1 else float(k)
+                    st['zoom'] = None
+                st['params'] = p
+            else:
+                p.refresh_image = False
+            p.selected_channel = st['channel']
+            if zoom == 'fit':
+                p.zoom_pan_matrix = immvision.make_zoom_pan_matrix_full_view((w, h), size)
+            elif zoom == 'one':
+                p.zoom_pan_matrix = immvision.make_zoom_pan_matrix_scale_one((w, h), size)
+            elif isinstance(zoom, float):
+                p.zoom_pan_matrix = immvision.make_zoom_pan_matrix((w / 2, h / 2), zoom, size)
+            if zoom == 'keep':
+                p.refresh_image = True
+            immvision.image(f'##texfull{r.id}', img, p)
+            self.pixel_line(img, p.mouse_info, f'{w} x {h} pixels  -  mouse wheel: zoom, drag: pan, Esc: close')
+        imgui.end()
+
+    # -- the textures of a model ----------------------------------------------------------------------------
+    def model_textures_window(self):
+        """Every texture the model in the 3D view uses: thumbnail, size, full-size view, replace (the 3D view
+        follows)."""
+        st = self.model_tex
+        if not st:
+            return
+        d = self.doc_by_uid(st['doc'])
+        res = self.model.get('result')
+        if d is None or not res or res[0] != 'ok' or (self.model.get('key') or (None, None))[1] != st['rid']:
+            self.model_tex = None
+            return
+        meshes = res[1]
+        roles = {}
+        for m in meshes:
+            for tid, role in ((m.texture, 'colour'), (getattr(m, 'normal_tex', None), 'normal'),
+                              (getattr(m, 'spec_tex', None), 'specular'), (getattr(m, 'lights_tex', None), 'lights')):
+                if tid:
+                    roles.setdefault(tid, set()).add(role)
+        vp = imgui.get_main_viewport()
+        imgui.set_next_window_pos(imgui.ImVec2(vp.work_pos.x + vp.work_size.x / 2, vp.work_pos.y + vp.work_size.y / 2),
+                                  imgui.Cond_.first_use_ever, imgui.ImVec2(0.5, 0.5))
+        imgui.set_next_window_size(imgui.ImVec2(620, 600), imgui.Cond_.first_use_ever)
+        if st.get('focus'):
+            imgui.set_next_window_focus()
+            st['focus'] = False
+        _, keep = imgui.begin(f'Textures of {self.display_name(d, d.b.find(st["rid"]))[0]}###modeltex', True,
+                              imgui.WindowFlags_.no_collapse)
+        if not keep:
+            imgui.end()
+            self.model_tex = None
+            return
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_disabled('Replace swaps a texture in its bundle (Ctrl+Z undoes, Save keeps it); the 3D view follows. '
+                            'Textures in bundles that are not open (VEHICLETEX, ...) need Open first.')
+        imgui.pop_text_wrap_pos()
+        root = roots.root_for(d.path, d.b.platform)
+        bundles = self.model_bundles(d)
+        flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.scroll_y
+        if imgui.begin_table('mtexw', 3, flags):
+            imgui.table_setup_column('', imgui.TableColumnFlags_.width_fixed, 72)
+            imgui.table_setup_column('Texture', imgui.TableColumnFlags_.width_stretch)
+            imgui.table_setup_column('', imgui.TableColumnFlags_.width_fixed, 150)
+            for k, (tid, rl) in enumerate(sorted(roles.items(), key=lambda x: (sorted(x[1]), x[0]))):
+                imgui.table_next_row()
+                imgui.table_next_column()
+                od, orr = self.where(tid)
+                tb, tr = (od.b, orr) if orr is not None else self.mesh_lib.find(tid, bundles, root)
+                if tr is not None and tr.type == T_TEXTURE:
+                    gl = self.thumbs.get(('mt', tid, id(tr.data(0)), id(tr.data(tb.gfx_chunk))), tr, tb.platform,
+                                         opaque='normal' in rl)
+                    if gl is not None:
+                        self.thumbs.draw(gl, 64)
+                    else:
+                        imgui.dummy(imgui.ImVec2(64, 64))
+                else:
+                    imgui.dummy(imgui.ImVec2(64, 64))
+                imgui.table_next_column()
+                if orr is not None:
+                    imgui.text(self.display_name(od, orr)[0])
+                else:
+                    full = self.names.exact.get(tid)
+                    imgui.text(N.short(full) if full else ops.id_text(tid))
+                imgui.text_disabled(', '.join(sorted(rl)) + (f'  -  {raster.info(tr, tb.platform).describe()}'
+                                                             if tr is not None else '  -  not found'))
+                if orr is None and tb is not None:
+                    imgui.text_disabled(f'in {os.path.basename(tb.path or "")} (not open)')
+                imgui.table_next_column()
+                if orr is not None:
+                    if imgui.small_button(f'View##mv{k}'):
+                        self.open_texture_window(od, orr)
+                    imgui.same_line()
+                    if imgui.small_button(f'Replace...##mr{k}') and not od.b.truncated:
+                        self.action_replace(od, orr)
+                    imgui.same_line()
+                self.locate(tid, f'mtw{k}', tb.path if tb is not None else None)
+            imgui.end_table()
+        imgui.end()
 
     def wave_audio(self, d, r):
         """(int16 audio, rate, header, stream file) of a Wave resource, cached (decodes on this thread)."""
@@ -1982,14 +2224,28 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         b, r = self.mesh_lib.find(tid, self.model_bundles(d), roots.root_for(d.path, d.b.platform))
         if r is None or r.type != T_TEXTURE:
             return None
+        # the same texture data gives the same image object (the 3D view uploads only changed ones); the entry
+        # keeps the data alive so that its id is not reused
+        d0, px = r.data(0), r.data(b.gfx_chunk)
+        key = (tid, id(d0), id(px), max_size)
+        with self.tex_cache_lock:
+            hit = self.tex_cache.get(key)
+            if hit is not None:
+                self.tex_cache.move_to_end(key)
+                return hit[0]
         try:
             inf = raster.info(r, b.platform)
             mip = 0
             while mip + 1 < inf.mips and max(inf.w >> mip, inf.h >> mip) > max_size:
                 mip += 1
-            return raster.decode(r, b.platform, mip)
+            img = raster.decode(r, b.platform, mip)
         except Exception:
             return None
+        with self.tex_cache_lock:
+            self.tex_cache[key] = (img, d0, px)
+            while len(self.tex_cache) > 96:
+                self.tex_cache.popitem(last=False)
+        return img
 
     def model_view(self, d, r):
         st = self.model
@@ -1998,7 +2254,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         cmr = mesh.vgs_control_mesh(d.b, r) if r.type == mesh.T_VGS else None
         cm = bool(st['cm'] and cmr is not None)
         # the car is drawn from its renderables, materials, ...: an edit of any of them (FBX import) re-reads it
-        key = (d.uid, r.id, (id(r.data(0)), d.edits), st['lod'], show, nb, cm, id(cmr.data(0)) if cm else 0)
+        key = (d.uid, r.id, (id(r.data(0)), d.edits, self.edit_gen), st['lod'], show, nb, cm,
+               id(cmr.data(0)) if cm else 0)
         if st['key'] != key:
             st['key'] = key
             st['result'] = None
@@ -2200,6 +2457,11 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             if ch:
                 on[0] = 1.0 if br else 0.0
             imgui.same_line()
+        if imgui.button('Textures...'):
+            self.model_tex = {'doc': d.uid, 'rid': r.id, 'focus': True}
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('Every texture of this model: view at full size, replace (the 3D view follows)')
+        imgui.same_line()
         if imgui.button('Export glTF...'):             # own row: the view toolbar above is full
             self.action_export(d, r, 'glb')
         imgui.same_line()
@@ -2414,6 +2676,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                     imgui.text(nm)
                     if tb is not None and orr is None:
                         imgui.text_disabled(f'in {os.path.basename(tb.path or "")}')
+                    if orr is not None and orr.type == T_TEXTURE:
+                        if imgui.small_button(f'View##mtv{k}'):
+                            self.open_texture_window(od, orr)
+                        imgui.same_line()
+                        if imgui.small_button(f'Replace...##mtr{k}') and not od.b.truncated:
+                            self.action_replace(od, orr)
                 else:
                     imgui.text_disabled('none')
                 imgui.table_next_column()
@@ -3737,7 +4005,8 @@ Home > Find names (or ... > Find names) scans the game folders once to collect t
 folder too if you have it (its debug data names many retail resources). Hover a name for its source.
 
 Browse: Details or Large icons view (textures show thumbnails), search box, Sort, Back / Forward / Up
-(Alt+Left / Alt+Right / Alt+Up). The pane on the right shows the selected resource: textures (zoom, mips,
+(Alt+Left / Alt+Right / Alt+Up). The pane on the right shows the selected resource: textures (Full size or a
+double click shows one at its full resolution; Replace swaps it for an image of any size; zoom, mips,
 channels), Genesys objects (every field, editable), Genesys types, text files, the game's strings, colour
 cubes, imports and the raw bytes (Hex). Genesys field names are hashes in the data: Find names recovers their real
 names (hover a field for its source); right click a field to name it yourself (the box shows whether your name is
@@ -3756,7 +4025,8 @@ Copy and paste, drag and drop (like Explorer):
 - drag resources onto another bundle's tab (or its entry in the navigation pane) to copy them;
 - drag resources out of the window into Explorer to save them (textures as PNG or DDS: ... > Options).
 
-Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms), LOD
+Models (Renderable, Model): a 3D view with textures (left drag turns, right drag moves, wheel zooms); Textures...
+lists the model's textures to view at full size or replace (the view follows); LOD
 choice for models; Shaded shows the materials as the game shades them (normal and specular maps, roughness,
 the channels each shader reads, ambient occlusion, clear-coated car paint in the colour chosen next to Export, see-through glass with
 reflections, tinted tail-light glass, and the lamps: Lights / Brake light the car's light masks in the colours
