@@ -592,6 +592,15 @@ def convert_wave(c, src_e, dst_e):
         return out + b'\0' * ((-len(out)) % 16)
     if dst_e == '>' and src_e == '<':
         struct.pack_into('>I', hdr, 4, 0)
+    if dst_e == '<' and src_e == '>':
+        # PS3 memory sounds: 0x04 = header + stream rounded up to 128, 0x1C = the size of PS3-only data after it.
+        # Every PC wave has 0 in both and nothing after the stream (verified on all 7539): keeping them made
+        # converted sounds crash the PC game.
+        struct.pack_into('<I', hdr, 0x04, 0)
+        struct.pack_into('<I', hdr, 0x1C, 0)
+        body = bytes(c[WAVE_HEADER:WAVE_HEADER + f['size']]) if f['size'] else bytes(c[WAVE_HEADER:])
+        out = bytes(hdr) + body
+        return out + b'\0' * ((-len(out)) % 16)
     return bytes(hdr) + bytes(c[WAVE_HEADER:])
 
 

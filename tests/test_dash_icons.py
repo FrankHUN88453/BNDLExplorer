@@ -73,8 +73,13 @@ class DashboardIconTests(unittest.TestCase):
     def test_home_navigation_returns_to_app_home(self):
         dashboard = new_ui.Dashboard.__new__(new_ui.Dashboard)
         dashboard.app = Mock()
+        dashboard.deferred = []
 
         dashboard.navigate_home()
+        # not while the frame is drawn (that aborted the app): at the start of the next frame
+        dashboard.app.go_folder.assert_not_called()
+        for fn, args in dashboard.deferred:
+            fn(*args)
 
         dashboard.app.go_folder.assert_called_once_with(None)
 

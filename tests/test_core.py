@@ -90,6 +90,74 @@ def test_change_id(path):
     check(nb.find(0x7F000000000000AA) is not None and nb.find(target) is None, 'changed id saved')
 
 
+def test_dat(path):
+    """Raw resource files (.dat, Bundle Manager style): a resource written as XX_XX_XX_XX.dat loads back with its id,
+    type and import table; ids with their halves swapped by a hand conversion are repaired; a table that cannot
+    end the file is reported; a GenesysObject .dat reads with the bundle's types."""
+    from bndlx import datfile, genesys
+    b = Bundle.open(path)
+    T = genesys.TypeDB()
+    T.add_bundle(b)
+    r = next(x for x in b.resources if x.type == 0x15 and x.import_count >= 2 and x.id >> 56 == 1)
+    low = r.id & 0xFFFFFFFF
+    p = os.path.join(TMP, '_'.join(f'{x:02x}' for x in low.to_bytes(4, 'little')) + '.dat')
+    with open(p, 'wb') as f:
+        f.write(bytes(r.data(0)))
+    r2, notes = datfile.load(p, b)
+    same = (r2.id == r.id and r2.type == r.type and bytes(r2.data(0)) == bytes(r.data(0))
+            and [(i.id, i.offset) for i in r2.imports()] == [(i.id, i.offset) for i in r.imports()] and not notes
+            and not datfile.check(b, T, r2))
+    bad = bytearray(r.data(0))                 # the id halves swapped as a hand conversion from PS3 does
+    for i in range(r.import_count):
+        o = r.import_offset + 16 * i
+        rid_i = struct.unpack_from('<Q', bad, o)[0]
+        if rid_i >> 32 == 0x01000000:          # 01000000_xxxxxxxx -> 00000001_xxxxxxxx
+            struct.pack_into('<Q', bad, o, (1 << 32) | (rid_i & 0xFFFFFFFF))
+    with open(p, 'wb') as f:
+        f.write(bytes(bad))
+    r3, notes3 = datfile.load(p, b)
+    with open(p, 'wb') as f:
+        f.write(bytes(r.data(0)) + b'xy')
+    _, notes4 = datfile.load(p, b)
+    os.remove(p)
+    from bndlx import ops
+    far = r.copy()
+    far.stream = 7                             # a stream index this bundle does not have
+    ops.fit_stream(b, far)
+    streams = max(1, len(b.stream_names()))
+    check(far.stream < streams, f'a resource from another bundle goes into one of the {streams} stream(s) of '
+                                f'this bundle (index {far.stream})')
+    check(same and [(i.id, i.offset) for i in r3.imports()] == [(i.id, i.offset) for i in r.imports()]
+          and any('repaired' in n for n in notes3) and any('multiple of 16' in n for n in notes4),
+          f'.dat import: {ops_id(r.id)} round trip with {r.import_count} imports; swapped id halves repaired; '
+          'a damaged table reported')
+
+
+def ops_id(rid):
+    return f'{rid:#018x}'
+
+
+def test_wave_convert(path):
+    """PS3 sounds converted for PC have the PC wave layout: 0x04 and 0x1C zero (PS3 memory size / size of the
+    PS3-only data after the stream) and nothing after the stream; the sound itself is unchanged."""
+    from bndlx import eal3
+    b = Bundle.open(path)
+    ok = n = 0
+    for r in b.resources:
+        if r.type != 0x81:
+            continue
+        c = bytes(r.data(0))
+        f = eal3.wave_fields(c, '>')
+        if f['kind'] != 'memory':
+            continue
+        n += 1
+        pc = eal3.convert_wave(c, '>', '<')
+        ok += (struct.unpack_from('<I', pc, 4)[0] == 0 and struct.unpack_from('<I', pc, 0x1C)[0] == 0
+               and len(pc) == (0x80 + f['size'] + 15) // 16 * 16
+               and eal3.wave_stream(pc, '<') == eal3.wave_stream(c, '>'))
+    check(n and ok == n, f'PS3 sounds converted to the PC wave layout: {ok}/{n} ({os.path.basename(path)})')
+
+
 def test_convert(path):
     b = Bundle.open(path)
     other = 'PC' if b.platform == 'PS3' else 'PS3'
@@ -876,6 +944,7 @@ def main():
         test_vehiclelist(os.path.join(PC, 'VEHICLES', 'VEHICLELIST.BNDL'))
         test_car(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_gnames(PC)
+        test_dat(os.path.join(PC, 'GAMELOGIC', 'WEAPONS', '457359.BNDL'))
         test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
         test_animations(PC)
@@ -891,6 +960,7 @@ def main():
         test_edits(os.path.join(PS3, 'GLOBALEFFECTS.BNDL'))
         test_convert(os.path.join(PS3, 'HAWAII', 'ENVIRONMENT.BNDL'))
         test_convert(os.path.join(PS3, 'POSTFX.BNDL'))
+        test_wave_convert(os.path.join(PS3, 'GAMELOGIC', 'WEAPONS', '457359.BNDL'))
         test_strings(os.path.join(PS3, 'UI', 'LANGUAGE', '0001.BNDL'))
         test_sounds(os.path.join(PS3, 'UI', 'SCREENS2', 'BLACKLISTHUD.BNDL'))
         test_models(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))

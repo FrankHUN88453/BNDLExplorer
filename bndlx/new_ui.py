@@ -206,6 +206,9 @@ class Dashboard:
 
     def __init__(self, app):
         self.app = app
+        self.deferred = []               # navigation asked for while drawing: done at the start of the next frame
+        self.hex_links = {}              # Hex Editor file of a resource chunk -> (doc uid, resource id, chunk)
+        self.app.dashboard = self
         self.app.dashboard_icons = False
         self.styled = False
         self.loading_screen_enabled = True
@@ -704,7 +707,7 @@ class Dashboard:
                     f'{icon}##collapsed-bundle-{document.uid}',
                     imgui.ImVec2(icon_width, 34),
                 ):
-                    a.show_doc(document)
+                    self.defer(a.show_doc, document)
                     a.set_type_filter(document, None)
                     imgui.open_popup(popup_id)
                 if imgui.is_item_hovered(imgui.HoveredFlags_.delay_normal):
@@ -729,7 +732,7 @@ class Dashboard:
                             f'{type_name(type_id)}  {counts[type_id]}##flyout-{document.uid}-{type_id}',
                             selected,
                         )[0]:
-                            a.show_doc(document)
+                            self.defer(a.show_doc, document)
                             a.set_type_filter(document, type_id)
                     imgui.end_popup()
 
@@ -742,7 +745,7 @@ class Dashboard:
                     f'{icon}##collapsed-folder-{index}',
                     imgui.ImVec2(icon_width, 34),
                 ):
-                    a.go_folder(path)
+                    self.defer(a.go_folder, path)
                 if imgui.is_item_hovered(imgui.HoveredFlags_.delay_normal):
                     imgui.set_tooltip(os.path.basename(path.rstrip('\\/')) or path)
 
@@ -937,6 +940,9 @@ class Dashboard:
             self.styled = True
         if self.loading_screen_enabled and self.draw_loading_screen():
             return
+        pending, self.deferred = self.deferred, []
+        for fn, args in pending:
+            fn(*args)
         a.pump_job()
         a.update_roots()
         a.pump_drops()
@@ -1065,7 +1071,7 @@ class Dashboard:
         imgui.end_child()
         self.draw_frame_light(card_pos, imgui.ImVec2(center_w, height))
 
-        if has_inspector:
+        if has_inspector and a.cur is not None:
             imgui.same_line(0, gap)
             inspector_delta = self.drag_splitter('dashboard-inspector', height)
             if inspector_delta:
@@ -1300,8 +1306,47 @@ class Dashboard:
         self.workspace_transition_started = now
         self.content_transition_started = now
 
-    def _open_hex_document(self):
-        path = filedialog.open_file('Open file in Hex Editor', self.app.cfg.get('last_bundle', ''), filedialog.ANY)
+    def open_resource_in_hex(self, d, r, k):
+        """Edit chunk k of a resource in the Hex Editor workspace (a working file; Save writes it back into the
+        resource, undoable with Ctrl+Z in the bundle)."""
+        folder = os.path.join(app_module.config_dir(), 'hexedit')
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f'{os.path.splitext(d.name)[0]}_{r.id:016X}_chunk{k}.bin')
+        stale = next((x for x in self.hex_documents if os.path.normcase(x.path) == os.path.normcase(path)), None)
+        if stale is not None:                # start again from the resource as it is now
+            stale.close()
+            self.hex_documents.remove(stale)
+            if self.hex_document is stale:
+                self.hex_document = None
+        with open(path, 'wb') as f:
+            f.write(bytes(r.data(k)))
+        self.hex_links[os.path.normcase(os.path.abspath(path))] = (d.uid, r.id, k)
+        self._open_hex_document(path)
+        self.activate_workspace('experimental', imgui.get_time())
+        self.hex_status = (f'Chunk {k} of {r.id:#x} ({d.name}): Save writes it back into the resource '
+                           '(then save the bundle).')
+
+    def _write_back_hex(self, saved_path):
+        """A saved Hex Editor file that is a resource chunk: put it back into the resource."""
+        link = self.hex_links.get(os.path.normcase(os.path.abspath(saved_path)))
+        if link is None:
+            return None
+        d = self.app.doc_by_uid(link[0])
+        r = d.b.find(link[1]) if d is not None else None
+        if r is None:
+            return 'the bundle or resource is not open any more: the edit stays in the file only'
+        with open(saved_path, 'rb') as f:
+            data = f.read()
+        if data == bytes(r.data(link[2])):
+            return 'no change'
+        d.checkpoint(f'hex edit {r.id:#x}', [r.id])
+        r.set_data(link[2], data)
+        self.app.changed(d, r)
+        return f'written back into {r.id:#x} in {d.name} (Ctrl+Z there undoes it; save the bundle to keep it)'
+
+    def _open_hex_document(self, path=None):
+        path = path or filedialog.open_file('Open file in Hex Editor', self.app.cfg.get('last_bundle', ''),
+                                            filedialog.ANY)
         if not path:
             return
         try:
@@ -1438,6 +1483,9 @@ class Dashboard:
                 return
         def completed(saved_path):
             self.hex_status = f'Saved {saved_path}.'
+            back = self._write_back_hex(saved_path)
+            if back:
+                self.hex_status += f' Resource chunk {back}.'
 
         self.app.run_job(
             f'Saving {os.path.basename(path)}...',
@@ -2369,7 +2417,7 @@ class Dashboard:
                 )
                 self.nav_item(f'bundle:{d.uid}', bundle_selected, bundle_clicked)
                 if bundle_clicked:
-                    a.show_doc(d)
+                    self.defer(a.show_doc, d)
                     a.set_type_filter(d, None)
                 self.selected_accent(a.cur is d)
                 a.drop_on(d)
@@ -2424,7 +2472,7 @@ class Dashboard:
             )
             self.nav_item(f'folder:{os.path.normcase(path)}', selected, folder_clicked)
             if folder_clicked:
-                a.go_folder(path)
+                self.defer(a.go_folder, path)
             self.selected_accent(selected)
             if imgui.is_item_hovered(imgui.HoveredFlags_.delay_normal):
                 imgui.set_tooltip(path)
@@ -2458,8 +2506,14 @@ class Dashboard:
         imgui.end_child()
         imgui.pop_style_var(2)
 
+    def defer(self, fn, *args):
+        """Do fn(*args) at the start of the next frame. Changing the open bundle / folder while the frame is being
+        drawn left the panels drawn for the old one half done (an ImGui child never ended: the app aborted, e.g.
+        on Home while a bundle was open)."""
+        self.deferred.append((fn, args))
+
     def navigate_home(self):
-        self.app.go_folder(None)
+        self.defer(self.app.go_folder, None)
 
     def main_panel(self):
         a = self.app
@@ -2503,7 +2557,7 @@ class Dashboard:
                                     imgui.SelectableFlags_.span_all_columns
                                     | imgui.SelectableFlags_.allow_double_click)[0]:
                     if imgui.is_mouse_double_clicked(0):
-                        a.open_path(path)
+                        self.defer(a.open_path, path)
                 imgui.table_next_column()
                 imgui.text_disabled(os.path.dirname(path))
                 imgui.table_next_column()
@@ -2703,7 +2757,7 @@ class Dashboard:
                 self.click_effects[row_key] = (now, mouse.x, mouse.y)
                 browser.sel = {full}
                 if imgui.is_mouse_double_clicked(0):
-                    a.go_folder(full) if is_dir else a.open_path(full)
+                    self.defer(a.go_folder if is_dir else a.open_path, full)
             self.draw_click_effect(row_key, item_min, item_max)
             self.selected_accent(selected)
             imgui.table_next_column()
@@ -2757,9 +2811,24 @@ def run(paths=(), screenshot=None, frames=12, select=None, tab=None, expand=Fals
     params = app_module.runner_params(app)
     params.callbacks.setup_imgui_style = apply_style
     frame_count = [0]
+    errors = {'last': None}
 
     def show_gui():
-        dashboard.gui()
+        if errors['last'] is None:
+            # a frame that fails half way must not abort the app: ImGui closes what was left open and logs it
+            io = imgui.get_io()
+            io.config_error_recovery = True
+            io.config_error_recovery_enable_assert = False
+            io.config_error_recovery_enable_tooltip = False
+            errors['last'] = 0.0
+        try:
+            dashboard.gui()
+        except Exception as e:
+            app_module.log_error()
+            now = imgui.get_time()
+            if now - errors['last'] > 2.0:              # one message, not one per frame
+                app.status = f'Error (written to {app_module.ERROR_LOG}): {type(e).__name__}: {e}'
+            errors['last'] = now
         if screenshot:
             ready = app.preview_ready()
             if ready and app.job is None and not app.thumbs.pending:

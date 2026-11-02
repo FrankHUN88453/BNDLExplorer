@@ -352,15 +352,37 @@ def export_bres(b, res, path):
     write_file(path, resfile.dump(res, b.platform, TOOL))
 
 
+def fit_stream(b, res):
+    """Put a resource from another bundle into one of b's streams: a stream index b does not have (or any but 0
+    in a single-stream bundle) becomes the stream b keeps resources of that type in, else 0."""
+    from .bundle import F_MULTISTREAM
+    count = max(1, len(b.stream_names())) if b.flags & F_MULTISTREAM else 1
+    if res.stream < count:
+        return res
+    same = {}
+    for r in b.resources:
+        if r.type == res.type:
+            same[r.stream] = same.get(r.stream, 0) + 1
+    res.stream = max(same, key=same.get) if same else 0
+    return res
+
+
+def unused(b, ids):
+    """Of `ids`, those no resource of bundle b imports (the game loads them but nothing uses them until something
+    refers to them; other bundles may still)."""
+    used = {i.id for r in b.resources for i in r.imports()}
+    return [rid for rid in ids if rid not in used]
+
+
 def adopt(b, res, platform, types):
     """Resource from another bundle / file ready to be added to bundle b (converted when the platform differs)."""
     if platform != b.platform:
         c = convert.convert_resource(res, platform, b.platform, types)
         c.us_bits, c.cs_bits = b.default_bits()
-        return c
+        return fit_stream(b, c)
     c = res.copy()
     c.modified = True
-    return c
+    return fit_stream(b, c)
 
 
 def import_bres(b, data, types):

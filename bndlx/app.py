@@ -25,6 +25,7 @@ from . import spsfile
 from . import platetext
 from . import ginsu
 from . import gnames
+from . import datfile
 from . import genesys_insight
 from . import knownids
 from . import anim
@@ -896,8 +897,25 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
         if d is None:
             return
         if paths is None:
-            paths = filedialog.open_files('Import resources (.bres)', self.cfg.get('last_import', ''), filedialog.RES)
+            paths = filedialog.open_files('Import resources (.bres, .dat)', self.cfg.get('last_import', ''),
+                                          filedialog.RES)
         if not paths:
+            return
+        dats = [p for p in paths if p.lower().endswith('.dat')]
+        if dats:
+            rows = []
+            for p in dats:
+                rid = datfile.id_from_name(p, d.b)
+                try:
+                    with open(p, 'rb') as f:
+                        t = datfile.guess_type(f.read(), rid, d.b) if rid is not None else None
+                except OSError:
+                    t = None
+                rows.append({'path': p, 'id': f'{rid:016X}' if rid is not None else '',
+                             'type': datfile.CHOICES.index(t) if t in datfile.CHOICES else 0,
+                             'other': t if t is not None and t not in datfile.CHOICES else None})
+            self.modal = {'kind': 'dat_import', 'doc': d.uid, 'rows': rows,
+                          'bres': [p for p in paths if p not in dats]}
             return
         news = []
         for p in paths:
@@ -923,6 +941,17 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
         if any(r.type == T_GTYPE for r in news):
             self.rebuild_types()
         self.status = f'{len(news)} resource(s) added to {d.name} ({len(existing)} replaced). Ctrl+Z to undo.'
+        fresh = [r.id for r in news if r.id not in existing and r.type not in (T_GTYPE,)]
+        idle = ops.unused(d.b, fresh)
+        if idle:
+            self.modal = {'kind': 'message', 'title': 'Resources added', 'text':
+                          f'{len(news)} resource(s) added to {d.name} (sorted in with the others, as the game '
+                          f'expects).' + chr(10) + chr(10) + f'{len(idle)} of them are not used by any resource of '
+                          f'this bundle: ' + ', '.join(ops.id_text(x) for x in idle[:8])
+                          + (' ...' if len(idle) > 8 else '') + '. The game loads them with the bundle but only '
+                          'uses a resource something refers to: point an import at it (Imports tab of the resource '
+                          'that should use it), or replace an existing resource instead of adding a new one. '
+                          '(Resources of other bundles may refer to it too.)'}
 
     def copy_between(self, src, dst, ids):
         news, failed = [], []
@@ -1057,14 +1086,26 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             if os.path.splitext(p)[1].lower() == '.bin':
                 self.modal = {'kind': 'pick_chunk', 'doc': d.uid, 'rid': target.id, 'path': p}
                 return
+            if os.path.splitext(p)[1].lower() == '.dat':       # raw resource: this resource's content
+                try:
+                    r, notes = datfile.load(p, d.b, target.id, target.type)
+                except (ValueError, OSError) as ex:
+                    self.status = f'{os.path.basename(p)}: {ex}'
+                    return
+                self._confirmed_replace = True
+                self.add_resources(d, [r], f'replace {target.id:#x} from {os.path.basename(p)}')
+                notes += datfile.check(d.b, self.types, r) if r.type in (T_GTYPE, T_GOBJECT) else []
+                if notes:
+                    self.modal = {'kind': 'message', 'title': 'Import .dat', 'text': chr(10).join(notes)}
+                return
             self.focus = (d.uid, target.id)
             d.sel = {target.id}
             self.replace_from_file(d, target, p)
             return
-        bres = [p for p, m in others if m == resfile.MAGIC]
+        bres = [p for p, m in others if m == resfile.MAGIC or p.lower().endswith('.dat')]
         if bres:
             self.action_import_resources(d, bres)
-        rest = [p for p, m in others if m != resfile.MAGIC]
+        rest = [p for p, m in others if m != resfile.MAGIC and not p.lower().endswith('.dat')]
         matched = 0
         for p in rest:
             rid = ops.id_from_filename(p)
@@ -1625,6 +1666,14 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             if imgui.radio_button(f'Chunk {k} ({human(sizes[k])})', self.hex_chunk == k):
                 self.hex_chunk = k
         data = r.data(self.hex_chunk)
+        dash = getattr(self, 'dashboard', None)
+        if dash is not None:
+            imgui.same_line()
+            if imgui.button('Edit in Hex Editor...') and not d.b.truncated:
+                dash.open_resource_in_hex(d, r, self.hex_chunk)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Open this chunk in the Hex Editor (click bytes to edit, insert / delete, search, '
+                                  'compare); its Save writes the chunk back into the resource')
         imgui.set_next_item_width(90)
         _, self.hex_patch[0] = imgui.input_text_with_hint('##hexoff', 'offset (hex)', self.hex_patch[0])
         imgui.same_line()
@@ -4923,7 +4972,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
                  'confirm_close': 'Unsaved changes', 'confirm_exit': 'Unsaved changes',
                  'confirm_replace': 'Replace resources', 'change_id': 'Duplicate resource' if m.get('dup') else 'Change id',
                  'texture_options': 'Replace texture', 'wave_options': 'Replace sound', 'open_path': 'Open by path', 'find': 'Find', 'goto': 'Go to id',
-                 'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties',
+                 'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties', 'dat_import': 'Import .dat',
                  'plate': 'License plates', 'ginsu_options': 'Replace engine sound',
                  'compare': 'Bundle differences'}.get(m['kind'], 'Message')
         popup = f'{title}###modal'
@@ -5174,6 +5223,57 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             imgui.same_line()
             if imgui.button('Cancel', imgui.ImVec2(120, 0)):
                 close = True
+        elif k == 'dat_import':
+            d = self.doc_by_uid(m['doc'])
+            imgui.push_text_wrap_pos(640)
+            imgui.text_disabled('Raw resources (.dat, as Bundle Manager exports them): chunk 0 with the import table '
+                                'at its end. The id comes from the file name, the type is not stored: check both.')
+            imgui.pop_text_wrap_pos()
+            names = [f'{type_name(t)} ({t:#x})' for t in datfile.CHOICES]
+            for i, row in enumerate(m['rows']):
+                imgui.text(os.path.basename(row['path']))
+                imgui.same_line(220)
+                imgui.set_next_item_width(170)
+                _, row['id'] = imgui.input_text(f'id##dat{i}', row['id'])
+                imgui.same_line()
+                imgui.set_next_item_width(220)
+                if row['other'] is not None:
+                    imgui.text(f'{type_name(row["other"])} (as in the bundle)')
+                else:
+                    _, row['type'] = imgui.combo(f'type##dat{i}', row['type'], names)
+            if imgui.button('Import', imgui.ImVec2(120, 0)) and d is not None:
+                news, notes = [], []
+                for row in m['rows']:
+                    try:
+                        rid = int(row['id'].strip().replace('0x', ''), 16)
+                        t = row['other'] if row['other'] is not None else datfile.CHOICES[row['type']]
+                        r, n = datfile.load(row['path'], d.b, rid, t)
+                        news.append(r)
+                        notes += [f'{os.path.basename(row["path"])}: {x}' for x in n]
+                    except (ValueError, OSError) as ex:
+                        notes.append(f'{os.path.basename(row["path"])}: not imported: {ex}')
+                for p in m['bres']:
+                    try:
+                        with open(p, 'rb') as f:
+                            news.append(ops.import_bres(d.b, f.read(), self.types))
+                    except Exception as ex:
+                        notes.append(f'{os.path.basename(p)}: not imported: {ex}')
+                self.modal = None
+                imgui.close_current_popup()
+                imgui.end_popup()
+                if news:
+                    self._confirmed_replace = True
+                    self.add_resources(d, [ops.fit_stream(d.b, r) for r in news], f'import {len(news)} file(s)')
+                    for r in news:
+                        if r.type in (0x14, 0x15):
+                            notes += [f'{ops.id_text(r.id)}: {x}' for x in datfile.check(d.b, self.types, r)]
+                if notes:
+                    extra = self.modal['text'] + chr(10) + chr(10) if self.modal and self.modal.get('kind') == 'message' else ''
+                    self.modal = {'kind': 'message', 'title': 'Import .dat', 'text': extra + chr(10).join(notes)}
+                return
+            imgui.same_line()
+            if imgui.button('Cancel', imgui.ImVec2(120, 0)):
+                close = True
         elif k == 'pick_chunk':
             d = self.doc_by_uid(m['doc'])
             r = d.b.find(m['rid']) if d else None
@@ -5399,6 +5499,23 @@ Bundle explorer for Need for Speed: Most Wanted (2012): PC retail and PS3 protot
 
 Built with Dear ImGui (imgui-bundle). No game data is included; the program works on your own files.
 Always keep backups of the game files you edit."""
+
+
+ERROR_LOG = os.path.join(config_dir(), 'errors.log')
+
+
+def log_error():
+    """Append the current exception to %APPDATA%\\BNDLExplorer\\errors.log (kept short)."""
+    try:
+        text = f'--- {time.strftime("%Y-%m-%d %H:%M:%S")}  {APP} {VERSION}\n{traceback.format_exc()}\n'
+        old = ''
+        if os.path.isfile(ERROR_LOG):
+            with open(ERROR_LOG, encoding='utf-8', errors='replace') as f:
+                old = f.read()[-200000:]
+        with open(ERROR_LOG, 'w', encoding='utf-8') as f:
+            f.write(old + text)
+    except OSError:
+        pass
 
 
 def runner_params(app, title=f'{APP} {VERSION}'):

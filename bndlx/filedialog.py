@@ -40,7 +40,8 @@ IMAGES = [('Images and DDS (*.png, *.dds, *.tga, *.jpg, *.bmp)', '*.png;*.dds;*.
           ('All files', '*.*')]
 DDS = [('DirectDraw Surface (*.dds)', '*.dds')]
 PNG = [('PNG image (*.png)', '*.png')]
-RES = [('BNDL Explorer resource (*.bres)', '*.bres'), ('All files', '*.*')]
+RES = [('Resource files (*.bres, *.dat)', '*.bres;*.dat'), ('BNDL Explorer resource (*.bres)', '*.bres'),
+       ('Raw resource, Bundle Manager (*.dat)', '*.dat'), ('All files', '*.*')]
 BIN = [('Raw data (*.bin)', '*.bin'), ('All files', '*.*')]
 TEXT = [('Text (*.txt, *.json, *.xml, *.lua)', '*.txt;*.json;*.xml;*.lua'), ('All files', '*.*')]
 CSV = [('CSV (*.csv)', '*.csv'), ('All files', '*.*')]
