@@ -50,7 +50,7 @@ from .restypes import (T_CUBE, T_GOBJECT, T_GTYPE, T_LUA_CODE, T_STRINGS, T_TEXT
                        name as type_name)
 
 APP = 'BNDL Explorer'
-VERSION = '0.25'
+VERSION = '0.26'
 PAYLOAD = 'BNDLX_RES'
 _uid = itertools.count(1)
 

@@ -32,6 +32,8 @@ def main():
         '--collect-all', '_soundfile_data',
         # PyOpenGL for the 3D preview (its platform / array plugins are loaded by name)
         '--collect-submodules', 'OpenGL',
+        # capstone (x86 disassembly in the Genesys inference view): its native capstone.dll
+        '--collect-all', 'capstone',
         '--exclude-module', 'tkinter',
         '--exclude-module', 'matplotlib',
         '--exclude-module', 'scipy',
