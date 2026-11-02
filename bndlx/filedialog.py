@@ -50,6 +50,7 @@ AUDIO = [('Audio (*.wav, *.flac, *.ogg, *.mp3, *.aiff, *.sps)', '*.wav;*.flac;*.
 WAV = [('WAV (*.wav)', '*.wav')]
 FBX = [('FBX (*.fbx)', '*.fbx;*.FBX'), ('All files', '*.*')]
 ANY = [('All files', '*.*')]
+JSON = [('JSON (*.json)', '*.json'), ('All files', '*.*')]
 
 
 def _start(path):

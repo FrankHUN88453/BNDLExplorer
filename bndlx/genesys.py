@@ -62,6 +62,12 @@ class GType:
         return self.fields[i] if 0 <= i < len(self.fields) else None
 
 
+def fixed_pointers(f):
+    """A fixed-size array of pointers to objects (flags 2 | 4, with a used-count field): the only one in the game is
+    ChallengeAction.SpeedRun's 2 Challenge.Location pointers (GAMELOGIC/GAMEMODES.BNDL, the online challenges)."""
+    return f.flags & 6 == 6 and not f.flags & 1
+
+
 def hash_name(h):
     """Short names are stored as ASCII instead of a hash."""
     b = h.to_bytes(4, 'big').lstrip(b'\0')
@@ -84,7 +90,8 @@ def parse_type(res, e):
         np_ = struct.unpack_from(e + 'I', c, npp)[0]
         if np_ < len(c):
             name = c[np_:].split(b'\0')[0].decode('latin1')
-    t = GType(res.id, kind, name, size, al & 0xFF, schema, fields_off, imports.get(4, 0))
+    # alignment (log2): the byte at 0x1F, the same bytes on both platforms (not a u32: PC reads 00 00 00 02)
+    t = GType(res.id, kind, name, size, c[0x1F], schema, fields_off, imports.get(4, 0))
     if kind in (5, 6, 7):
         for i in range(n):
             o = fields_off + i * 0x1C
@@ -142,13 +149,14 @@ class Ref:
 
 class Node:
     """A struct instance: fields {name_hash: value}; locs {name_hash: (absolute offset, Field)}."""
-    __slots__ = ('type', 'fields', 'offset', 'locs')
+    __slots__ = ('type', 'fields', 'offset', 'locs', 'raw')
 
     def __init__(self, type_id, offset):
         self.type = type_id
         self.fields = {}
         self.offset = offset
         self.locs = {}
+        self.raw = None                   # the struct's bytes as read (keeps data the schema does not describe)
 
 
 class MissingType(Exception):
@@ -203,6 +211,7 @@ class Reader:
         if t is None:
             raise MissingType(tid)
         node = Node(tid, o)
+        node.raw = bytes(self.data[o:o + t.size])
         for f in t.fields:
             node.locs[f.name_hash] = (o + f.offset, f)
             node.fields[f.name_hash] = self.read_field(t, f, o)
@@ -236,6 +245,16 @@ class Reader:
             if ptr == 0:
                 return None
             return self.read_elem(f, ft, ptr, single=True)
+        if fixed_pointers(f):
+            out = []
+            for i in range(f.count):
+                po = o + 4 * i
+                if po in self.imports:
+                    out.append(Ref(self.imports[po]))
+                else:
+                    p = self.u32(po)
+                    out.append(self.read_object(p) if p else None)
+            return out
         return self.read_elem(f, ft, o)
 
     def read_elem(self, f, ft, o, single=False):
@@ -405,7 +424,10 @@ def type_layout(res, e):
     L.cover(0, 2)
     L.scalar(2, 2)
     for o in range(4, 0x24, 4):
-        L.scalar(o, 4)
+        if o == 0x1C:
+            L.cover(o, 4)                 # alignment: bytes 00 00 00 n on both platforms, not swapped
+        else:
+            L.scalar(o, 4)
     n = struct.unpack_from(e + 'H', c, 2)[0]
     fields_off = struct.unpack_from(e + 'I', c, 0x0C)[0]
     npp = struct.unpack_from(e + 'I', c, 0x20)[0]
@@ -492,6 +514,13 @@ class ObjectLayout:
                 return
             if ptr:
                 self.elem(f, ft, ptr, single=True)
+            return
+        if fixed_pointers(f):
+            for i in range(f.count):
+                po = o + 4 * i
+                L.scalar(po, 4)
+                if po not in self.imports and self.u32(po):
+                    self.object(self.u32(po))
             return
         self.elem(f, ft, o)
 

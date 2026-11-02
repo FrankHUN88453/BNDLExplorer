@@ -26,6 +26,8 @@ from . import platetext
 from . import ginsu
 from . import gnames
 from . import datfile
+from . import gjson
+from . import gwrite
 from . import genesys_insight
 from . import knownids
 from . import anim
@@ -172,6 +174,7 @@ class Doc:
 
 
 MODEL_IMPORT_TYPES = (0x05, 0x51, 0x106, 0x50)     # Renderable, Model, car, track unit: Import FBX
+EVENT_ID = 0x655d3f5f          # the unique id field of events / challenges (their names: ts_names.EVENT_NAMES)
 
 
 def _clock(seconds):
@@ -4292,25 +4295,47 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             event_catalog = event_data.parse(r.data(0))
         except event_data.EventDataError as exc:
             event_error = str(exc)
-        if event_catalog is not None:
-            self.event_catalog_view(d, r, event_catalog)
-            return
-        if event_error:
-            imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.3, 1.0), event_error)
-            return
         key = (d.uid, r.id, id(r.data(0)), len(self.types.types))
         node = self.gcache.get(key)
         if node is None:
             try:
                 node = genesys.Reader(self.types, d.b.e).read_resource(r)
             except genesys.MissingType as m:
+                if event_catalog is not None:
+                    self.event_catalog_view(d, r, event_catalog)
+                    return
                 imgui.text_wrapped(f'This object uses the Genesys type {m.args[0]:#x}, which is not in any open bundle. '
                                    'Open the bundle that holds its types (usually the same folder) to see the fields.')
                 return
+            except (struct.error, ValueError, IndexError, UnicodeDecodeError) as ex:
+                if event_catalog is not None:
+                    self.event_catalog_view(d, r, event_catalog)
+                    return
+                imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.3, 1.0), f'This object cannot be read: {ex}')
+                return
             self.gcache[key] = node
+        if event_error:
+            imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.3, 1.0), f'Event catalog: {event_error}')
+        self._obj_events = event_catalog is not None
         imgui.text(self.types.name(node.type))
         imgui.same_line()
         imgui.text_disabled('(Fields edits values; Folder shows nested structs and referenced resources)')
+        rewritable = self.genesys_rewritable(d, r)
+        if imgui.small_button('Export JSON...'):
+            self.genesys_export_json(d, r, node)
+        imgui.same_line()
+        if imgui.small_button('Import JSON...') and not d.b.truncated:
+            self.genesys_import_json(d, r)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('Set this object\'s fields from a JSON file (as Export JSON writes it; fields left out '
+                              'stay as they are, a longer array copies its last element first)')
+        imgui.same_line()
+        if rewritable:
+            imgui.text_disabled('arrays: + adds an element (a copy of the last), x removes one')
+        else:
+            imgui.text_disabled('(this object cannot be rewritten exactly: arrays and longer texts stay fixed)')
+        self._obj_rewritable = rewritable
+        self._obj_edit = None
         if not self.labels.found:
             imgui.push_text_wrap_pos(0.0)
             imgui.text_colored(imgui.ImVec4(1.0, 0.75, 0.3, 1.0), 'Bundled source maps name many fields already; '
@@ -4329,6 +4354,10 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
                     imgui.table_headers_row()
                     self.node_rows(d, r, node, 'n')
                     imgui.end_table()
+                if self._obj_edit is not None:          # after the rows: the tree is not changed while drawn
+                    fn, desc = self._obj_edit
+                    self._obj_edit = None
+                    self.genesys_rewrite(d, r, node, fn, desc)
                 self.end_tab_content_transition(animated)
                 imgui.end_tab_item()
             if imgui.begin_tab_item('Folder')[0]:
@@ -4339,6 +4368,11 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             if imgui.begin_tab_item('Inference')[0]:
                 animated = self.begin_tab_content_transition('objviews', 'inference')
                 self.genesys_prediction_view(d, r, self.types.get(node.type), node)
+                self.end_tab_content_transition(animated)
+                imgui.end_tab_item()
+            if event_catalog is not None and imgui.begin_tab_item('Event catalog')[0]:
+                animated = self.begin_tab_content_transition('objviews', 'events')
+                self.event_catalog_view(d, r, event_catalog)
                 self.end_tab_content_transition(animated)
                 imgui.end_tab_item()
             imgui.end_tab_bar()
@@ -4752,6 +4786,15 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             self.label_menu(f.name_hash, path)
             imgui.table_next_column()
             imgui.text_disabled(f'[{n}]' if n is not None else '{...}')
+            edit = (isinstance(v, list) and gjson.resizable(f) and getattr(self, '_obj_rewritable', False)
+                    and not d.b.truncated)
+            if edit:
+                imgui.same_line()
+                if imgui.small_button(f'+##add{path}'):
+                    self._obj_edit = (lambda arr=v, fld=f: gjson.add_element(self.types, fld, arr),
+                                      f'add an element to {name}')
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip('Add an element (a copy of the last one) and rewrite the object')
             imgui.table_next_column()
             imgui.text_disabled(tname)
             if opened:
@@ -4764,14 +4807,34 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
                             imgui.table_next_column()
                             if self.expand_all and i < 2:
                                 imgui.set_next_item_open(True, imgui.Cond_.always)
-                            op = imgui.tree_node_ex(f'[{i}] {self.types.name(x.type)}##{path}.{i}', imgui.TreeNodeFlags_.span_full_width)
+                            hint = ''
+                            if getattr(self, '_obj_events', False):     # events / challenges: their name by id
+                                uid = x.fields.get(EVENT_ID)
+                                if isinstance(uid, int) and uid:
+                                    nm = event_data.EVENT_NAMES.get(uid) or event_data.EVENT_NAMES.get(uid - 1)
+                                    hint = f'  {nm}' if nm else ''
+                            op = imgui.tree_node_ex(f'[{i}] {self.types.name(x.type)}{hint}##{path}.{i}',
+                                                    imgui.TreeNodeFlags_.span_full_width)
                             imgui.table_next_column()
+                            if edit:
+                                if imgui.small_button(f'duplicate##dup{path}.{i}'):
+                                    self._obj_edit = (lambda arr=v, k=i: arr.insert(k + 1, gjson.clone(arr[k])),
+                                                      f'duplicate element {i} of {name}')
+                                if imgui.is_item_hovered():
+                                    imgui.set_tooltip('Insert a copy of this element after it (ids and names inside '
+                                                      'stay the same: change them to make it a new entry)')
                             imgui.table_next_column()
+                            if edit and imgui.small_button(f'x##rm{path}.{i}'):
+                                self._obj_edit = (lambda arr=v, k=i: arr.pop(k), f'remove element {i} of {name}')
                             if op:
                                 self.node_rows(d, r, x, f'{path}.{i}')
                                 imgui.tree_pop()
                         else:
                             self.value_row(d, r, f, x, None, f'{path}.{i}', label=f'[{i}]')
+                            if edit:
+                                imgui.same_line()
+                                if imgui.small_button(f'x##rm{path}.{i}'):
+                                    self._obj_edit = (lambda arr=v, k=i: arr.pop(k), f'remove element {i} of {name}')
                 imgui.tree_pop()
             return
         imgui.tree_node_ex(f'{name}##{path}', imgui.TreeNodeFlags_.leaf | imgui.TreeNodeFlags_.no_tree_push_on_open
@@ -4907,6 +4970,87 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
         self.gcache.clear()
         d.summary.pop(r.id, None)
 
+    # -- Genesys rewriting (gwrite): arrays, longer texts, JSON ------------------------------------------------
+    def genesys_rewritable(self, d, r):
+        """Whether the object re-written unchanged gives its exact bytes (cached)."""
+        key = ('rt', d.uid, r.id, id(r.data(0)), len(self.types.types))
+        hit = self.gcache.get(key)
+        if hit is None:
+            try:
+                hit = gwrite.roundtrips(self.types, r, d.b.e)[1]
+            except Exception:
+                hit = False
+            self.gcache[key] = hit
+        return hit
+
+    def genesys_rewrite(self, d, r, root, mutate, desc):
+        """Change the node tree with mutate(), then write the object again (undoable)."""
+        try:
+            mutate()
+            data, off, cnt = gwrite.write(self.types, d.b.e, root)
+        except Exception as ex:
+            self.gcache.clear()
+            self.status = f'Cannot rewrite {r.id:#x}: {ex}'
+            return False
+        d.checkpoint(desc, [r.id])
+        r.set_data(0, data)
+        r.import_offset, r.import_count = off, cnt
+        self.changed(d, r)
+        self.status = f'{desc[0].upper() + desc[1:]} ({r.id:#x} rewritten; Ctrl+Z to undo).'
+        return True
+
+    def genesys_export_json(self, d, r, node):
+        p = filedialog.save_file('Export as JSON', os.path.join(self.cfg.get('last_export', ''),
+                                                                ops.id_text(r.id) + '.json'), filedialog.JSON)
+        if not p:
+            return
+        self.remember('last_export', os.path.dirname(p))
+        ops.write_file(p, gjson.dumps(self.types, self.labels, node, r.id).encode('utf-8'))
+        self.status = f'{ops.id_text(r.id)} exported as {os.path.basename(p)}.'
+
+    def genesys_import_json(self, d, r):
+        p = filedialog.open_file('Import JSON into this object', self.cfg.get('last_import', ''), filedialog.JSON)
+        if not p:
+            return
+        self.remember('last_import', p)
+        self.genesys_apply_json_file(d, r, p)
+
+    def genesys_apply_json_file(self, d, r, p):
+        import json
+        try:
+            with open(p, encoding='utf-8') as fh:
+                js = json.load(fh)
+            root = genesys.Reader(self.types, d.b.e).read_resource(r)
+        except Exception as ex:
+            self.modal = {'kind': 'message', 'title': 'Import JSON', 'text': f'{os.path.basename(p)}: {ex}'}
+            return False
+        if not self.genesys_rewritable(d, r):
+            self.modal = {'kind': 'message', 'title': 'Import JSON', 'text':
+                          'This object cannot be rewritten exactly (its retail layout is not the writer\'s), so it is '
+                          'not changed. Values can still be edited one by one in the Fields view.'}
+            return False
+        ok = self.genesys_rewrite(d, r, root, lambda: gjson.apply_json(self.types, self.labels, root, js),
+                                  f'import {os.path.basename(p)}')
+        if not ok:
+            self.modal = {'kind': 'message', 'title': 'Import JSON', 'text': self.status}
+        return ok
+
+    @staticmethod
+    def find_text_at(node, off):
+        """(node, field hash) of the text field at absolute offset `off` in a node tree."""
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            for h, (o, f) in n.locs.items():
+                if o == off and f.type_id == genesys.STRINGBASE and not f.flags & 3:
+                    return n, h
+            for v in n.fields.values():
+                if isinstance(v, Node):
+                    stack.append(v)
+                elif isinstance(v, list):
+                    stack.extend(x for x in v if isinstance(x, Node))
+        return None
+
     def write_string(self, d, r, off, text):
         e = d.b.e
         buf = bytearray(r.data(0))
@@ -4920,6 +5064,13 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             self.status = f'Text contains characters not supported by the game: {ex}'
             return False
         new_len = len(raw) + 1
+        if new_len > ln and self.genesys_rewritable(d, r):
+            root = genesys.Reader(self.types, d.b.e).read_resource(r)
+            hit = self.find_text_at(root, off)
+            if hit is not None:
+                node_, fh = hit
+                return self.genesys_rewrite(d, r, root, lambda: node_.fields.__setitem__(fh, text),
+                                            f'edit text at {off:#x}')
         if new_len <= ln:
             buf[off + rel:off + rel + ln] = raw + b'\0' * (ln - len(raw))
         else:

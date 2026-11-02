@@ -133,6 +133,95 @@ def test_dat(path):
           'a damaged table reported')
 
 
+def test_gwrite(path):
+    """Genesys objects written again (gwrite) and as JSON (gjson): every object of the bundle re-written unchanged
+    gives its bytes; an element added to a list of references / of objects reads back, removing it again gives the
+    original bytes; JSON export -> import is exact and an edited value in the JSON lands in the object; a longer
+    text is written. GAMEMODES.BNDL: its largest object (the event list) has SpeedRun's fixed array of pointers."""
+    from bndlx import gjson, gwrite
+    b = Bundle.open(path)
+    T = types_of(b)
+    objs = [r for r in b.resources if r.type == 0x15]
+    good = sum(gwrite.roundtrips(T, r, b.e)[1] for r in objs)
+    check(good == len(objs), f'gwrite: {good}/{len(objs)} objects of {os.path.basename(path)} re-written exactly')
+
+    def array_of(kind_ok):
+        for r in objs:
+            node = genesys.Reader(T, b.e).read_resource(r)
+            for f in T.get(node.type).fields:
+                v = node.fields.get(f.name_hash)
+                if gjson.resizable(f) and isinstance(v, list) and v and kind_ok(f, v):
+                    return r, node, f
+        return None
+
+    for what, pick in (('references', lambda f, v: isinstance(v[0], genesys.Ref)),
+                       ('objects', lambda f, v: f.flags & 16 and isinstance(v[0], genesys.Node))):
+        hit = array_of(pick)
+        if hit is None:
+            continue
+        r, node, f = hit
+        n = len(node.fields[f.name_hash])
+        gjson.add_element(T, f, node.fields[f.name_hash])
+        res = r.copy()
+        gwrite.apply(res, T, b.e, node)
+        back = genesys.Reader(T, b.e).read_resource(res).fields[f.name_hash]
+        last = node.fields[f.name_hash][-1]
+        same_last = (back[-1].id == last.id if isinstance(last, genesys.Ref)
+                     else gjson.to_json(T, None, back[-1]) == gjson.to_json(T, None, back[-2]))
+        node.fields[f.name_hash].pop()
+        again = gwrite.write(T, b.e, node)
+        check(len(back) == n + 1 and same_last and again[0] == bytes(r.data(0)),
+              f'gwrite: {T.name(node.type)} {r.id:#x}: a list of {n} {what} -> {len(back)} read back; '
+              'removed again = the original bytes')
+
+    import json
+    r = next(x for x in objs if gwrite.roundtrips(T, x, b.e)[1] and genesys.Reader(T, b.e).read_resource(x).fields)
+    node = genesys.Reader(T, b.e).read_resource(r)
+    js = json.loads(gjson.dumps(T, None, node, r.id))
+    exact = gwrite.write(T, b.e, node)[0] == bytes(r.data(0))
+    fresh = genesys.Reader(T, b.e).read_resource(r)
+    gjson.apply_json(T, None, fresh, js)
+    exact = exact and gwrite.write(T, b.e, fresh)[0] == bytes(r.data(0))
+    # a float somewhere in the object, edited in the JSON
+    t = T.get(fresh.type)
+    fl = next((f for f in t.fields if T.get(f.type_id) is not None and T.get(f.type_id).kind == 2
+               and not f.flags & 3), None)
+    edited = None
+    if fl is not None:
+        js[gjson.field_key(None, fl)] = 12.5
+        fresh = genesys.Reader(T, b.e).read_resource(r)
+        gjson.apply_json(T, None, fresh, js)
+        res = r.copy()
+        gwrite.apply(res, T, b.e, fresh)
+        edited = genesys.Reader(T, b.e).read_resource(res).fields[fl.name_hash]
+    check(exact and edited in (None, 12.5), f'gjson: {T.name(node.type)} {r.id:#x} JSON export -> import exact, '
+                                            f'an edited float reads back ({edited})')
+    try:
+        gjson.apply_json(T, None, genesys.Reader(T, b.e).read_resource(r), {'no such field': 1})
+        bad = False
+    except gjson.JsonError:
+        bad = True
+    check(bad, 'gjson: an unknown field name in the JSON is an error')
+
+    text = None
+    for x in objs:
+        nd = genesys.Reader(T, b.e).read_resource(x)
+        for f in T.get(nd.type).fields:
+            if f.type_id == genesys.STRINGBASE and not f.flags & 3 and isinstance(nd.fields.get(f.name_hash), str):
+                text = (x, nd, f)
+                break
+        if text:
+            break
+    if text:
+        x, nd, f = text
+        long = (nd.fields[f.name_hash] or '') + '_a_much_longer_text_than_before'
+        nd.fields[f.name_hash] = long
+        res = x.copy()
+        gwrite.apply(res, T, b.e, nd)
+        check(genesys.Reader(T, b.e).read_resource(res).fields[f.name_hash] == long,
+              f'gwrite: a longer text in {T.name(nd.type)} {x.id:#x} reads back')
+
+
 def ops_id(rid):
     return f'{rid:#018x}'
 
@@ -945,6 +1034,9 @@ def main():
         test_car(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_gnames(PC)
         test_dat(os.path.join(PC, 'GAMELOGIC', 'WEAPONS', '457359.BNDL'))
+        test_gwrite(os.path.join(PC, 'GAMELOGIC', 'WEAPONS', '457359.BNDL'))
+        test_gwrite(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'))
+        test_gwrite(os.path.join(PC, 'GAMELOGIC', 'GAMEMODES.BNDL'))
         test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
         test_animations(PC)
