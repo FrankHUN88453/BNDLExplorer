@@ -28,6 +28,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 from . import gnames as gn
 from .labels import config_dir
+from .restypes import T_LUA_CODE, T_TEXT
 
 GC_RE = re.compile(r'^GameChanger \(ID=(\d+),type=(\d+),index=(\d+)\)$')
 PATH_RE = re.compile(r'^(gamedb://.*?)\?ID=(\d+)(.*)$')
@@ -53,8 +54,10 @@ def plausible(name, t):
         return is_path and re.search(r'\.(mb|ma|fbx)\?id=', low) is not None
     if t in (0x205, 0x215, 0x217):
         return is_path
-    if t == 0x70:
+    if t == T_TEXT:
         return low.endswith(('.json', '.lua', '.xml'))
+    if t == T_LUA_CODE:
+        return low.endswith('.lua')
     if t == 0x207:
         return low.endswith('sound')
     if t == 0x82:

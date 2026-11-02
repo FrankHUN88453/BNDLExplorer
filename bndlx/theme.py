@@ -3,31 +3,50 @@ import os
 
 from imgui_bundle import hello_imgui, icons_fontawesome_6 as fa, imgui
 
-from .restypes import (T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE)
+from .restypes import (T_CUBE, T_GOBJECT, T_GTYPE, T_LUA_CODE, T_STRINGS, T_TEXT, T_TEXTURE)
 
-ACCENT = (0.0, 0.373, 0.722, 1.0)            # Windows 11 default accent #005FB8
+ACCENT = (0.54, 0.48, 0.92, 1.0)
 
-LIGHT = {
-    'bg': (0.953, 0.953, 0.953, 1), 'content': (1, 1, 1, 1), 'nav': (0.976, 0.976, 0.976, 1),
-    'text': (0.106, 0.106, 0.106, 1), 'dim': (0.43, 0.43, 0.43, 1), 'border': (0.898, 0.898, 0.898, 1),
-    'sel': (0.80, 0.91, 1.0, 1), 'hover': (0.898, 0.953, 1.0, 1), 'sel_hover': (0.75, 0.88, 1.0, 1),
-    'frame': (1, 1, 1, 1), 'frame_hover': (0.98, 0.98, 0.98, 1), 'button': (0.953, 0.953, 0.953, 0),
-    'button_hover': (0.0, 0.0, 0.0, 0.06), 'button_active': (0.0, 0.0, 0.0, 0.10), 'tab': (0.93, 0.93, 0.93, 1),
-    'tab_sel': (1, 1, 1, 1), 'tab_hover': (0.965, 0.965, 0.965, 1), 'scroll': (0.55, 0.55, 0.55, 0.55),
-    'popup': (0.985, 0.985, 0.985, 1), 'header': (1, 1, 1, 1), 'folder': (0.97, 0.76, 0.24, 1),
-    'cut': 0.45,
-}
 DARK = {
-    'bg': (0.125, 0.125, 0.125, 1), 'content': (0.098, 0.098, 0.098, 1), 'nav': (0.11, 0.11, 0.11, 1),
-    'text': (1, 1, 1, 1), 'dim': (0.62, 0.62, 0.62, 1), 'border': (0.2, 0.2, 0.2, 1),
-    'sel': (0.30, 0.30, 0.30, 1), 'hover': (0.18, 0.18, 0.18, 1), 'sel_hover': (0.35, 0.35, 0.35, 1),
-    'frame': (0.17, 0.17, 0.17, 1), 'frame_hover': (0.21, 0.21, 0.21, 1), 'button': (0, 0, 0, 0),
-    'button_hover': (1, 1, 1, 0.07), 'button_active': (1, 1, 1, 0.11), 'tab': (0.15, 0.15, 0.15, 1),
-    'tab_sel': (0.2, 0.2, 0.2, 1), 'tab_hover': (0.18, 0.18, 0.18, 1), 'scroll': (0.6, 0.6, 0.6, 0.5),
-    'popup': (0.17, 0.17, 0.17, 1), 'header': (0.098, 0.098, 0.098, 1), 'folder': (0.97, 0.76, 0.24, 1),
+    'bg': (0.012, 0.012, 0.016, 1), 'content': (0.022, 0.022, 0.027, 1), 'nav': (0.018, 0.018, 0.022, 1),
+    'text': (0.92, 0.92, 0.94, 1), 'dim': (0.49, 0.49, 0.54, 1), 'border': (0.13, 0.13, 0.15, 1),
+    'sel': (0.12, 0.12, 0.15, 1), 'hover': (0.10, 0.10, 0.12, 1), 'sel_hover': (0.18, 0.17, 0.21, 1),
+    'frame': (0.055, 0.055, 0.064, 1), 'frame_hover': (0.10, 0.10, 0.12, 1), 'button': (0, 0, 0, 0),
+    'button_hover': (1, 1, 1, 0.06), 'button_active': (1, 1, 1, 0.10), 'tab': (0.025, 0.025, 0.03, 1),
+    'tab_sel': (0.075, 0.075, 0.09, 1), 'tab_hover': (0.06, 0.06, 0.07, 1), 'scroll': (0.42, 0.42, 0.46, 0.48),
+    'popup': (0.045, 0.045, 0.052, 1), 'header': (0.022, 0.022, 0.027, 1), 'folder': (0.70, 0.70, 0.74, 1),
     'cut': 0.45,
 }
-PALETTE = LIGHT
+BLUE_THEME = DARK.copy()
+BLUE_THEME.update({
+    'sel': (0.10, 0.14, 0.21, 1), 'hover': (0.08, 0.12, 0.18, 1),
+    'sel_hover': (0.13, 0.20, 0.30, 1), 'tab_sel': (0.06, 0.10, 0.16, 1),
+})
+WHITE_THEME = DARK.copy()
+WHITE_THEME.update({
+    'sel': (0.13, 0.13, 0.15, 1), 'hover': (0.09, 0.09, 0.11, 1),
+    'sel_hover': (0.19, 0.19, 0.22, 1), 'tab_sel': (0.08, 0.08, 0.10, 1),
+})
+PALETTES = {'Violet': DARK, 'Blue': BLUE_THEME, 'White': WHITE_THEME}
+ACTIVE_THEME = 'Violet'
+PALETTE = DARK
+
+
+def select(name):
+    global ACTIVE_THEME, PALETTE, ACCENT, BUNDLE_COL
+    if name not in PALETTES:
+        raise ValueError(f'Unknown theme: {name}')
+    ACTIVE_THEME = name
+    PALETTE = PALETTES[name]
+    if name == 'Blue':
+        ACCENT = (0.22, 0.53, 0.96, 1.0)
+        BUNDLE_COL = (0.40, 0.63, 0.94, 1)
+    elif name == 'White':
+        ACCENT = (0.88, 0.89, 0.96, 1.0)
+        BUNDLE_COL = (0.78, 0.79, 0.84, 1)
+    else:
+        ACCENT = (0.54, 0.48, 0.92, 1.0)
+        BUNDLE_COL = (0.68, 0.68, 0.73, 1)
 
 
 def v4(c):
@@ -38,9 +57,7 @@ def col(name):
     return v4(PALETTE[name])
 
 
-def apply(dark=False):
-    global PALETTE
-    PALETTE = DARK if dark else LIGHT
+def apply():
     p = PALETTE
     s = imgui.get_style()
     s.window_rounding = 0
@@ -178,6 +195,7 @@ TYPE_ICONS = {
     0x053: (fa.ICON_FA_CODE, (0.40, 0.40, 0.55, 1)),
     0x060: (fa.ICON_FA_SHAPES, (0.45, 0.45, 0.45, 1)),
     T_TEXT: (fa.ICON_FA_FILE_LINES, (0.35, 0.40, 0.48, 1)),
+    T_LUA_CODE: (fa.ICON_FA_FILE_CODE, (0.35, 0.55, 0.28, 1)),
     0x074: (fa.ICON_FA_FILE_CODE, (0.25, 0.45, 0.75, 1)),
     0x080: (fa.ICON_FA_FILE_AUDIO, (0.82, 0.30, 0.52, 1)),
     0x081: (fa.ICON_FA_FILE_AUDIO, (0.82, 0.30, 0.52, 1)),
@@ -199,7 +217,7 @@ TYPE_ICONS = {
 }
 FOLDER = fa.ICON_FA_FOLDER
 BUNDLE = fa.ICON_FA_BOX_ARCHIVE
-BUNDLE_COL = (0.78, 0.55, 0.20, 1)
+BUNDLE_COL = (0.68, 0.68, 0.73, 1)
 
 
 def type_icon(t):

@@ -28,20 +28,32 @@ Python 3.10+ (tested with 3.14); sounds need `soundfile` (libsndfile with mpg123
 
 ## The window
 
-It is laid out like the Windows 11 File Explorer (dark theme by default; light theme under **… > Options**):
+The app opens with a 3.2-second rounded splash screen featuring the BNDL logo, then fades the dashboard in once. The dashboard interface is
+the only launchable UI, with selectable Violet, Blue, and White-glow themes. All keep
+near-black surfaces and subtle borders; the upper-left light and panel-frame highlights follow the selected accent:
 
-- **Tabs**: Home, folders, and one tab per open bundle. `+` opens a new tab (Ctrl+T), Ctrl+W closes one.
-- **Address bar** with Back / Forward / Up / Refresh, clickable path segments (click the empty part to type a
-  path) and a search box that filters the current view.
-- **Command bar**: Open, Save, Cut, Copy, Paste, Rename, Delete, Import, Export, Replace, Convert, Sort, View
-  and **…** (more: Save as, Extract all, Import from folder, Find, Go to id, Bundle properties, Options, Help).
-- **Navigation pane**: Home, the open bundles with their resource types as folders, and pinned folders (add
-  the game folder with **Add a folder**; folders open in the main view, bundles open with a double click).
-- **Main view**: *Details* (Name = resource id, Type, Description, Size, Imports; sortable, resizable) or
-  *Large icons* (textures show thumbnails). Multi-select with Ctrl / Shift, arrow keys, right-click menus.
-- **Details pane** (right, toggled with the **Details** button): the selected resource with Preview, Info,
-  Imports and Hex tabs.
-- **Status bar**: item counts, selection size, messages, view switch.
+- **Workspace sidebar**: a branded header, grouped Home/library/folder navigation, expandable bundle resource
+  categories, and an Open bundle action. Collapse it to an icon rail; bundle icons open a resource-category flyout.
+- **Workspaces**: the workspace bar keeps Bundle Explorer separate from the **EXPERIMENTAL** workspace. The
+  original Font Awesome toolbar and resource-type icons are restored.
+- **Resizable panes**: drag the visible handles between dashboard and its inspector or Hex Editor panes to adjust their widths.
+- **Hex Editor**: lazily maps arbitrary files, stages byte and printable ASCII edits (including text insertions and deletions) until Save, and provides insert/overwrite,
+  undo/redo, hex/text/integer/float search, replace, file comparison, 8/16-bit checksums, CRC32, configurable
+  CRC-16, MD5/SHA-1/SHA-512, byte statistics, and a multi-format data inspector. The Hex Editor lives in the
+  **EXPERIMENTAL** workspace while it is being developed. View options include Windows
+  ANSI, OEM, Macintosh, and EBCDIC text encodings; hexadecimal/decimal/octal offsets; selectable hex/text
+  columns; byte grouping; configurable bytes per row; and fit-to-window. **Find all** lists matches in the
+  search-results pane. The **View options** menu can show or hide save, edit, and compare/analysis toolbar
+  actions. **Ctrl+Alt+D** toggles the data inspector, **Ctrl+Alt+C** calculates checksums,
+  **Ctrl+Alt+S** toggles search results, and **Alt+F7** cycles the tool pane. Open a file with **Ctrl+O** or
+  use **Open file**; save with **Ctrl+S**.
+  This workspace edits regular files only; it does not access raw disks or live process memory.
+- **Resource browser**: search and filter resources, with name, id, type, and size in a sortable table; click a column header to sort by it.
+- **Inspector**: the selected resource's preview, editable fields, folder view, imports, and hex data.
+- **Actions**: open, save, import, export, replace, delete, and additional bundle tools under **More**.
+- **Recent files**: reopen bundles from the dashboard home view.
+- **Compare bundles**: open two `.BNDL` files with the same filename (from different folders), then choose
+  **More > Compare same-name bundle** to view resource, metadata, chunk, and decoded Genesys field differences.
 
 ## Resource names
 
@@ -75,9 +87,10 @@ that happens to match a model id would also "match" its renderables; such names 
 | Resource | Preview / editor | Export / import |
 |---|---|---|
 | Texture (RwRaster) | zoom, pan, mip levels, cube faces, R / G / B / A channels, sRGB flag; **Full size** (or double click): the texture at its full resolution in a window over the whole app (1:1, 2:1, 4:1, fit, pixel values); Replace / Export right in the preview | DDS (lossless, all mips), PNG; replace from PNG / DDS / TGA / JPG / BMP (any size; BC1 / BC2 / BC3 / RGBA encoder, mip chain, format and sRGB choice), or drop an image on the preview |
-| GenesysObject | every field as a tree: numbers, vectors, colours, enums, flags, strings, references (click to jump) | .bres |
-| GenesysType | schema: fields, types, offsets, flags; enum values | .bres |
+| GenesysObject | **Fields** view for editable values; **Folder** view shows nested structs and arrays as folders, text fields as editable / exportable text files, and referenced resources as clickable files; **Inference** generates source-like pseudocode and heuristic PC executable assembly candidates | .bres |
+| GenesysType | **Fields** schema table; **Folder** view with struct/base folders, enum values, field metadata, and links to referenced types; **Inference** generates schema pseudocode and heuristic PC executable assembly candidates | .bres |
 | TextFile | text editor (JSON / XML) | .txt |
+| LuaCode | source editor for plain-text Lua; apply changes, save with the bundle, export / replace as `.lua`; binary payloads stay available as `.bres` / raw chunks | `.lua` source or `.bres` |
 | LocalisedText (UI\LANGUAGE) | searchable string table, edit in place | CSV (`id,text`) for translations |
 | VehicleList (VEHICLES\VEHICLELIST) | every car and manufacturer with names from the game's strings; edit any field, duplicate / delete / reorder cars | CSV (one row per car, then the manufacturers) |
 | ColourCube | 16³ grading cube as slices | 256 × 16 PNG |
@@ -86,6 +99,9 @@ that happens to match a model id would also "match" its renderables; such names 
 | InstanceList (TRK_UNIT) | the whole track unit in 3D: every model instance in place, with its textures; collision over it | glTF (.glb) or FBX of the whole unit; Import FBX for the unit's own models |
 | PolygonSoupList (TRK_UNIT) | collision in 3D, coloured by surface tag | glTF (.glb), FBX |
 | ZoneList (HAWAII\PVS) | map of all 169 track units by district; click a zone to open its TRK_UNIT | |
+| TrafficData | traffic lane hulls, section boundaries and lane points in an interactive X-Z map; zoom and pan | |
+| HSMData | state definitions and entry / exit transitions, data definitions, and behaviour interfaces; filter and export a text report | |
+| Event / gameplay reference viewer (**…**) | typed event records from the event Genesys resource; editable event scalar fields and primitive arrays; checkpoint routes with an editable route list; gameplay and trigger locations, AI player types, cop types, and rollouts from the visualizer JSON datasets | custom checkpoint route as JSON |
 | .SPS sound stream files | opened like a bundle with one sound: play, waveform, replace, save | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF / .SPS; a whole folder as WAV |
 | Material | shader, textures by slot with thumbnails, shader constants by name (editable colours / numbers); Go / Open for every texture | .bres |
 | Wave (sound) | play / pause / stop with a play head on the waveform; click or drag on it to jump; time, channels, rate, length; stops when another item is selected | WAV; replace from WAV / FLAC / OGG / MP3 / AIFF (encoded as EALayer3) |
@@ -94,6 +110,11 @@ that happens to match a model id would also "match" its renderables; such names 
 | ControlMesh (PS3 prototype cars) | the crash deformation lattice: up to 64 points on the body over the car, coloured by how deep each can dent, with the direction it moves; **Dent** crushes the car with it; the car view has a **Control points** switch | max dent per point editable; glTF / FBX |
 | GinsuEngineSound (car bundles) | engine rev sweep: RPM range, grains, play with the RPM at the play head, hold the engine at a chosen RPM | WAV; replace from a recording (WAV / FLAC / OGG / MP3): RPM tracked from its pitch or a steady sweep |
 | every type | imports (edit the ids, jump to the target, or open the bundle that has it), hex view with byte editing | .bres, raw chunks (.bin) |
+
+Genesys **Inference** does not recover or execute original source: its pseudocode is generated from the schema and
+serialized object values. Assembly candidates come only from statically reachable x86 code in the PC `NFS13.exe`,
+matched by field offsets; they are explicitly low-confidence and may be unrelated. The generated text is an
+exportable explanation, not a replacement format for editing the bundle.
 
 Field and enum value names of Genesys data are stored as hashes. The hash is known (found in the PS3
 prototype's debug build, `rw::core::stdc::CalculateCrc32`): an MSB-first CRC-32 (polynomial 0x04C11DB7) whose
@@ -109,6 +130,12 @@ hashes); chance matches are rare (~0.1 % of single words, ~2 % of pairs). Hover 
 from; any field can also be named by hand (right click; saved in `%APPDATA%\BNDLExplorer\labels.json`), and the
 rename box tells whether a typed name is the real one (its hash matches).
 
+BNDL Explorer also includes 2,590 hash-verified field and enum names imported from the TypeScript tools'
+`foundHashes.txt` maps, plus their event and car id tables. User labels and names found by scanning game files
+still take precedence; hash collisions retain their alternative candidates in the field tooltip. To refresh the
+bundled map from a MostWanted TypeScript checkout, run
+`python tools\import_ts_names.py path\to\MostWanted`.
+
 Other operations: **Rename** (change a resource id; imports of it in the bundle follow), duplicate with a new
 id, delete, copy resources between bundles, find the resources that import a resource, find in all open
 bundles, bundle properties (flags, root resource). **Undo / redo** (Ctrl+Z / Ctrl+Y) for every change.
@@ -117,12 +144,12 @@ bundles, bundle properties (flags, root resource). **Undo / redo** (Ctrl+Z / Ctr
 
 - Drop `.BNDL` files on the window to open them.
 - Drop (or copy in Explorer and paste with Ctrl+V) a PNG / DDS / TGA / JPG on a texture to replace it, a
-  `.txt` on a text file, a `.csv` on a string table, a `.bres` on any resource, a `.bin` on a resource (it asks
+  `.txt` on a text file, a `.lua` on a plain-text LuaCode resource, a `.csv` on a string table, a `.bres` on any resource, a `.bin` on a resource (it asks
   for the chunk). Files named `<resource id>.<ext>` replace those resources; `.bres` files add resources.
 - Drag resources onto another bundle's tab or navigation entry, or Ctrl+C / Ctrl+X then Ctrl+V in another
   bundle, to copy / move them. PS3 ↔ PC conversion happens automatically where it is possible.
 - Drag resources out of the window into Explorer, or Ctrl+C and paste in Explorer, to get them as files
-  (textures as PNG or DDS, text as .txt, strings as .csv, others as .bres).
+  (textures as PNG or DDS, text as .txt, LuaCode source as .lua, strings as .csv, others as .bres).
 
 ## 3D models
 
@@ -414,6 +441,48 @@ PS3 → PC → PS3 give identical data (apart from a texture flag the PS3 header
 The prototype and the retail game do not share every Genesys schema: converted data works in the other
 build only where its types are the same there.
 
+### Port into a game bundle (scan the game first)
+
+**Convert** writes a new bundle with only the resources it could convert, so it is not a bundle the game can
+load: the engine asks for every resource it knows, and a converted Genesys object is only readable when the
+game's own schema has the layout it was written with. **Port** is for that case. It has its own window
+(`... > Port into a PC game bundle...`; the Convert result offers a button for it too), in three steps:
+
+1. **Source bundle**: the PS3 bundle with the data you want (a PS3 bundle that is open is filled in for you).
+2. **Game bundle**: the PC game's bundle of the same name. The game folder around it is scanned.
+3. **Save the result as**: a new file. The game bundle itself is never changed.
+
+**Scan the game and preview** then lists exactly what will be taken from the source and what stays as the game
+has it, with the reason for each (filter and search the table). Nothing is written until you press **Write the
+ported bundle**; it also saves a per-resource report next to the result (`<file>.port.txt`). The checkbox under
+step 3 turns on the float guess described below. From the command line:
+
+```bat
+python -m bndlx port SOURCE_PS3.BNDL GAME_PC.BNDL OUT.BNDL [--lenient] [--dry-run] [--game DIR] [--source-game DIR]
+```
+
+The game folder is scanned first (every bundle once: all Genesys types and every resource id; cached per folder,
+the PS3 folder is scanned too when it is found). Then the result is the game's own bundle with the same ids,
+types, order and count (nothing is added or removed), and only resources that are safe are taken from the source:
+
+| Resource | Taken from the source when |
+|---|---|
+| Texture | both are the same kind (2D / cube map); the game's own header flags are kept |
+| ColourCube, TextFile, LocalisedText, Wave | always (converted) |
+| GenesysObject | its type and everything the type uses are identical in both builds (id, size, every field); it converts cleanly, reads back with the game's schema, converts back to the same bytes, and every resource it imports exists in the game |
+| GenesysType | never: the game's own schema is kept |
+| everything else (materials, shaders, vertex layouts, meshes, ...) | never: platform-specific, the game's own is kept |
+
+Everything not taken stays exactly as the game has it. A report (also written next to the output as
+`<file>.port.txt`) lists what was converted, what was kept and why, and what exists only in the source.
+`--lenient` (the checkbox in the window) also converts Genesys objects whose schema leaves some data unexplained when
+that data is clearly float32 (for example the colour tables of `EnvironmentKeyframe`); it is a guess, so the
+report counts those objects.
+
+Fixed with this feature: a layout bug that made valid `EnvironmentKeyframe` objects fail to convert (an array
+that points into its own struct, with a 16-bit count on one of its floats, was reported as a conflict between
+two fields; a declared field now wins over an array element laid over it).
+
 ## Resource files (.bres)
 
 One resource with all of its data: `BNDLRES1`, a JSON header (id, type, platform, stream, import table
@@ -435,6 +504,8 @@ position, alignment bits, sizes, debug name) and the four memory chunks as the g
 set BNDLX_PC=...\Need for Speed(TM) Most Wanted
 set BNDLX_PS3=...\NPXX00207\USRDIR\HAWAII_MAIN
 python tests\test_core.py                 :: library: saves, edits, conversion, strings
+python tests\test_port.py                 :: porting into a game bundle, the Genesys layout fix (runs without game files)
+python tests\test_port_ui.py              :: the Port window driven with a fake imgui (runs without game files or a display)
 python tests\test_gui.py                  :: the real window: drops, copy between bundles, clipboard, undo, save
 python tests\test_audio_gui.py            :: sound preview: jump to a position, stop when another item is selected (silent)
 python tests\test_fbx_gui.py              :: FBX export with textures, import back, an edited object, undo

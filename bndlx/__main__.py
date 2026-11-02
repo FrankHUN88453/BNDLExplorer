@@ -1,4 +1,5 @@
-"""python -m bndlx [FILES ...] [--select ID] [--screenshot out.png]"""
+"""python -m bndlx [FILES ...] [--select ID] [--screenshot out.png]
+   python -m bndlx port SOURCE TARGET OUT [--game DIR] [--lenient] [--dry-run]"""
 import argparse
 import sys
 
@@ -6,6 +7,9 @@ import sys
 def main():
     import multiprocessing
     multiprocessing.freeze_support()          # the name scan uses worker processes (also in the exe)
+    if len(sys.argv) > 1 and sys.argv[1] == 'port':
+        from .portcli import main as port_main          # python -m bndlx port SOURCE TARGET OUT [options]
+        return port_main(sys.argv[2:])
     ap = argparse.ArgumentParser(prog='BNDLExplorer', description='NFS Most Wanted (2012) bundle explorer (PC / PS3)')
     ap.add_argument('files', nargs='*', help='.BNDL files to open')
     ap.add_argument('--select', help='resource id (hex) to select after opening')
@@ -29,8 +33,8 @@ def main():
         if sys.stdout is not None:
             print(json.dumps(st))
         return 0
-    from .app import run
     sel = int(a.select.lower().replace('0x', ''), 16) if a.select else None
+    from .new_ui import run
     run(a.files, a.screenshot, select=sel, tab=a.tab, expand=a.expand, view=a.view, folder=a.folder,
         type_filter=int(a.type, 16) if a.type else None)
 

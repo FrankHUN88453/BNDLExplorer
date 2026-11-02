@@ -26,6 +26,7 @@ def main():
         '--collect-submodules', 'imgui_bundle',
         '--add-binary', f'{os.path.join(IB, "glfw3.dll")}{sep}imgui_bundle',
         '--add-data', f'{os.path.join(IB, "assets")}{sep}imgui_bundle/assets',
+        '--add-data', f'{os.path.join(ROOT, "bndlx", "assets", "loading_logo.png")}{sep}bndlx/assets',
         # soundfile: libsndfile (with mpg123 / LAME) for the sounds
         '--collect-all', 'soundfile',
         '--collect-all', '_soundfile_data',

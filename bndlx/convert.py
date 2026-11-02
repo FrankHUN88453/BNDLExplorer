@@ -31,14 +31,18 @@ def _gfx(platform):
     return 1 if platform == 'PC' else 2
 
 
-def convert_resource(res, src, dst, types=None, strict=True):
-    """A new Resource with `res` converted from platform `src` to `dst` (same id / type / stream)."""
+def convert_resource(res, src, dst, types=None, strict=True, lenient=False):
+    """A new Resource with `res` converted from platform `src` to `dst` (same id / type / stream).
+
+    lenient: a Genesys object whose schema leaves some data unexplained is still converted when that data is
+    clearly float32 (see genesys.Layout.float_words); `lenient_words` of the result says how many words."""
     if src == dst:
         return res.copy()
     es, ed = E[src], E[dst]
     t = res.type
     imp_off, imp_cnt = res.import_offset, res.import_count
     chunks = [b'', b'', b'', b'']
+    guessed = 0
     if t == T_TEXTURE:
         hdr, pix = raster.convert(res, src, dst)
         chunks[0], chunks[_gfx(dst)] = hdr, pix
@@ -51,7 +55,7 @@ def convert_resource(res, src, dst, types=None, strict=True):
         if types is None:
             raise ConvertError('no Genesys types loaded')
         try:
-            out, unknown = genesys.swap_object(res, types, es)
+            out, unknown, guessed = genesys.swap_object_ex(res, types, es, lenient)
         except genesys.MissingType as m:
             raise ConvertError(f'Genesys type {m.args[0]:#x} is not in any open bundle') from None
         if unknown and strict:
@@ -83,11 +87,12 @@ def convert_resource(res, src, dst, types=None, strict=True):
     r._stored = [None] * 4
     r.import_offset, r.import_count = imp_off, imp_cnt
     r.name, r.debug_type = res.name, res.debug_type
+    r.lenient_words = guessed
     r.modified = True
     return r
 
 
-def convert_bundle(src, dst_platform, types=None, strict=True, progress=None):
+def convert_bundle(src, dst_platform, types=None, strict=True, progress=None, lenient=False):
     """New Bundle for `dst_platform` with every convertible resource. Returns (bundle, report)."""
     out = Bundle(dst_platform)
     out.version = src.version
@@ -111,7 +116,7 @@ def convert_bundle(src, dst_platform, types=None, strict=True, progress=None):
             report['skipped'][r.type] = report['skipped'].get(r.type, 0) + 1
             continue
         try:
-            c = convert_resource(r, src.platform, dst_platform, types, strict)
+            c = convert_resource(r, src.platform, dst_platform, types, strict, lenient)
         except Exception as ex:
             report['failed'].append((r.id, r.type, str(ex)))
             continue
@@ -132,4 +137,8 @@ def report_text(report):
             lines.append(f'  {rid:#x} {name(t)}: {msg}')
         if len(report['failed']) > 12:
             lines.append(f'  ... and {len(report["failed"]) - 12} more')
+    if report['skipped'] or report['failed']:
+        lines.append('')
+        lines.append('This file has only the converted resources, so it cannot replace a game bundle. To use this '
+                     'data in the game, port it into the game\'s own bundle.')
     return '\n'.join(lines)

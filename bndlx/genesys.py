@@ -302,23 +302,39 @@ def leaf_kind(types, f):
 # byte-order conversion
 # ---------------------------------------------------------------------------------------------------------------
 class Layout:
-    """Every scalar of a resource: {offset: size}. Bytes not covered (except zeros) are 'unknown'."""
+    """Every scalar of a resource: {offset: size}. Bytes not covered (except zeros) are 'unknown'.
+
+    A *weak* scalar is an element of an array that a pointer field aims at. Such an array may lie over fields the
+    schema declares (EnvironmentKeyframe.Sky's float table starts inside the struct itself, and its 16-bit count
+    sits on one of the floats): a declared field always wins over a weak element, whatever the order they were
+    met in. Only two declared fields that overlap are a real conflict."""
 
     def __init__(self, n):
         self.scalars = {}
+        self.weak = set()
         self.covered = bytearray(n)       # 0 unknown, 1 bytes kept as they are, 2 part of a scalar
         self.conflicts = 0                # overlapping scalars: the layout is not understood
 
-    def scalar(self, o, size):
+    def scalar(self, o, size, weak=False):
         if self.scalars.get(o) == size:
             return
         end = min(o + size, len(self.covered))
         if 2 in self.covered[o:end]:
-            self.conflicts += 1
-            return
+            if weak:
+                return
+            over = [k for k, v in self.scalars.items() if k < end and k + v > o]
+            if not over or not all(k in self.weak for k in over):
+                self.conflicts += 1
+                return
+            for k in over:                # displace the weak elements this declared field sits on
+                v = self.scalars.pop(k)
+                self.weak.discard(k)
+                self.covered[k:k + v] = b'\0' * v
         if size in (2, 4, 8) and o + size <= len(self.covered):
             self.scalars[o] = size
             self.covered[o:end] = b'\2' * (end - o)
+            if weak:
+                self.weak.add(o)
         else:
             self.cover(o, size)
 
@@ -338,6 +354,41 @@ class Layout:
         for o, size in self.scalars.items():
             out[o:o + size] = out[o:o + size][::-1]
         return bytes(out)
+
+    def float_words(self, data, e):
+        """Offsets of the 4-byte words that hold every unexplained non-zero byte, if they are clearly float32 in
+        byte order `e` (and would not be in the other one); None when they are not (integers, partial words,
+        overlaps) or when there is nothing unexplained. This is a guess, so it is only used on request."""
+        if self.conflicts:
+            return None
+        n = len(self.covered) // 4 * 4
+        cov = np.frombuffer(bytes(self.covered[:n]), np.uint8).reshape(-1, 4)
+        dat = np.frombuffer(bytes(data[:n]), np.uint8).reshape(-1, 4)
+        unk = (cov == 0) & (dat != 0)
+        free = (cov == 0).all(axis=1)
+        cand = free & unk.any(axis=1)
+        tail = np.frombuffer(bytes(self.covered[n:]), np.uint8)
+        tail_dat = np.frombuffer(bytes(data[n:len(self.covered)]), np.uint8)
+        if np.count_nonzero((tail == 0) & (tail_dat != 0)) or np.count_nonzero(unk & ~cand[:, None]):
+            return None
+        idx = np.nonzero(cand)[0]
+        if not len(idx):
+            return None
+        raw = dat[idx].tobytes()
+        other = '>' if e == '<' else '<'
+        mine = np.frombuffer(raw, np.dtype(np.float32).newbyteorder(e))
+        theirs = np.frombuffer(raw, np.dtype(np.float32).newbyteorder(other))
+
+        def plausible(v):
+            a = np.abs(v)
+            return np.isfinite(v) & (a >= 1e-6) & (a <= 1e7)
+
+        # Every word must be a sensible float in this byte order. Integers (small values are float denormals) and
+        # hashes (random bits) essentially never pass that over 4 or more words; a wrong byte order passes about
+        # a third of the time, so it is only used as a sanity margin.
+        if len(idx) < 4 or not plausible(mine).all() or plausible(theirs).mean() > 0.6:
+            return None
+        return [int(i) * 4 for i in idx]
 
 
 def import_table(layout, res):
@@ -437,18 +488,18 @@ class ObjectLayout:
                     return
                 stride = ft.size if ft else f.size
                 for i in range(n):
-                    self.elem(f, ft, ptr + i * stride, single=True)
+                    self.elem(f, ft, ptr + i * stride, single=True, weak=True)
                 return
             if ptr:
                 self.elem(f, ft, ptr, single=True)
             return
         self.elem(f, ft, o)
 
-    def elem(self, f, ft, o, single=False):
+    def elem(self, f, ft, o, single=False, weak=False):
         L = self.L
         count = f.count if (not single and f.flags & 2 and f.count > 1) else 1
         if ft is None:
-            L.scalar(o, f.size)
+            L.scalar(o, f.size, weak)
             return
         for i in range(count):
             eo = o + i * ft.size
@@ -464,7 +515,7 @@ class ObjectLayout:
                 st = self.T.get(sub.type_id)
                 es = st.size if st is not None else 4
                 for j in range(sub.count):
-                    L.scalar(eo + j * es, es)
+                    L.scalar(eo + j * es, es, weak)
             elif ft.kind == 7:
                 tid = self.imports.get(eo)
                 if tid is not None and (tid == ft.id or ft.base):
@@ -472,7 +523,7 @@ class ObjectLayout:
                 else:
                     self.struct(ft.id, eo)
             else:
-                L.scalar(eo, ft.size)
+                L.scalar(eo, ft.size, weak)
 
 
 def swap_type(res, e):
@@ -486,3 +537,20 @@ def swap_object(res, types, e):
     L = ObjectLayout(types, e).build(res)
     c = res.data(0)
     return L.apply(c), L.unknown(c)
+
+
+def swap_object_ex(res, types, e, lenient=False):
+    """(bytes, unexplained non-zero bytes, float words guessed). Like swap_object; with lenient=True, unexplained
+    words that are clearly float32 (see Layout.float_words) are swapped too instead of failing the object."""
+    L = ObjectLayout(types, e).build(res)
+    c = res.data(0)
+    unknown = L.unknown(c)
+    floats = 0
+    if unknown and lenient:
+        words = L.float_words(c, e)
+        if words is not None:
+            for o in words:
+                L.scalar(o, 4)
+            floats = len(words)
+            unknown = L.unknown(c)
+    return L.apply(c), unknown, floats

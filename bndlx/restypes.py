@@ -18,10 +18,17 @@ NAMES = {
     0x303: 'ConvexHull', 0x501: 'HSMData', 0x701: 'TrafficLaneData',
 }
 
+from . import knownids  # noqa: E402
+
+for _t, _n in knownids.RESOURCE_TYPES.items():     # ids from the hash list the table above lacks
+    NAMES.setdefault(_t, _n)
+
 T_TEXTURE, T_GTYPE, T_GOBJECT, T_CUBE, T_TEXT, T_STRINGS = 0x001, 0x014, 0x015, 0x052, 0x070, 0x201
+T_LUA_CODE = 0x040
 
 # file extension used when a resource is exported as its own format
-EXPORT_EXT = {T_TEXTURE: '.dds', T_TEXT: '.txt', T_STRINGS: '.csv', T_CUBE: '.png'}
+EXPORT_EXT = {T_TEXTURE: '.dds', T_TEXT: '.txt', T_LUA_CODE: '.lua',
+              T_STRINGS: '.csv', T_CUBE: '.png'}
 
 
 def name(type_id):

@@ -2,6 +2,7 @@
 PC retail and PS3 prototype. Dear ImGui (imgui-bundle) front end."""
 import collections
 import itertools
+import math
 import re
 import json
 import os
@@ -15,13 +16,17 @@ import traceback
 import numpy as np
 from imgui_bundle import hello_imgui, imgui, immvision
 
-from . import convert, dragdrop, eal3, filedialog, genesys, gltf, mesh, ops, raster, resfile, textfile, theme
+from . import (convert, dragdrop, eal3, event_data, filedialog, gameplay_data, genesys, gltf, hsm, mesh, ops,
+               raster, resfile, textfile, theme, traffic, ts_names, compare)
+from . import luafile
 from . import vehiclelist as VL
 from . import zonelist as ZL
 from . import spsfile
 from . import platetext
 from . import ginsu
 from . import gnames
+from . import genesys_insight
+from . import knownids
 from . import anim
 from .anim_ui import AnimUI
 from . import fbx
@@ -29,6 +34,7 @@ from . import meshimport
 from . import roots
 from .audioplay import Player
 from .soundtrack_ui import SoundtrackUI
+from .port_ui import PortUI
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -36,7 +42,8 @@ from .genesys import Node, Ref, TypeDB, leaf_kind
 from .labels import Labels, config_dir
 from .localised import StringTable
 from . import names as N
-from .restypes import T_CUBE, T_GOBJECT, T_GTYPE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
+from .restypes import (T_CUBE, T_GOBJECT, T_GTYPE, T_LUA_CODE, T_STRINGS, T_TEXT, T_TEXTURE,
+                       name as type_name)
 
 APP = 'BNDL Explorer'
 VERSION = '0.25'
@@ -180,8 +187,10 @@ def waveform(audio, cols=1024):
             np.array([p.max() if len(p) else 0 for p in parts]))
 
 
-class App(ExplorerUI, SoundtrackUI, AnimUI):
+class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
     def __init__(self, paths=(), select=None):
+        self.dashboard_icons = False
+        self.tab_content_transitions = {}
         self.docs = []
         self.tabs = [Browser()]
         self.tab = self.tabs[0]
@@ -197,6 +206,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         self.zmap = {'key': None}
         self.player = Player()
         self.st_ui = None                # soundtrack editor window state
+        self.port_ui = None              # Port window state (port_ui.py)
         self.wave_cursor = {}            # sound key -> sample where Play starts (set by clicking the waveform)
         self.vlist = {'key': None, 'obj': None, 'sel': 0, 'msel': 0, 'filter': '', 'error': None}
         self.folder_cache = {}
@@ -229,9 +239,18 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         self.edit_gen = 0                # counts edits in every open bundle (views built from several bundles)
         self.tex_lock = threading.Lock()
         self.gcache = {}
+        self.genesys_insight_state = {}
+        self.genesys_string_edit = None
         self.text_edit = {'key': None, 'text': ''}
+        self.lua_edit = {'key': None, 'text': '', 'encoding': 'utf-8', 'dirty': False}
         self.str_filter = ''
         self.str_cache = {'key': None, 'table': None}
+        self.hsm_cache = {'key': None, 'result': None, 'error': None}
+        self.hsm_filter = ''
+        self.event_view_state = {}
+        self.traffic_cache = {'key': None, 'result': None, 'error': None, 'zoom': 1.0, 'pan': [0.0, 0.0]}
+        self.gameplay_view = {'data': None, 'folder': '', 'open': False, 'race': '', 'filter': '',
+                              'zoom': 1.0, 'pan': [0.0, 0.0], 'custom_route': []}
         self.hex_chunk = 0
         self.hex_patch = ['', '']
         self.find_text = ''
@@ -244,6 +263,32 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         self.exit_ok = False
         for p in paths:
             self.open_path(p)
+
+    def dashboard_icon(self, kind, size=17, color=None):
+        if not self.dashboard_icons:
+            return False
+        from . import dash_icons
+
+        if color is None:
+            color = imgui.get_style_color_vec4(imgui.Col_.text_disabled)
+        height = max(imgui.get_frame_height(), size + 4)
+        pos = imgui.get_cursor_screen_pos()
+        center = imgui.ImVec2(pos.x + (size + 4) * 0.5, pos.y + height * 0.5)
+        dash_icons.draw(imgui.get_window_draw_list(), kind, center, size, imgui.get_color_u32(color))
+        imgui.dummy(imgui.ImVec2(size + 4, height))
+        return True
+
+    def dashboard_resource_icon(self, type_id, size=24):
+        if not self.dashboard_icons:
+            return False
+        from . import dash_icons
+
+        height = max(imgui.get_frame_height(), size + 4)
+        pos = imgui.get_cursor_screen_pos()
+        center = imgui.ImVec2(pos.x + (size + 4) * 0.5, pos.y + height * 0.5)
+        dash_icons.resource_badge(imgui.get_window_draw_list(), type_id, center, size)
+        imgui.dummy(imgui.ImVec2(size + 4, height))
+        return True
 
     # -- config -----------------------------------------------------------------------------------------------
     def load_cfg(self):
@@ -304,7 +349,14 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 ' It continues a sound whose start was not found (run Find names).' if b.headerless and not b.prefix else '')
         else:
             self.status = f'Opened {path}: {b.platform}, {len(b.resources)} resources.{extra}'
+            peers = [other for other in self.docs if other is not d and compare.same_bundle_name(path, other.path)]
+            if peers:
+                self.status += f' Same-name bundle open: {peers[0].path}. Use … > Compare same-name bundle to see differences.'
         return d
+
+    def compare_same_name(self, d, other):
+        rows = compare.bundle_differences(d.b, other.b, self.types, self.labels)
+        self.modal = {'kind': 'compare', 'left': d.uid, 'right': other.uid, 'rows': rows}
 
     def rebuild_types(self):
         self.types = TypeDB()
@@ -469,6 +521,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         def done(rep):
             self.modal = {'kind': 'message', 'title': f'Converted to {target}',
                           'text': f'Saved {p}\n\n' + convert.report_text(rep), 'open': p}
+            if target == 'PC' and (rep['skipped'] or rep['failed']):
+                self.modal['action'] = ('Port into a game bundle...', lambda: self.open_port(d))
             self.status = f'Converted {d.name} to {target}: {rep["converted"]} resources.'
 
         self.run_job(f'Converting to {target}...', job, done)
@@ -624,7 +678,9 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
     def action_import_folder(self, d):
         if d is None:
             return
-        folder = filedialog.pick_folder('Import resources from this folder (.bres files, <id>.dds / .png / .txt / .csv)')
+        folder = filedialog.pick_folder(
+            'Import resources from this folder (.bres files, <id>.dds / .png / .txt / .lua / .csv)'
+        )
         if not folder:
             return
         d.checkpoint('import folder')
@@ -685,6 +741,11 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 p = filedialog.save_file('Export text', base + '.txt', filedialog.TEXT, 'txt')
                 if p:
                     ops.write_file(p, textfile.read(res, d.b.e))
+            elif kind == 'lua':
+                p = filedialog.save_file('Export Lua source', base + '.lua', filedialog.TEXT, 'lua')
+                if p:
+                    luafile.decode(res.data(0))
+                    ops.write_file(p, res.data(0))
             elif kind == 'csv' and res.type == VL.T_VEHICLELIST:
                 p = filedialog.save_file('Export vehicle list as CSV', base + '.csv', filedialog.CSV, 'csv')
                 if p:
@@ -756,6 +817,10 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             elif res.type == T_TEXT and ext in ('.txt', '.json', '.xml', '.lua'):
                 ops.replace_text(d.b, res, data)
                 msg = f'Text {res.id:#x} replaced ({len(data)} bytes).'
+            elif res.type == T_LUA_CODE and ext == '.lua':
+                luafile.decode(data)
+                res.set_data(0, data)
+                msg = f'Lua source {res.id:#x} replaced ({len(data)} bytes).'
             elif res.type == T_STRINGS and ext == '.csv':
                 ch, add, unk = ops.strings_from_csv(d.b, res, data.decode('utf-8-sig'), options.get('add_new', False))
                 msg = f'{ch} string(s) changed, {add} added' + (f', {len(unk)} unknown id(s) skipped' if unk else '') + '.'
@@ -796,6 +861,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         if res is None:
             return
         flt = {T_TEXTURE: filedialog.IMAGES, T_CUBE: filedialog.PNG, T_TEXT: filedialog.TEXT,
+               T_LUA_CODE: filedialog.TEXT,
                T_STRINGS: filedialog.CSV, 0x81: filedialog.AUDIO, VL.T_VEHICLELIST: filedialog.CSV,
                ginsu.T_GINSU: filedialog.AUDIO,
                **{t: filedialog.FBX + filedialog.RES for t in MODEL_IMPORT_TYPES}}.get(res.type, filedialog.RES)
@@ -1052,7 +1118,11 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
     def exit_guard(self):
         p = hello_imgui.get_runner_params()
         st_dirty = self.st_ui is not None and self.st_ui['model'].dirty
-        if p.app_shall_exit and not self.exit_ok and (any(d.modified for d in self.docs) or st_dirty):
+        dashboard = getattr(self, 'dashboard_ui', None)
+        hex_dirty = [document for document in getattr(dashboard, 'hex_documents', ())
+                     if document.modified]
+        if p.app_shall_exit and not self.exit_ok and (
+                any(d.modified for d in self.docs) or st_dirty or hex_dirty):
             p.app_shall_exit = False
             try:
                 lib = dragdrop._glfw()
@@ -1147,6 +1217,15 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                     return (f'{tname_} quad' + (f' ({flip})' if flip else ''), 'exact', full)
             return (N.short(full), 'exact', full)
         gc = N.gc_number(r.id)
+        known = knownids.GAMECHANGER.get(gc) if gc is not None else None
+        if known is None and gc is not None:
+            mapped = ts_names.EVENT_NAMES.get(gc) or ts_names.CAR_NAMES.get(gc)
+            known = (mapped, 'TypeScript event / car') if mapped else None
+        if known is None and r.type == 0x53:
+            sh = knownids.SHADERS.get(r.id & 0xFFFFFFFF)
+            known = (sh, 'shader') if sh else None
+        if known is not None:
+            return (known[0], 'exact', f'{known[0]}\n(known {known[1]} id {r.id & 0xFFFFFFFF})')
         tn = type_name(r.type)
         stored = self.names.objnames.get(r.id)
         if stored and r.type != T_GOBJECT:
@@ -1327,6 +1406,30 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             self.rebuild_types()
             self.status = f'Redone: {desc}.'
 
+    def begin_tab_content_transition(self, group, tab):
+        if not self.dashboard_icons:
+            return False
+        now = imgui.get_time()
+        state = self.tab_content_transitions.get(group)
+        if state is None:
+            self.tab_content_transitions[group] = (tab, now - 0.62)
+            progress = 1.0
+        elif state[0] != tab:
+            self.tab_content_transitions[group] = (tab, now)
+            progress = 0.0
+        else:
+            progress = min(1.0, max(0.0, (now - state[1]) / 0.62))
+        eased = 1 - (1 - progress) ** 3
+        content_pos = imgui.get_cursor_screen_pos()
+        imgui.set_cursor_screen_pos(imgui.ImVec2(content_pos.x + 16 * (1 - eased), content_pos.y))
+        imgui.push_style_var(imgui.StyleVar_.alpha, 0.10 + 0.90 * eased)
+        return True
+
+    @staticmethod
+    def end_tab_content_transition(animated):
+        if animated:
+            imgui.pop_style_var()
+
     # -- details panel ----------------------------------------------------------------------------------------
     def details_panel(self):
         d, r = self.focused()
@@ -1334,12 +1437,15 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             if self.cur is not None:
                 self.bundle_summary(self.cur)
             return
-        ic, colr = theme.type_icon(r.type)
-        if theme.FONTS['big_icons'] is not None:
-            imgui.push_font(theme.FONTS['big_icons'], 30.0)
-        theme.icon_text(ic, colr)
-        if theme.FONTS['big_icons'] is not None:
-            imgui.pop_font()
+        if self.dashboard_icons:
+            self.dashboard_resource_icon(r.type, 40)
+        else:
+            ic, colr = theme.type_icon(r.type)
+            if theme.FONTS['big_icons'] is not None:
+                imgui.push_font(theme.FONTS['big_icons'], 30.0)
+            theme.icon_text(ic, colr)
+            if theme.FONTS['big_icons'] is not None:
+                imgui.pop_font()
         imgui.same_line()
         imgui.begin_group()
         nm, kind, tip = self.display_name(d, r)
@@ -1348,6 +1454,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             imgui.set_tooltip(tip)
         imgui.text_disabled(f'{type_name(r.type)}  -  {ops.id_text(r.id)}  -  {human(sum(r.size(k) for k in range(4)))}')
         imgui.end_group()
+        dashboard = getattr(self, 'dashboard_ui', None)
+        if dashboard is not None:
+            imgui.spacing()
+            label = 'Collapse' if dashboard.inspector_expanded else 'Expand'
+            if imgui.small_button(f'{label} inspector'):
+                dashboard.inspector_expanded = not dashboard.inspector_expanded
         if r.missing:
             imgui.text_colored(imgui.ImVec4(1, 0.5, 0.3, 1), 'The data of this resource is not in the file (truncated file).')
             return
@@ -1356,6 +1468,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         sel = [imgui.TabItemFlags_.set_selected if tab == i else 0 for i in range(4)]
         if imgui.begin_tab_bar('details'):
             if imgui.begin_tab_item_simple('Preview', sel[0]):
+                animated = self.begin_tab_content_transition('details', 'preview')
                 imgui.begin_child('preview')
                 try:
                     self.preview(d, r)
@@ -1363,15 +1476,22 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                     traceback.print_exc()
                     imgui.text_colored(imgui.ImVec4(1, 0.4, 0.3, 1), f'Cannot show this resource: {e}')
                 imgui.end_child()
+                self.end_tab_content_transition(animated)
                 imgui.end_tab_item()
             if imgui.begin_tab_item_simple('Info', sel[1]):
+                animated = self.begin_tab_content_transition('details', 'info')
                 self.info_tab(d, r)
+                self.end_tab_content_transition(animated)
                 imgui.end_tab_item()
             if imgui.begin_tab_item_simple(f'Imports ({r.import_count})###imports', sel[2]):
+                animated = self.begin_tab_content_transition('details', 'imports')
                 self.imports_tab(d, r)
+                self.end_tab_content_transition(animated)
                 imgui.end_tab_item()
             if imgui.begin_tab_item_simple('Hex', sel[3]):
+                animated = self.begin_tab_content_transition('details', 'hex')
                 self.hex_tab(d, r)
+                self.end_tab_content_transition(animated)
                 imgui.end_tab_item()
             imgui.end_tab_bar()
 
@@ -1561,6 +1681,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             self.type_view(d, r)
         elif t == T_TEXT:
             self.text_view(d, r)
+        elif t == T_LUA_CODE:
+            self.lua_view(d, r)
         elif t == T_STRINGS:
             self.strings_view(d, r)
         elif t == T_CUBE:
@@ -1579,9 +1701,111 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             self.vehicle_list_view(d, r)
         elif t == ZL.T_ZONELIST:
             self.zone_map_view(d, r)
+        elif t == hsm.T_HSM:
+            self.hsm_view(d, r)
+        elif t == traffic.T_TRAFFIC:
+            self.traffic_view(d, r)
         else:
             imgui.text_wrapped(f'{type_name(t)}: no viewer for this type yet. The Imports and Hex tabs show its data; '
                                'Export / Replace work for every type (.bres or raw chunks).')
+
+    def hsm_view(self, d, r):
+        data = r.data(0)
+        key = (d.uid, r.id, id(data))
+        if self.hsm_cache['key'] != key:
+            self.hsm_cache = {'key': key, 'result': None, 'error': None}
+            try:
+                self.hsm_cache['result'] = hsm.parse(data)
+            except hsm.HSMError as exc:
+                self.hsm_cache['error'] = str(exc)
+        parsed = self.hsm_cache['result']
+        if parsed is None:
+            imgui.text_colored(imgui.ImVec4(1, 0.4, 0.3, 1),
+                               f'Cannot parse HSMData: {self.hsm_cache["error"]}')
+            return
+
+        imgui.text(f'HSMData version {parsed["version"]}: {len(parsed["states"])} states, '
+                   f'{len(parsed["data_definitions"])} data definitions, '
+                   f'{len(parsed["behaviours"])} behaviour interfaces')
+        imgui.text_disabled('Parsed from the selected BNDL resource; the original bytes remain unchanged.')
+        if imgui.button('Export HSM report...'):
+            base = os.path.splitext(r.name or f'{r.id:016X}')[0] + '.txt'
+            path = filedialog.save_file('Export HSM report', base, filedialog.TEXT, 'txt')
+            if path:
+                try:
+                    with open(path, 'w', encoding='utf-8', newline='') as f:
+                        f.write(hsm.format_text(parsed))
+                    self.status = f'Exported HSM report: {path}'
+                except OSError as exc:
+                    self.status = f'Cannot export HSM report: {exc}'
+        imgui.same_line()
+        imgui.set_next_item_width(220)
+        _, self.hsm_filter = imgui.input_text('Filter', self.hsm_filter)
+        filter_text = self.hsm_filter.casefold()
+
+        if imgui.begin_tab_bar('hsmviews'):
+            if imgui.begin_tab_item(f'States ({len(parsed["states"])})')[0]:
+                if not parsed['top_states']:
+                    imgui.text_disabled('No top-level state links.')
+                for top in parsed['top_states']:
+                    imgui.text(f'Top-level state {top["definition_id"]} / behaviour {top["behaviour_id"]} '
+                               f'/ instance {top["instance_id"]}')
+                for index, state in enumerate(parsed['states']):
+                    if filter_text and filter_text not in f'{state["name"]} {state["id"]} {state["behaviour_id"]}'.casefold():
+                        continue
+                    label = f'{state["name"] or "(unnamed)"}  [{state["id"]}]##hsm.state.{index}'
+                    if imgui.tree_node_ex(label, imgui.TreeNodeFlags_.span_full_width):
+                        imgui.text(f'Behaviour id: {state["behaviour_id"]}; fallback: {state["fallback"]}')
+                        if state['data_definition']:
+                            imgui.text(f'Data: {state["data_definition"]["name"]} '
+                                       f'({state["data_definition"]["path"]})')
+                        for entry in state['entries']:
+                            imgui.text(f'Entry {entry["id"]} (action {entry["action"]})')
+                            for spawn in entry['spawns']:
+                                imgui.bullet_text(f'{spawn["name"] or "(unnamed)"} [{spawn["state_id"]}]')
+                        for child in state['exits']:
+                            imgui.text(f'Child exit: {child["name"] or "(unnamed)"} [{child["state_id"]}]')
+                            for point in child['points']:
+                                imgui.bullet_text(f'{point["parent_id"]} -> {point["child_id"]} '
+                                                  f'(action {point["action"]})')
+                                for spawn in point['spawns']:
+                                    imgui.text(f'    -> {spawn["name"] or "(unnamed)"} [{spawn["state_id"]}]')
+                        for parameter in state['parameters']:
+                            imgui.text_wrapped(f'Parameter {parameter["id"]} ({parameter["type"]}): '
+                                               f'{parameter["values"]}')
+                        imgui.tree_pop()
+                imgui.end_tab_item()
+            if imgui.begin_tab_item(f'Data ({len(parsed["data_definitions"])})')[0]:
+                for index, definition in enumerate(parsed['data_definitions']):
+                    if filter_text and filter_text not in (
+                            f'{definition["name"]} {definition["path"]} {definition["id"]}'.casefold()):
+                        continue
+                    if imgui.tree_node_ex(
+                            f'{definition["name"] or "(unnamed)"}  [{definition["id"]}]##hsm.data.{index}',
+                            imgui.TreeNodeFlags_.span_full_width):
+                        imgui.text_wrapped(f'Path: {definition["path"]}')
+                        imgui.text_wrapped(definition['data'])
+                        imgui.tree_pop()
+                imgui.end_tab_item()
+            if imgui.begin_tab_item(f'Behaviours ({len(parsed["behaviours"])})')[0]:
+                for index, behaviour in enumerate(parsed['behaviours']):
+                    if filter_text and filter_text not in f'{behaviour["name"]} {behaviour["id"]}'.casefold():
+                        continue
+                    if imgui.tree_node_ex(
+                            f'{behaviour["name"] or "(unnamed)"}  [{behaviour["id"]}]##hsm.behaviour.{index}',
+                            imgui.TreeNodeFlags_.span_full_width):
+                        imgui.text(f'{len(behaviour["entries"])} entry point(s), '
+                                   f'{len(behaviour["exits"])} exit point(s)')
+                        for entry in behaviour['entries']:
+                            imgui.bullet_text(f'Entry: {entry}')
+                        for exit_id in behaviour['exits']:
+                            imgui.bullet_text(f'Exit: {exit_id}')
+                        for parameter in behaviour['parameters']:
+                            imgui.text_wrapped(f'Parameter {parameter["id"]} ({parameter["type"]}): '
+                                               f'{parameter["values"]}')
+                        imgui.tree_pop()
+                imgui.end_tab_item()
+            imgui.end_tab_bar()
             if r.import_count:
                 imgui.spacing()
                 imgui.text('Uses:')
@@ -1659,7 +1883,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         h, w = img.shape[:2]
         imgui.push_style_var(imgui.StyleVar_.frame_padding, imgui.ImVec2(8, 3))
         zoom_cmd = None
-        if imgui.button(f'{theme.I.ICON_FA_EXPAND if hasattr(theme.I, "ICON_FA_EXPAND") else theme.I.ICON_FA_MAGNIFYING_GLASS}  Fit'):
+        if self.dashboard_icon('search', 15):
+            imgui.same_line(0, 2)
+            fit_label = 'Fit'
+        else:
+            fit_label = (f'{theme.I.ICON_FA_EXPAND if hasattr(theme.I, "ICON_FA_EXPAND") else theme.I.ICON_FA_MAGNIFYING_GLASS}  Fit')
+        if imgui.button(fit_label):
             zoom_cmd = 'fit'
         imgui.same_line(0, 2)
         if imgui.button('1:1'):
@@ -1677,7 +1906,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 imgui.pop_style_color()
             imgui.same_line(0, 2)
         imgui.same_line(0, 12)
-        if imgui.button(f'{theme.I.ICON_FA_UP_RIGHT_AND_DOWN_LEFT_FROM_CENTER}  Full size'):
+        if self.dashboard_icon('expand', 15):
+            imgui.same_line(0, 2)
+            full_size_label = 'Full size'
+        else:
+            full_size_label = f'{theme.I.ICON_FA_UP_RIGHT_AND_DOWN_LEFT_FROM_CENTER}  Full size'
+        if imgui.button(full_size_label):
             self.open_texture_window(d, r)
         if imgui.is_item_hovered():
             imgui.set_tooltip('Show the texture at its full resolution in a big window (or double click it)')
@@ -2019,11 +2253,16 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             mine = False
         pos = pl.position() if mine else self.wave_cursor.get(key, 0)
         if mine and not pl.paused:
-            label = f'{theme.I.ICON_FA_PAUSE}  Pause'
+            kind, action = 'pause', 'Pause'
         elif mine:
-            label = f'{theme.I.ICON_FA_PLAY}  Resume'
+            kind, action = 'play', 'Resume'
         else:
-            label = f'{theme.I.ICON_FA_PLAY}  Play'
+            kind, action = 'play', 'Play'
+        if self.dashboard_icon(kind, 15):
+            imgui.same_line(0, 2)
+            label = action
+        else:
+            label = f'{theme.I.ICON_FA_PAUSE}  Pause' if action == 'Pause' else f'{theme.I.ICON_FA_PLAY}  {action}'
         if imgui.button(label + '##playbtn'):
             try:
                 if mine and not pl.paused:
@@ -2035,7 +2274,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             except OSError as ex:
                 self.status = str(ex)
         imgui.same_line()
-        if imgui.button(f'{theme.I.ICON_FA_STOP}  Stop'):
+        if self.dashboard_icon('stop', 15):
+            imgui.same_line(0, 2)
+            stop_label = 'Stop'
+        else:
+            stop_label = f'{theme.I.ICON_FA_STOP}  Stop'
+        if imgui.button(stop_label):
             if mine:
                 pl.stop()
             self.wave_cursor[key] = 0
@@ -2120,7 +2364,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         hkey = key + ('hold',)
         holding = pl.opened and pl.key == hkey and not pl.done
         imgui.same_line()
-        if imgui.button((f'{theme.I.ICON_FA_STOP}  Stop' if holding else f'{theme.I.ICON_FA_PLAY}  Play') + '##hold'):
+        if self.dashboard_icon('stop' if holding else 'play', 15):
+            imgui.same_line(0, 2)
+            hold_label = 'Stop' if holding else 'Play'
+        else:
+            hold_label = f'{theme.I.ICON_FA_STOP}  Stop' if holding else f'{theme.I.ICON_FA_PLAY}  Play'
+        if imgui.button(hold_label + '##hold'):
             if holding:
                 pl.stop()
             else:
@@ -2637,6 +2886,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             sc = sh.data(0)
             np_ = struct.unpack_from(sb.e + 'I', sc, 8)[0]
             sname = bytes(sc[np_:np_ + 128]).split(b'\0')[0].decode('latin1', 'replace')
+        if not sname and info['shader']:
+            sname = knownids.SHADERS.get(info['shader'] & 0xFFFFFFFF, '')
         imgui.text(f'Shader: {sname or "?"}')
         if info['shader']:
             imgui.same_line()
@@ -2757,6 +3008,281 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 self.maker_rows(d, r, v, strings, commit, ro)
                 imgui.end_tab_item()
             imgui.end_tab_bar()
+
+    def traffic_view(self, d, r):
+        data = r.data(0)
+        key = (d.uid, r.id, id(data))
+        state = self.traffic_cache
+        if state['key'] != key:
+            try:
+                parsed = traffic.parse(data)
+                self.traffic_cache = state = {'key': key, 'result': parsed, 'error': None,
+                                              'zoom': 1.0, 'pan': [0.0, 0.0]}
+            except traffic.TrafficError as exc:
+                self.traffic_cache = state = {'key': key, 'result': None, 'error': str(exc),
+                                              'zoom': 1.0, 'pan': [0.0, 0.0]}
+        parsed = state['result']
+        if parsed is None:
+            imgui.text_colored(imgui.ImVec4(1, 0.4, 0.3, 1),
+                               f'Cannot parse TrafficData: {state["error"]}')
+            return
+
+        points = [p for hull in parsed['hulls'] for line in hull['lines'] for p in line]
+        imgui.text(f'TrafficData version {parsed["version"]}: {len(parsed["hulls"])} hulls, '
+                   f'{sum(len(h["sections"]) for h in parsed["hulls"])} sections, {len(points)} lane points')
+        imgui.text_disabled('Wheel: zoom; right-drag: pan. Lane points are projected onto the X-Z plane.')
+        if not points:
+            imgui.text_disabled('No lane geometry in this resource.')
+            return
+
+        avail = imgui.get_content_region_avail()
+        w, h = max(100.0, avail.x), max(100.0, avail.y - 4)
+        p0 = imgui.get_cursor_screen_pos()
+        imgui.invisible_button('##traffic-map', imgui.ImVec2(w, h),
+                               imgui.ButtonFlags_.mouse_button_left | imgui.ButtonFlags_.mouse_button_right)
+        hovered = imgui.is_item_hovered()
+        io = imgui.get_io()
+        x0, z0, x1, z1 = parsed['bounds']
+        cx, cz = (x0 + x1) / 2, (z0 + z1) / 2
+        base = 0.94 * min(w / max(x1 - x0, 1), h / max(z1 - z0, 1))
+        scale = base * state['zoom']
+        ox, oz = cx + state['pan'][0], cz + state['pan'][1]
+        mx = (io.mouse_pos.x - p0.x - w / 2) / scale + ox
+        mz = (io.mouse_pos.y - p0.y - h / 2) / scale + oz
+        if hovered and io.mouse_wheel:
+            factor = 1.2 ** io.mouse_wheel
+            new_zoom = min(50.0, max(0.1, state['zoom'] * factor))
+            new_scale = base * new_zoom
+            state['pan'][0] += (mx - (io.mouse_pos.x - p0.x - w / 2) / new_scale - cx)
+            state['pan'][1] += (mz - (io.mouse_pos.y - p0.y - h / 2) / new_scale - cz)
+            state['zoom'] = new_zoom
+            scale = new_scale
+            ox, oz = cx + state['pan'][0], cz + state['pan'][1]
+        if imgui.is_item_active() and imgui.is_mouse_down(1):
+            state['pan'][0] -= io.mouse_delta.x / scale
+            state['pan'][1] += io.mouse_delta.y / scale
+            ox, oz = cx + state['pan'][0], cz + state['pan'][1]
+
+        def screen(point):
+            return imgui.ImVec2(p0.x + w / 2 + (point[0] - ox) * scale,
+                                p0.y + h / 2 - (point[2] - oz) * scale)
+
+        dl = imgui.get_window_draw_list()
+        dl.push_clip_rect(p0, imgui.ImVec2(p0.x + w, p0.y + h), True)
+        dl.add_rect_filled(p0, imgui.ImVec2(p0.x + w, p0.y + h), imgui.get_color_u32(imgui.Col_.frame_bg))
+        import colorsys
+        count = max(1, len(parsed['hulls']))
+        for index, hull in enumerate(parsed['hulls']):
+            color = colorsys.hsv_to_rgb(index / count, 0.78, 0.95)
+            color_u32 = imgui.color_convert_float4_to_u32(imgui.ImVec4(*color, 1.0))
+            for line in hull['lines']:
+                dl.add_polyline([screen(point) for point in line], color_u32, 2.0)
+        dl.pop_clip_rect()
+        if hovered:
+            imgui.set_tooltip(f'X {mx:.1f}, Z {mz:.1f}')
+
+    def load_gameplay_reference(self):
+        folder = filedialog.pick_folder('Select the event-traffic-visualizer static JSON folder')
+        if not folder:
+            return
+        try:
+            data = gameplay_data.load(folder)
+        except gameplay_data.GameplayDataError as exc:
+            self.status = f'Cannot load gameplay reference data: {exc}'
+            return
+        state = self.gameplay_view
+        state.update(data=data, folder=folder, open=True, race='', filter='', zoom=1.0, pan=[0.0, 0.0],
+                     custom_route=[])
+        self.status = f'Loaded gameplay reference data from {folder}'
+
+    def gameplay_reference_window(self):
+        state = self.gameplay_view
+        if state['data'] is None:
+            return
+        visible, state['open'] = imgui.begin('Event and gameplay reference viewer###gameplay-ref', state['open'])
+        if visible:
+            data = state['data']
+            imgui.text_disabled(state['folder'])
+            imgui.text(f'{len(data["races"])} events, {len(data["checkpoints"])} checkpoints, '
+                       f'{len(data["triggers"])} gameplay triggers, {len(data["trigger_locations"])} trigger locations')
+            imgui.set_next_item_width(310)
+            _, state['filter'] = imgui.input_text_with_hint('##gameplay-filter', 'filter ids / names', state['filter'])
+            if imgui.begin_tab_bar('gameplay-data-tabs'):
+                if imgui.begin_tab_item('Event routes')[0]:
+                    races = data['races']
+                    names = sorted(races)
+                    if not names:
+                        imgui.text_disabled('No events found in the race dataset.')
+                    elif state['race'] not in races:
+                        state['race'] = names[0]
+                    imgui.set_next_item_width(360)
+                    if names and imgui.begin_combo('Event', state['race']):
+                        for name in names:
+                            if imgui.selectable(f'{name}##race', name == state['race'])[0]:
+                                state['race'] = name
+                                state['zoom'] = 1.0
+                                state['pan'] = [0.0, 0.0]
+                        imgui.end_combo()
+                    if state['race'] in races:
+                        race = races[state['race']]
+                        checkpoint_ids = race.get('checkpoints', [])
+                        trigger_ids = race.get('triggers', [])
+                        imgui.same_line()
+                        if imgui.button('Clear route'):
+                            state['custom_route'].clear()
+                        imgui.same_line()
+                        if imgui.button('Export route...'):
+                            path = filedialog.save_file('Export custom checkpoint route', 'route.json',
+                                                        filedialog.TEXT, 'json')
+                            if path:
+                                try:
+                                    with open(path, 'w', encoding='utf-8', newline='') as f:
+                                        json.dump({'event': state['race'],
+                                                   'checkpoints': state['custom_route']},
+                                                  f, indent=2)
+                                    self.status = f'Exported custom route: {path}'
+                                except OSError as exc:
+                                    self.status = f'Cannot export custom route: {exc}'
+                        imgui.text(f'{race.get("kind", "Event")}: {len(checkpoint_ids)} checkpoints, '
+                                   f'{len(trigger_ids)} triggers; click checkpoint markers to add route entries.')
+                        self.gameplay_route_map(data, state, checkpoint_ids, trigger_ids)
+                        if state['custom_route']:
+                            imgui.text('Custom route: ' + ' -> '.join(str(x) for x in state['custom_route']))
+                    imgui.end_tab_item()
+                for tab, key, title in (
+                        ('Gameplay triggers', 'triggers', 'Triggers'),
+                        ('Trigger locations', 'trigger_locations', 'Trigger locations'),
+                        ('AI player types', 'ai_players', 'AI player types'),
+                        ('Cop AI types', 'cop_types', 'Cop AI types'),
+                        ('Rollout types', 'rollouts', 'Rollout types')):
+                    if imgui.begin_tab_item(tab)[0]:
+                        self.gameplay_json_table(data[key], title, state['filter'], tab)
+                        imgui.end_tab_item()
+                imgui.end_tab_bar()
+        imgui.end()
+
+    def gameplay_route_map(self, data, state, checkpoint_ids, trigger_ids):
+        checkpoints = data['checkpoints']
+        selected = []
+        for checkpoint_id in checkpoint_ids:
+            record = checkpoints.get(str(checkpoint_id))
+            position = record.get('position') if isinstance(record, dict) else None
+            if isinstance(position, dict) and all(k in position for k in ('x', 'y', 'z')):
+                try:
+                    point = (float(position['x']), float(position['z']))
+                except (TypeError, ValueError):
+                    continue
+                if all(math.isfinite(v) for v in point):
+                    selected.append((checkpoint_id, record, point))
+        trigger_points = []
+        for trigger_id in trigger_ids:
+            record = data['trigger_locations'].get(str(trigger_id))
+            position = record.get('data', {}).get('position') if isinstance(record, dict) else None
+            if isinstance(position, dict) and all(k in position for k in ('x', 'z')):
+                try:
+                    point = (float(position['x']), float(position['z']))
+                except (TypeError, ValueError):
+                    continue
+                if all(math.isfinite(v) for v in point):
+                    trigger_points.append((trigger_id, record, point))
+        all_points = [p for _, _, p in selected] + [p for _, _, p in trigger_points]
+        if not all_points:
+            imgui.text_disabled('This event has no checkpoint or trigger positions in the reference data.')
+            return
+        avail = imgui.get_content_region_avail()
+        w, h = max(100.0, avail.x), max(120.0, min(520.0, avail.y * 0.72))
+        p0 = imgui.get_cursor_screen_pos()
+        imgui.invisible_button('##gameplay-route-map', imgui.ImVec2(w, h),
+                               imgui.ButtonFlags_.mouse_button_left | imgui.ButtonFlags_.mouse_button_right)
+        hovered = imgui.is_item_hovered()
+        active = imgui.is_item_active()
+        io = imgui.get_io()
+        xs, zs = [p[0] for p in all_points], [p[1] for p in all_points]
+        x0, x1, z0, z1 = min(xs), max(xs), min(zs), max(zs)
+        cx, cz = (x0 + x1) / 2, (z0 + z1) / 2
+        base = 0.92 * min(w / max(x1 - x0, 1), h / max(z1 - z0, 1))
+        scale = base * state['zoom']
+        ox, oz = cx + state['pan'][0], cz + state['pan'][1]
+
+        def screen(point):
+            return imgui.ImVec2(p0.x + w / 2 + (point[0] - ox) * scale,
+                                p0.y + h / 2 - (point[1] - oz) * scale)
+
+        mouse_x = (io.mouse_pos.x - p0.x - w / 2) / scale + ox
+        mouse_z = (h / 2 - (io.mouse_pos.y - p0.y)) / scale + oz
+        if hovered and io.mouse_wheel:
+            factor = 1.2 ** io.mouse_wheel
+            new_zoom = min(40.0, max(0.5, state['zoom'] * factor))
+            new_scale = base * new_zoom
+            state['pan'][0] += mouse_x - (io.mouse_pos.x - p0.x - w / 2) / new_scale - cx
+            state['pan'][1] += mouse_z - (h / 2 - (io.mouse_pos.y - p0.y)) / new_scale - cz
+            state['zoom'] = new_zoom
+            scale = new_scale
+            ox, oz = cx + state['pan'][0], cz + state['pan'][1]
+        if active and imgui.is_mouse_down(1):
+            state['pan'][0] -= io.mouse_delta.x / scale
+            state['pan'][1] += io.mouse_delta.y / scale
+            ox, oz = cx + state['pan'][0], cz + state['pan'][1]
+
+        draw = imgui.get_window_draw_list()
+        draw.push_clip_rect(p0, imgui.ImVec2(p0.x + w, p0.y + h), True)
+        draw.add_rect_filled(p0, imgui.ImVec2(p0.x + w, p0.y + h), imgui.get_color_u32(imgui.Col_.frame_bg))
+        if len(selected) > 1:
+            draw.add_polyline([screen(p) for _, _, p in selected],
+                              imgui.get_color_u32(imgui.Col_.plot_lines), 2.0)
+
+        hit = None
+        for index, (checkpoint_id, record, point) in enumerate(selected):
+            pos = screen(point)
+            color = (0xFF00FFFF if index == 0 else
+                     0xFF00A5FF if index == len(selected) - 1 else
+                     imgui.get_color_u32(imgui.Col_.text))
+            draw.add_circle_filled(pos, 5.0, color)
+            draw.add_text(imgui.ImVec2(pos.x + 6, pos.y - 7),
+                          imgui.get_color_u32(imgui.Col_.text), str(index + 1))
+            if hovered and math.hypot(io.mouse_pos.x - pos.x, io.mouse_pos.y - pos.y) < 9:
+                hit = ('checkpoint', checkpoint_id, record)
+
+        for trigger_id, record, point in trigger_points:
+            pos = screen(point)
+            draw.add_circle(pos, 5.0, imgui.get_color_u32(imgui.Col_.plot_histogram), 12, 1.5)
+            if hovered and math.hypot(io.mouse_pos.x - pos.x, io.mouse_pos.y - pos.y) < 9:
+                hit = ('trigger', trigger_id, record)
+        draw.pop_clip_rect()
+
+        if hit:
+            kind, identifier, record = hit
+            imgui.set_tooltip(f'{kind.title()} {identifier}\\n{json.dumps(record, indent=2)[:1200]}')
+            if kind == 'checkpoint' and imgui.is_item_clicked(imgui.MouseButton_.left):
+                route = state['custom_route']
+                if not route or route[-1] != identifier:
+                    route.append(identifier)
+
+    @staticmethod
+    def gameplay_json_table(records, title, filter_text, key):
+        needle = filter_text.casefold()
+        visible = [(identifier, value) for identifier, value in records.items()
+                   if not needle or needle in str(identifier).casefold()
+                   or needle in json.dumps(value, ensure_ascii=False).casefold()]
+        imgui.text(f'{len(visible)} {title.lower()}')
+        if not imgui.begin_table(f'gameplay-data-{key}', 2,
+                                 imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v
+                                 | imgui.TableFlags_.scroll_y | imgui.TableFlags_.resizable):
+            return
+        imgui.table_setup_column('Id', imgui.TableColumnFlags_.width_fixed, 100)
+        imgui.table_setup_column('Data', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_headers_row()
+        clipper = imgui.ListClipper()
+        clipper.begin(len(visible))
+        while clipper.step():
+            for index in range(clipper.display_start, clipper.display_end):
+                identifier, value = visible[index]
+                imgui.table_next_row()
+                imgui.table_next_column()
+                imgui.text(str(identifier))
+                imgui.table_next_column()
+                imgui.text_wrapped(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        imgui.end_table()
 
     def record_buttons(self, recs, sel_key, commit, what, ro):
         """Duplicate / Delete / Up / Down for a record list; returns nothing, edits `recs` in place."""
@@ -3311,6 +3837,46 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         if ch:
             te['dirty'] = True
 
+    def lua_view(self, d, r):
+        key = (d.uid, r.id, id(r.data(0)))
+        if self.lua_edit['key'] != key:
+            try:
+                source, encoding = luafile.decode(r.data(0))
+            except (UnicodeDecodeError, ValueError) as e:
+                imgui.text_wrapped(f'LuaCode is not editable as source: {e}')
+                imgui.text_disabled(
+                    'Export it as a resource file (.bres) or use Raw chunk (.bin) to preserve the original data.'
+                )
+                return
+            self.lua_edit = {
+                'key': key, 'text': source, 'encoding': encoding, 'dirty': False
+            }
+        editor = self.lua_edit
+        if imgui.button('Apply changes') and editor['dirty'] and not d.b.truncated:
+            try:
+                data = luafile.encode(editor['text'], editor['encoding'])
+            except UnicodeEncodeError as e:
+                self.status = f'Lua source cannot be saved in its original encoding: {e}'
+            else:
+                d.checkpoint(f'lua source {r.id:#x}', [r.id])
+                r.set_data(0, data)
+                self.changed(d, r)
+                editor['key'] = (d.uid, r.id, id(r.data(0)))
+                editor['dirty'] = False
+                self.status = f'Lua source {r.id:#x} updated (Ctrl+Z to undo).'
+        imgui.same_line()
+        imgui.text_disabled(
+            ('modified · ' if editor['dirty'] else '')
+            + f'{len(editor["text"])} characters ({editor["encoding"]})'
+        )
+        ch, editor['text'] = imgui.input_text_multiline(
+            '##lua', editor['text'], imgui.ImVec2(-1, -1), imgui.InputTextFlags_.allow_tab_input
+        )
+        if ch:
+            editor['dirty'] = True
+        if imgui.button('Export .lua...'):
+            self.action_export(d, r, 'lua')
+
     def strings_view(self, d, r):
         key = (d.uid, r.id, id(r.data(0)))
         if self.str_cache['key'] != key:
@@ -3365,43 +3931,292 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             imgui.same_line()
             if imgui.small_button(f'{self.types.name(t.base)}##base'):
                 self.goto(t.base, d)
-        if not t.fields:
+        if imgui.begin_tab_bar('typeviews'):
+            if imgui.begin_tab_item('Fields')[0]:
+                animated = self.begin_tab_content_transition('typeviews', 'fields')
+                flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v
+                         | imgui.TableFlags_.scroll_y | imgui.TableFlags_.resizable)
+                if t.kind == 5:
+                    if imgui.begin_table('enum', 2, flags):
+                        imgui.table_setup_column('Value name')
+                        imgui.table_setup_column('Value')
+                        imgui.table_headers_row()
+                        for f in t.fields:
+                            imgui.table_next_row()
+                            imgui.table_next_column()
+                            self.field_label(f.name_hash)
+                            imgui.table_next_column()
+                            imgui.text(str(f.offset))
+                        imgui.end_table()
+                elif t.fields and imgui.begin_table('fields', 6, flags):
+                    imgui.table_setup_scroll_freeze(0, 1)
+                    for c in ('Field', 'Type', 'Offset', 'Size', 'Count', 'Flags'):
+                        imgui.table_setup_column(c)
+                    imgui.table_headers_row()
+                    for f in t.fields:
+                        imgui.table_next_row()
+                        imgui.table_next_column()
+                        self.field_label(f.name_hash)
+                        imgui.table_next_column()
+                        if imgui.selectable(f'{self.types.name(f.type_id)}##ft{f.index}', False)[0] and f.type_id:
+                            self.goto(f.type_id, d)
+                        imgui.table_next_column()
+                        imgui.text(f'{f.offset:#x}')
+                        imgui.table_next_column()
+                        imgui.text(str(f.size))
+                        imgui.table_next_column()
+                        imgui.text(str(f.count))
+                        imgui.table_next_column()
+                        imgui.text(field_flags(f.flags))
+                    imgui.end_table()
+                self.end_tab_content_transition(animated)
+                imgui.end_tab_item()
+            if imgui.begin_tab_item('Folder')[0]:
+                animated = self.begin_tab_content_transition('typeviews', 'folder')
+                self.type_folder_view(d, r, t)
+                self.end_tab_content_transition(animated)
+                imgui.end_tab_item()
+            if imgui.begin_tab_item('Inference')[0]:
+                animated = self.begin_tab_content_transition('typeviews', 'inference')
+                self.genesys_prediction_view(d, r, t)
+                self.end_tab_content_transition(animated)
+                imgui.end_tab_item()
+            imgui.end_tab_bar()
+
+    def type_folder_view(self, d, r, t):
+        imgui.text_wrapped(
+            'Type schemas are shown as folders. Struct and enum types expand into their fields or values; '
+            'select a type name to open its schema.'
+        )
+        root_name = self.display_name(d, r)[0]
+        label = f'{theme.FOLDER}  {root_name} ({self.types.name(t.id)})##type_folder_root'
+        if imgui.tree_node_ex(label, imgui.TreeNodeFlags_.default_open
+                              | imgui.TreeNodeFlags_.span_full_width):
+            if t.fields or t.base:
+                self.type_folder_contents(d, t, 'type.folder.root', {t.id}, 0)
+            else:
+                imgui.text_disabled('This type has no fields.')
+            imports = r.imports()
+            if imports and imgui.tree_node_ex(
+                    f'{theme.FOLDER}  Type imports ({len(imports)})##type.folder.imports',
+                    imgui.TreeNodeFlags_.span_full_width):
+                for index, imp in enumerate(imports):
+                    self.object_folder_reference(
+                        d, imp.id, f'type.folder.import.{index}', imp.offset
+                    )
+                imgui.tree_pop()
+            imgui.tree_pop()
+
+    def type_folder_contents(self, d, t, path, ancestors, depth):
+        if depth >= 32:
+            imgui.text_disabled('Maximum folder depth reached.')
             return
-        flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.scroll_y | imgui.TableFlags_.resizable
-        if t.kind == 5:
-            if imgui.begin_table('enum', 2, flags):
-                imgui.table_setup_column('Value name')
-                imgui.table_setup_column('Value')
-                imgui.table_headers_row()
-                for f in t.fields:
-                    imgui.table_next_row()
-                    imgui.table_next_column()
-                    self.field_label(f.name_hash)
-                    imgui.table_next_column()
-                    imgui.text(str(f.offset))
-                imgui.end_table()
+
+        if t.base:
+            base = self.types.get(t.base)
+            base_name = self.types.name(t.base)
+            base_is_folder = base is not None and bool(base.fields or base.base)
+            if t.base in ancestors:
+                base_is_folder = False
+            base_flags = imgui.TreeNodeFlags_.span_full_width
+            if not base_is_folder:
+                base_flags |= (imgui.TreeNodeFlags_.leaf
+                               | imgui.TreeNodeFlags_.no_tree_push_on_open
+                               | imgui.TreeNodeFlags_.bullet)
+            opened = imgui.tree_node_ex(
+                f'{theme.FOLDER if base_is_folder else ""}  Base: {base_name}##{path}.base',
+                base_flags
+            )
+            imgui.same_line()
+            if imgui.small_button(f'{base_name}##{path}.base.link'):
+                self.goto(t.base, d)
+            if base_is_folder and opened:
+                self.type_folder_contents(
+                    d, base, f'{path}.base', ancestors | {t.base}, depth + 1
+                )
+                imgui.tree_pop()
+            elif t.base in ancestors:
+                imgui.same_line()
+                imgui.text_disabled('(recursive type)')
+
+        for field in t.fields:
+            field_name = (self.labels.name(field.name_hash)
+                          or genesys.hash_name(field.name_hash)
+                          or f'{field.name_hash:08x}')
+            child_type = self.types.get(field.type_id) if field.type_id else None
+            child_is_folder = child_type is not None and bool(
+                child_type.fields or child_type.base
+            )
+            recursive = child_is_folder and child_type.id in ancestors
+            child_is_folder = child_is_folder and not recursive
+            count = f' [{field.count}]' if field.count > 1 else ''
+            enum_value = f' = {field.offset}' if t.kind == 5 else ''
+            type_name = self.types.name(field.type_id) if field.type_id else f'{field.type_hash:#x}'
+            suffix = (
+                f'{enum_value}  type {type_name}, offset {field.offset:#x}, size {field.size}, '
+                f'count {field.count}, align {1 << field.align}, flags {field_flags(field.flags)}'
+            )
+            tree_flags = imgui.TreeNodeFlags_.span_full_width
+            if not child_is_folder:
+                tree_flags |= (imgui.TreeNodeFlags_.leaf
+                               | imgui.TreeNodeFlags_.no_tree_push_on_open
+                               | imgui.TreeNodeFlags_.bullet)
+            opened = imgui.tree_node_ex(
+                f'{theme.FOLDER if child_is_folder else ""}  {field_name}{count}##{path}.{field.index}',
+                tree_flags
+            )
+            if field.type_id:
+                imgui.same_line()
+                if imgui.small_button(f'{type_name}##{path}.{field.index}.type'):
+                    self.goto(field.type_id, d)
+            imgui.same_line()
+            imgui.text_disabled(suffix)
+            if recursive:
+                imgui.same_line()
+                imgui.text_disabled('(recursive type)')
+            if child_is_folder and opened:
+                self.type_folder_contents(
+                    d, child_type, f'{path}.{field.index}', ancestors | {child_type.id}, depth + 1
+                )
+                imgui.tree_pop()
+
+    def genesys_pc_executable(self, d):
+        roots_to_check = []
+        if d.path:
+            root = roots.game_root(d.path)
+            if root:
+                roots_to_check.append(root)
+        for folder in self.cfg.get('nav_folders', []):
+            root = roots.game_root(os.path.join(folder, '_bndlx_probe'))
+            if root:
+                roots_to_check.append(root)
+        fallback = roots.FALLBACK.get('PC')
+        if fallback:
+            roots_to_check.append(fallback)
+        seen = set()
+        for root in roots_to_check:
+            normalized = os.path.normcase(os.path.abspath(root))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if roots.platform_of(root) != 'PC':
+                continue
+            exe = os.path.join(root, 'NFS13.exe')
+            if os.path.isfile(exe):
+                return exe
+        return None
+
+    def genesys_prediction_view(self, d, r, t, node=None):
+        if t is None:
+            imgui.text_wrapped('The Genesys type schema is not loaded, so a prediction cannot be generated.')
             return
-        if imgui.begin_table('fields', 6, flags):
-            imgui.table_setup_scroll_freeze(0, 1)
-            for c in ('Field', 'Type', 'Offset', 'Size', 'Count', 'Flags'):
-                imgui.table_setup_column(c)
-            imgui.table_headers_row()
-            for f in t.fields:
-                imgui.table_next_row()
-                imgui.table_next_column()
-                self.field_label(f.name_hash)
-                imgui.table_next_column()
-                if imgui.selectable(f'{self.types.name(f.type_id)}##ft{f.index}', False)[0] and f.type_id:
-                    self.goto(f.type_id, d)
-                imgui.table_next_column()
-                imgui.text(f'{f.offset:#x}')
-                imgui.table_next_column()
-                imgui.text(str(f.size))
-                imgui.table_next_column()
-                imgui.text(str(f.count))
-                imgui.table_next_column()
-                imgui.text(field_flags(f.flags))
-            imgui.end_table()
+
+        if node is None:
+            source = genesys_insight.schema_source(self.types, t, self.labels)
+        else:
+            source = genesys_insight.object_source(self.types, node, self.labels, r.id)
+        imgui.text_wrapped(
+            'Generated pseudocode describes the schema and, for objects, serialized values. It is not the '
+            'original source or executable code, and editing it does not change the resource.'
+        )
+        if imgui.button('Export inferred pseudocode...'):
+            filename = f'{ops.id_text(r.id)}_inferred.txt'
+            base = os.path.join(
+                os.path.dirname(self.cfg.get('last_export', '') or (d.path or '')), filename
+            )
+            out_path = filedialog.save_file(
+                'Export inferred Genesys pseudocode', base, filedialog.TEXT, 'txt'
+            )
+            if out_path:
+                try:
+                    ops.write_file(out_path, source.encode('utf-8'))
+                    self.remember('last_export', out_path)
+                    self.status = f'Exported inferred Genesys pseudocode to {out_path}.'
+                except OSError as e:
+                    self.status = f'Export failed: {e}'
+
+        imgui.separator()
+        imgui.text('PC executable assembly candidates')
+        imgui.text_disabled(
+            'Heuristic only: instructions are matched by field offsets. Common offsets can produce unrelated '
+            'matches; these are not confirmed callers or decompiled functions.'
+        )
+        exe_path = self.genesys_pc_executable(d)
+        if exe_path is None:
+            imgui.text_wrapped(
+                'No PC NFS13.exe was found for this bundle. Open a bundle inside the PC game folder or add the '
+                'PC game folder in the navigation pane. PS3 executables are intentionally not used.'
+            )
+        else:
+            cache_key = (
+                os.path.normcase(os.path.abspath(exe_path)), t.id,
+                tuple((f.offset, f.name_hash, self.labels.name(f.name_hash)) for f in t.fields),
+            )
+            state = self.genesys_insight_state.get(cache_key)
+            if state is None:
+                state = {'loading': False, 'candidates': None, 'error': None}
+                self.genesys_insight_state[cache_key] = state
+            imgui.text_disabled(os.path.basename(exe_path))
+            imgui.begin_disabled(self.job is not None or state['loading'])
+            if imgui.button('Find candidate references in NFS13.exe...'):
+                state.update(loading=True, candidates=None, error=None)
+
+                def scan(progress):
+                    try:
+                        return genesys_insight.assembly_candidates(
+                            exe_path, t, self.labels, progress, self.types
+                        )
+                    except (OSError, ValueError, struct.error, genesys_insight.CsError) as e:
+                        return e
+
+                def scan_done(result):
+                    state['loading'] = False
+                    if isinstance(result, Exception):
+                        state['error'] = str(result)
+                    else:
+                        state['candidates'] = result
+
+                self.run_job(
+                    f'Scanning PC executable for {self.types.name(t.id)} field references...',
+                    scan, scan_done
+                )
+            imgui.end_disabled()
+            if state['loading']:
+                imgui.text_disabled('Scanning executable code sections in the background...')
+            elif state['error']:
+                imgui.text_colored(
+                    imgui.ImVec4(1.0, 0.5, 0.4, 1.0), f'Assembly scan failed: {state["error"]}'
+                )
+            elif state['candidates'] is not None:
+                report = genesys_insight.candidate_report(state['candidates'])
+                if not state['candidates']:
+                    imgui.text_disabled(
+                        'No matching references in statically reachable code; the executable may contain packed '
+                        'or indirectly dispatched code.'
+                    )
+                if imgui.button('Export candidate assembly...'):
+                    filename = f'{ops.id_text(r.id)}_assembly_candidates.txt'
+                    base = os.path.join(
+                        os.path.dirname(self.cfg.get('last_export', '') or (d.path or '')), filename
+                    )
+                    out_path = filedialog.save_file(
+                        'Export heuristic assembly candidates', base, filedialog.TEXT, 'txt'
+                    )
+                    if out_path:
+                        try:
+                            ops.write_file(out_path, report.encode('utf-8'))
+                            self.remember('last_export', out_path)
+                            self.status = f'Exported assembly candidates to {out_path}.'
+                        except OSError as e:
+                            self.status = f'Export failed: {e}'
+                imgui.input_text_multiline(
+                    '##genesys_assembly_candidates', report, imgui.ImVec2(-1, 230),
+                    imgui.InputTextFlags_.read_only
+                )
+        imgui.input_text_multiline(
+            '##genesys_inferred_source', source, imgui.ImVec2(-1, -1),
+            imgui.InputTextFlags_.read_only
+        )
 
     def field_label(self, h):
         n = self.labels.name(h)
@@ -3422,6 +4237,18 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             imgui.end_popup()
 
     def object_view(self, d, r):
+        event_catalog = None
+        event_error = None
+        try:
+            event_catalog = event_data.parse(r.data(0))
+        except event_data.EventDataError as exc:
+            event_error = str(exc)
+        if event_catalog is not None:
+            self.event_catalog_view(d, r, event_catalog)
+            return
+        if event_error:
+            imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.3, 1.0), event_error)
+            return
         key = (d.uid, r.id, id(r.data(0)), len(self.types.types))
         node = self.gcache.get(key)
         if node is None:
@@ -3434,22 +4261,422 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             self.gcache[key] = node
         imgui.text(self.types.name(node.type))
         imgui.same_line()
-        imgui.text_disabled('(drag a number to change it, Ctrl+click to type; right click a field to name it)')
+        imgui.text_disabled('(Fields edits values; Folder shows nested structs and referenced resources)')
         if not self.labels.found:
             imgui.push_text_wrap_pos(0.0)
-            imgui.text_colored(imgui.ImVec4(1.0, 0.75, 0.3, 1.0), 'Most field names are hashes until Find names '
-                               '(Home, or ... menu) has scanned the game folder: it finds their real names.')
+            imgui.text_colored(imgui.ImVec4(1.0, 0.75, 0.3, 1.0), 'Bundled source maps name many fields already; '
+                               'Find names (Home, or ... menu) can find more from the game files.')
             imgui.pop_text_wrap_pos()
-        flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.resizable
-                 | imgui.TableFlags_.scroll_y)
-        if imgui.begin_table('obj', 3, flags):
-            imgui.table_setup_scroll_freeze(0, 1)
-            imgui.table_setup_column('Field', imgui.TableColumnFlags_.width_fixed, 240)
-            imgui.table_setup_column('Value', imgui.TableColumnFlags_.width_stretch)
-            imgui.table_setup_column('Type', imgui.TableColumnFlags_.width_fixed, 140)
+        if imgui.begin_tab_bar('objviews'):
+            if imgui.begin_tab_item('Fields')[0]:
+                animated = self.begin_tab_content_transition('objviews', 'fields')
+                flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v
+                         | imgui.TableFlags_.resizable | imgui.TableFlags_.scroll_y)
+                if imgui.begin_table('obj', 3, flags):
+                    imgui.table_setup_scroll_freeze(0, 1)
+                    imgui.table_setup_column('Field', imgui.TableColumnFlags_.width_fixed, 240)
+                    imgui.table_setup_column('Value', imgui.TableColumnFlags_.width_stretch)
+                    imgui.table_setup_column('Type', imgui.TableColumnFlags_.width_fixed, 140)
+                    imgui.table_headers_row()
+                    self.node_rows(d, r, node, 'n')
+                    imgui.end_table()
+                self.end_tab_content_transition(animated)
+                imgui.end_tab_item()
+            if imgui.begin_tab_item('Folder')[0]:
+                animated = self.begin_tab_content_transition('objviews', 'folder')
+                self.object_folder_view(d, r, node)
+                self.end_tab_content_transition(animated)
+                imgui.end_tab_item()
+            if imgui.begin_tab_item('Inference')[0]:
+                animated = self.begin_tab_content_transition('objviews', 'inference')
+                self.genesys_prediction_view(d, r, self.types.get(node.type), node)
+                self.end_tab_content_transition(animated)
+                imgui.end_tab_item()
+            imgui.end_tab_bar()
+
+    def event_catalog_view(self, d, r, catalog):
+        imgui.text(f'Event catalog: {len(catalog.records)} records at {catalog.table_offset:#x}; '
+                   f'header id {catalog.unknown_id:#x}')
+        if imgui.begin_tab_bar('event-catalog-tabs'):
+            if imgui.begin_tab_item('Fields')[0]:
+                self._event_fields_table(d, r, 'Event catalog', catalog.fields)
+                selectable = [record for record in catalog.records if record.offset is not None]
+                if selectable:
+                    key = (d.uid, r.id)
+                    state = self.event_view_state.setdefault(key, {'index': selectable[0].index})
+                    records_by_index = {record.index: record for record in selectable}
+                    if state['index'] not in records_by_index:
+                        state['index'] = selectable[0].index
+                    current = records_by_index[state['index']]
+                    current_name = event_data.event_name(current) or current.kind
+                    imgui.set_next_item_width(360)
+                    if imgui.begin_combo('Event fields', f'#{current.index}: {current_name}'):
+                        for record in selectable:
+                            name = event_data.event_name(record) or record.kind
+                            label = f'#{record.index}: {name}##event-field-{record.index}'
+                            if imgui.selectable(label, state['index'] == record.index)[0]:
+                                state['index'] = record.index
+                        imgui.end_combo()
+                    if current.fields:
+                        imgui.text_disabled(f'{current.kind} fields at {current.offset:#x}; '
+                                            'pointer/reference fields are read-only.')
+                        self._event_fields_table(d, r, f'event-{current.index}', current.fields)
+                        self._event_arrays_view(d, r, current)
+                    else:
+                        imgui.text_disabled(f'{current.kind} has no specialized field layout yet.')
+                imgui.end_tab_item()
+            if imgui.begin_tab_item(f'Event records ({len(catalog.records)})')[0]:
+                App._event_records_table(catalog)
+                imgui.end_tab_item()
+            imgui.end_tab_bar()
+
+    def _event_fields_table(self, d, r, table_id, fields):
+        flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v
+                 | imgui.TableFlags_.scroll_y | imgui.TableFlags_.resizable)
+        if not imgui.begin_table(f'event-fields-{table_id}', 5, flags):
+            return
+        imgui.table_setup_column('Field', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column('Offset', imgui.TableColumnFlags_.width_fixed, 75)
+        imgui.table_setup_column('Type', imgui.TableColumnFlags_.width_fixed, 165)
+        imgui.table_setup_column('Value', imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column('Edit', imgui.TableColumnFlags_.width_fixed, 42)
+        imgui.table_headers_row()
+        for name, offset, kind, value, fmt, editable in fields:
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.text(name)
+            imgui.table_next_column()
+            imgui.text(f'{offset:#x}')
+            imgui.table_next_column()
+            imgui.text_disabled(kind)
+            imgui.table_next_column()
+            if fmt is None:
+                imgui.text_disabled('structured / raw bytes')
+                imgui.table_next_column()
+                imgui.text_disabled('-')
+                continue
+            can_edit = editable and not d.b.truncated
+            imgui.begin_disabled(not can_edit)
+            changed = False
+            if kind == 'bool':
+                changed, new_value = imgui.checkbox(f'##{table_id}-{offset:x}', bool(value))
+                if changed:
+                    value = int(new_value)
+            elif kind == 'float':
+                changed, value = imgui.input_float(f'##{table_id}-{offset:x}', float(value), 0, 0, '%.7g')
+            elif can_edit:
+                changed, text = imgui.input_text(f'##{table_id}-{offset:x}', str(value),
+                                                 imgui.InputTextFlags_.enter_returns_true)
+                if changed:
+                    try:
+                        value = int(text, 0)
+                    except ValueError:
+                        self.status = f'Invalid integer for {name}: {text}'
+                        changed = False
+            else:
+                imgui.text(f'{value:#x}' if isinstance(value, int) else str(value))
+            if changed:
+                try:
+                    self.write(d, r, offset, fmt, value)
+                except (OverflowError, struct.error) as exc:
+                    self.status = f'Cannot update {name}: {exc}'
+            imgui.end_disabled()
+            imgui.table_next_column()
+            imgui.text_disabled('editable' if can_edit else 'read only')
+        imgui.end_table()
+
+    def _event_arrays_view(self, d, r, record):
+        if not record.arrays:
+            return
+        imgui.separator()
+        imgui.text('Inline and pointer-backed arrays')
+        for array in record.arrays:
+            label = f'{array.name} [{array.count}]##event-array-{record.index}-{array.offset:x}'
+            if not imgui.tree_node_ex(label, imgui.TreeNodeFlags_.span_full_width):
+                continue
+            flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v
+                     | imgui.TableFlags_.scroll_y | imgui.TableFlags_.resizable)
+            if imgui.begin_table(f'event-array-table-{record.index}-{array.offset:x}', 3, flags):
+                imgui.table_setup_column('Index', imgui.TableColumnFlags_.width_fixed, 70)
+                imgui.table_setup_column('Offset', imgui.TableColumnFlags_.width_fixed, 90)
+                imgui.table_setup_column('Value', imgui.TableColumnFlags_.width_stretch)
+                imgui.table_headers_row()
+                clipper = imgui.ListClipper()
+                clipper.begin(array.count)
+                while clipper.step():
+                    for index in range(clipper.display_start, clipper.display_end):
+                        offset = array.offset + index * struct.calcsize(array.fmt)
+                        value = struct.unpack_from(array.fmt, r.data(0), offset)[0]
+                        imgui.table_next_row()
+                        imgui.table_next_column()
+                        imgui.text(str(index))
+                        imgui.table_next_column()
+                        imgui.text(f'{offset:#x}')
+                        imgui.table_next_column()
+                        imgui.begin_disabled(d.b.truncated or not array.editable)
+                        if array.kind == 'float':
+                            changed, new_value = imgui.input_float(
+                                f'##event-array-value-{record.index}-{offset:x}',
+                                float(value), 0, 0, '%.7g')
+                        else:
+                            changed, text = imgui.input_text(
+                                f'##event-array-value-{record.index}-{offset:x}',
+                                str(value), imgui.InputTextFlags_.enter_returns_true)
+                            new_value = value
+                            if changed:
+                                try:
+                                    new_value = int(text, 0)
+                                except ValueError:
+                                    self.status = f'Invalid integer in {array.name}: {text}'
+                                    changed = False
+                        if changed:
+                            try:
+                                self.write(d, r, offset, array.fmt, new_value)
+                            except (OverflowError, struct.error) as exc:
+                                self.status = f'Cannot update {array.name}[{index}]: {exc}'
+                        imgui.end_disabled()
+                imgui.end_table()
+            imgui.tree_pop()
+
+    @staticmethod
+    def _event_records_table(catalog):
+        flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v
+                 | imgui.TableFlags_.scroll_y | imgui.TableFlags_.resizable)
+        if imgui.begin_table('event-catalog-records', 4, flags):
+            imgui.table_setup_column('Index', imgui.TableColumnFlags_.width_fixed, 80)
+            imgui.table_setup_column('Event', imgui.TableColumnFlags_.width_stretch)
+            imgui.table_setup_column('Event id', imgui.TableColumnFlags_.width_fixed, 100)
+            imgui.table_setup_column('Offset / type version', imgui.TableColumnFlags_.width_fixed, 180)
             imgui.table_headers_row()
-            self.node_rows(d, r, node, 'n')
+            clipper = imgui.ListClipper()
+            clipper.begin(len(catalog.records))
+            while clipper.step():
+                for index in range(clipper.display_start, clipper.display_end):
+                    record = catalog.records[index]
+                    imgui.table_next_row()
+                    imgui.table_next_column()
+                    imgui.text(str(record.index))
+                    imgui.table_next_column()
+                    name = event_data.event_name(record)
+                    imgui.text(f'{name} ({record.kind})' if name else record.kind)
+                    imgui.table_next_column()
+                    imgui.text(f'{record.name_id:#x}' if record.name_id is not None else '-')
+                    imgui.table_next_column()
+                    if record.offset is None:
+                        imgui.text_disabled('null')
+                    else:
+                        imgui.text(f'{record.offset:#x} / {record.type_version:08X}')
             imgui.end_table()
+
+    def object_folder_view(self, d, r, node):
+        imgui.text_wrapped(
+            'Structs and arrays are shown as folders. Resource references are clickable '
+            'files; selecting one opens its resource preview.'
+        )
+        root_name = self.display_name(d, r)[0]
+        label = f'{theme.FOLDER}  {root_name} ({self.types.name(node.type)})##object_folder_root'
+        if imgui.tree_node_ex(label, imgui.TreeNodeFlags_.default_open
+                              | imgui.TreeNodeFlags_.span_full_width):
+            self.object_folder_node(d, r, node, 'folder.root', set(), 0)
+            imports = r.imports()
+            if imports and imgui.tree_node_ex(
+                    f'{theme.FOLDER}  Resource imports ({len(imports)})##folder.imports',
+                    imgui.TreeNodeFlags_.span_full_width):
+                for index, imp in enumerate(imports):
+                    self.object_folder_reference(
+                        d, imp.id, f'import_{imp.offset:x}_{index}', imp.offset
+                    )
+                imgui.tree_pop()
+            imgui.tree_pop()
+
+    def object_folder_node(self, d, r, node, path, seen_nodes, depth):
+        if depth >= 32:
+            imgui.text_disabled('Maximum folder depth reached.')
+            return
+        node_key = id(node)
+        if node_key in seen_nodes:
+            imgui.text_disabled('Already shown above.')
+            return
+        seen_nodes.add(node_key)
+        schema = self.types.get(node.type)
+        if schema is None:
+            imgui.text_disabled(f'Missing Genesys type {node.type:#x}.')
+            return
+        for field in schema.fields:
+            label = (self.labels.name(field.name_hash)
+                     or genesys.hash_name(field.name_hash)
+                     or f'{field.name_hash:08x}')
+            self.object_folder_value(
+                d, r, label, node.fields.get(field.name_hash),
+                f'{path}.{field.name_hash:x}', seen_nodes, depth + 1,
+                node.locs.get(field.name_hash)
+            )
+
+    def object_folder_value(self, d, r, label, value, path, seen_nodes, depth, loc=None):
+        if isinstance(value, Node):
+            folder_label = f'{theme.FOLDER}  {label} ({self.types.name(value.type)})##{path}'
+            opened = imgui.tree_node_ex(
+                folder_label, imgui.TreeNodeFlags_.span_full_width
+            )
+            if opened:
+                self.object_folder_node(
+                    d, r, value, path, seen_nodes, depth + 1
+                )
+                imgui.tree_pop()
+            return
+
+        if isinstance(value, Ref):
+            self.object_folder_reference(d, value.id, path, label=label)
+            return
+
+        if isinstance(value, list) and any(
+                isinstance(item, (Node, Ref, list)) for item in value):
+            folder_label = f'{theme.FOLDER}  {label} [{len(value)}]##{path}'
+            opened = imgui.tree_node_ex(
+                folder_label, imgui.TreeNodeFlags_.span_full_width
+            )
+            if opened:
+                for index, item in enumerate(value):
+                    item_loc = None
+                    if loc is not None and loc[1].flags & 2 and not loc[1].flags & 1:
+                        field_type = self.types.get(loc[1].type_id)
+                        stride = field_type.size if field_type is not None else loc[1].size
+                        item_loc = (loc[0] + index * stride, loc[1])
+                    self.object_folder_value(
+                        d, r, f'[{index}]', item, f'{path}.{index}',
+                        seen_nodes, depth + 1, item_loc
+                    )
+                imgui.tree_pop()
+            return
+
+        if isinstance(value, str):
+            self.object_folder_string(d, r, label, value, path, loc)
+            return
+
+        if not self.dashboard_icon('text' if isinstance(value, str) else 'file', 16):
+            icon, colour = theme.type_icon(T_TEXT if isinstance(value, str) else 0)
+            theme.icon_text(icon, colour)
+        imgui.same_line()
+        display_value = fmt_value(value)
+        if len(display_value) > 320:
+            display_value = display_value[:317] + '...'
+        imgui.text_wrapped(f'{label}: {display_value}')
+        if imgui.is_item_hovered() and value is not None:
+            imgui.set_tooltip(fmt_value(value))
+
+    def object_folder_string(self, d, r, label, value, path, loc):
+        if not self.dashboard_icon('text', 16):
+            icon, colour = theme.type_icon(T_TEXT)
+            theme.icon_text(icon, colour)
+        imgui.same_line()
+        imgui.text(label)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(value)
+        if loc is None:
+            imgui.same_line()
+            imgui.text_disabled('(read only)')
+            return
+        imgui.same_line()
+        if imgui.small_button(f'Edit##{path}.edit'):
+            self.genesys_string_edit = {
+                'doc': d.uid, 'rid': r.id, 'offset': loc[0], 'label': label,
+                'name_hash': loc[1].name_hash, 'path': path, 'text': value, 'dirty': False,
+            }
+        imgui.same_line()
+        if imgui.small_button(f'Export##{path}.export'):
+            indexes = ''.join(re.findall(r'\.\d+', path))
+            filename = f'{ops.id_text(r.id)}_{loc[1].name_hash:08X}{indexes}.txt'
+            base = os.path.join(os.path.dirname(self.cfg.get('last_export', '') or (d.path or '')), filename)
+            out_path = filedialog.save_file('Export Genesys text field', base, filedialog.TEXT, 'txt')
+            if out_path:
+                try:
+                    ops.write_file(out_path, value.encode('latin1'))
+                    self.remember('last_export', out_path)
+                    self.status = f'Exported Genesys text field {label} to {out_path}.'
+                except (OSError, UnicodeEncodeError) as e:
+                    self.status = f'Export failed: {e}'
+
+    def genesys_string_window(self):
+        state = self.genesys_string_edit
+        if state is None:
+            return
+        d = self.doc_by_uid(state['doc'])
+        r = d.b.find(state['rid']) if d is not None else None
+        if r is None:
+            self.genesys_string_edit = None
+            return
+        opened, keep = imgui.begin(f'Edit Genesys text: {state["label"]}###genesys_string_editor')
+        if opened:
+            imgui.text_disabled('Text is stored as Latin-1 in the Genesys object.')
+            ch, state['text'] = imgui.input_text_multiline(
+                '##genesys_string', state['text'], imgui.ImVec2(620, 300),
+                imgui.InputTextFlags_.allow_tab_input
+            )
+            if ch:
+                state['dirty'] = True
+            if imgui.button('Apply to object') and state['dirty'] and not d.b.truncated:
+                if '\0' in state['text']:
+                    self.status = 'Genesys text fields cannot contain NUL characters.'
+                else:
+                    try:
+                        state['text'].encode('latin1')
+                    except UnicodeEncodeError as e:
+                        self.status = f'Text contains characters not supported by the game: {e}'
+                    else:
+                        if self.write_string(d, r, state['offset'], state['text']):
+                            self.changed(d, r)
+                            state['dirty'] = False
+                            self.status = f'Genesys text field {state["label"]} updated (Ctrl+Z to undo).'
+            imgui.same_line()
+            if imgui.button('Export .txt...'):
+                indexes = ''.join(re.findall(r'\.\d+', state['path']))
+                filename = f'{ops.id_text(r.id)}_{state["name_hash"]:08X}{indexes}.txt'
+                base = os.path.join(os.path.dirname(self.cfg.get('last_export', '') or (d.path or '')), filename)
+                out_path = filedialog.save_file('Export Genesys text field', base, filedialog.TEXT, 'txt')
+                if out_path:
+                    try:
+                        ops.write_file(out_path, state['text'].encode('latin1'))
+                        self.remember('last_export', out_path)
+                        self.status = f'Exported Genesys text field {state["label"]} to {out_path}.'
+                    except (OSError, UnicodeEncodeError) as e:
+                        self.status = f'Export failed: {e}'
+            imgui.same_line()
+            if imgui.button('Close'):
+                self.genesys_string_edit = None
+        imgui.end()
+        if keep is False:
+            self.genesys_string_edit = None
+
+    def object_folder_reference(self, d, rid, path, offset=None, label=None):
+        target_doc = d
+        target = d.b.find(rid)
+        if target is None:
+            target_doc, target = self.where(rid)
+
+        if target is None:
+            label = f'-> {ops.id_text(rid)} (not open)##{path}'
+            imgui.tree_node_ex(
+                label, imgui.TreeNodeFlags_.leaf
+                | imgui.TreeNodeFlags_.no_tree_push_on_open
+                | imgui.TreeNodeFlags_.span_full_width
+            )
+            return
+
+        name, _, tip = self.display_name(target_doc, target)
+        if not self.dashboard_icon('file', 16):
+            icon, colour = theme.type_icon(target.type)
+            theme.icon_text(icon, colour)
+        imgui.same_line()
+        suffix = f' [{offset:#x}]' if offset is not None else ''
+        selected = self.focus == (target_doc.uid, target.id)
+        link_label = f'{label}: {name}' if label else name
+        clicked = imgui.selectable(
+            f'{link_label} ({type_name(target.type)}){suffix}##{path}', selected
+        )[0]
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(tip)
+        if clicked:
+            self.goto(rid, target_doc)
 
     def node_rows(self, d, r, node, path):
         t = self.types.get(node.type)
@@ -3611,7 +4838,9 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                 except (ValueError, struct.error) as ex:
                     self.status = f'Not a valid value: {ex}'
         elif kind == 'string':
-            ch, txt = imgui.input_text(f'##{path}', v, imgui.InputTextFlags_.enter_returns_true)
+            ch, txt = imgui.input_text(
+                f'##{path}', v, imgui.InputTextFlags_.enter_returns_true
+            )
             if ch and txt != v:
                 self.write_string(d, r, off, txt)
         else:
@@ -3633,15 +4862,30 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
         e = d.b.e
         buf = bytearray(r.data(0))
         rel, ln = struct.unpack_from(e + 'II', buf, off)
-        raw = text.encode('latin1', 'replace')
-        if len(raw) + 1 > ln:
-            self.status = f'The new text is longer than the old one ({ln - 1} characters); longer strings are not supported yet.'
-            return
+        if '\0' in text:
+            self.status = 'Genesys text fields cannot contain NUL characters.'
+            return False
+        try:
+            raw = text.encode('latin1')
+        except UnicodeEncodeError as ex:
+            self.status = f'Text contains characters not supported by the game: {ex}'
+            return False
+        new_len = len(raw) + 1
+        if new_len <= ln:
+            buf[off + rel:off + rel + ln] = raw + b'\0' * (ln - len(raw))
+        else:
+            new_rel = len(buf) - off
+            if new_rel > 0xFFFFFFFF or new_len > 0xFFFFFFFF:
+                self.status = 'The Genesys text exceeds the 32-bit string offset or length limit.'
+                return False
+            buf.extend(raw + b'\0')
+            struct.pack_into(e + 'I', buf, off, new_rel)
+        struct.pack_into(e + 'I', buf, off + 4, new_len)
         d.edit_checkpoint(r.id)
-        buf[off + rel:off + rel + ln] = raw + b'\0' * (ln - len(raw))
-        struct.pack_into(e + 'I', buf, off + 4, len(raw) + 1)
         r.set_data(0, buf)
         self.gcache.clear()
+        d.summary.pop(r.id, None)
+        return True
 
     # -- status / modals --------------------------------------------------------------------------------------
     def results_window(self):
@@ -3680,7 +4924,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
                  'confirm_replace': 'Replace resources', 'change_id': 'Duplicate resource' if m.get('dup') else 'Change id',
                  'texture_options': 'Replace texture', 'wave_options': 'Replace sound', 'open_path': 'Open by path', 'find': 'Find', 'goto': 'Go to id',
                  'pick_chunk': 'Replace chunk', 'properties': 'Bundle properties',
-                 'plate': 'License plates', 'ginsu_options': 'Replace engine sound'}.get(m['kind'], 'Message')
+                 'plate': 'License plates', 'ginsu_options': 'Replace engine sound',
+                 'compare': 'Bundle differences'}.get(m['kind'], 'Message')
         popup = f'{title}###modal'
         if not imgui.is_popup_open(popup):
             imgui.open_popup(popup)
@@ -3693,12 +4938,51 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             imgui.push_text_wrap_pos(620)
             imgui.text_unformatted(m['text'])
             imgui.pop_text_wrap_pos()
+            act = m.get('action')
+            if act:
+                if imgui.button(act[0]):
+                    close = True
+                    act[1]()
+                imgui.same_line()
             if m.get('open') and imgui.button('Open it'):
                 self.open_path(m['open'])
                 close = True
                 imgui.same_line()
             if imgui.button('OK', imgui.ImVec2(120, 0)) or imgui.is_key_pressed(imgui.Key.enter):
                 close = True
+        elif k == 'compare':
+            left = self.doc_by_uid(m['left'])
+            right = self.doc_by_uid(m['right'])
+            if left is None or right is None:
+                imgui.text_disabled('One of the compared bundles is no longer open.')
+                close = True
+            else:
+                imgui.text(left.path)
+                imgui.text(f'Compared with: {right.path}')
+                if not m['rows']:
+                    imgui.text_disabled('No resource or field differences found.')
+                else:
+                    imgui.text(f'{len(m["rows"])} difference(s)')
+                    flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.scroll_y
+                    if imgui.begin_table('bundle-differences', 4, flags, imgui.ImVec2(760, 420)):
+                        imgui.table_setup_column('Resource', imgui.TableColumnFlags_.width_fixed, 150)
+                        imgui.table_setup_column('Field', imgui.TableColumnFlags_.width_stretch)
+                        imgui.table_setup_column(left.name, imgui.TableColumnFlags_.width_stretch)
+                        imgui.table_setup_column(right.name, imgui.TableColumnFlags_.width_stretch)
+                        imgui.table_headers_row()
+                        for rid, field, value_a, value_b in m['rows']:
+                            imgui.table_next_row()
+                            imgui.table_next_column()
+                            imgui.text(f'{rid:016X}')
+                            imgui.table_next_column()
+                            imgui.text_wrapped(field)
+                            imgui.table_next_column()
+                            imgui.text_wrapped(value_a)
+                            imgui.table_next_column()
+                            imgui.text_wrapped(value_b)
+                        imgui.end_table()
+                if imgui.button('Close', imgui.ImVec2(120, 0)):
+                    close = True
         elif k == 'confirm_delete':
             d = self.doc_by_uid(m['doc'])
             imgui.text(f'Delete {len(m["ids"])} resource(s) from {d.name if d else "?"}? (Ctrl+Z undoes it)')
@@ -3722,8 +5006,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI):
             if imgui.button('Cancel', imgui.ImVec2(120, 0)):
                 close = True
         elif k == 'confirm_exit':
+            dashboard = getattr(self, 'dashboard_ui', None)
+            hex_dirty = [document.path for document in getattr(dashboard, 'hex_documents', ())
+                         if document.modified]
             names = ', '.join([d.name for d in self.docs if d.modified]
-                              + (['the soundtrack editor'] if self.st_ui is not None and self.st_ui['model'].dirty else []))
+                              + (['the soundtrack editor'] if self.st_ui is not None and self.st_ui['model'].dirty else [])
+                              + hex_dirty)
             imgui.text(f'Unsaved changes in: {names}')
             if imgui.button('Exit without saving', imgui.ImVec2(170, 0)):
                 self.exit_ok = True
@@ -4020,7 +5308,8 @@ Copy and paste, drag and drop (like Explorer):
 - Ctrl+C / Ctrl+X, then Ctrl+V in another bundle: copies / moves resources (PS3 <-> PC converted as needed);
   the copied resources are also on the Windows clipboard as files (paste them into an Explorer folder);
 - files copied in Explorer and pasted with Ctrl+V, or dropped on the window: a PNG / DDS / TGA / JPG onto a
-  texture replaces it, a .txt onto a text file, a .csv onto the strings, a .bres onto any resource;
+  texture replaces it, a .txt onto a text file, a .lua onto a plain-text LuaCode resource, a .csv onto the strings,
+  a .bres onto any resource;
   files named <resource id>.<ext> replace those resources; .bres files add resources; bundles open;
 - drag resources onto another bundle's tab (or its entry in the navigation pane) to copy them;
 - drag resources out of the window into Explorer to save them (textures as PNG or DDS: ... > Options).
@@ -4086,15 +5375,24 @@ Sounds (Wave): Play / Pause / Stop and a waveform with the play position (click 
 AIFF file: it is encoded as EALayer3 like every sound of the game (sample rate and channels as the old sound
 by default). Streamed sounds are read from and written to their .SPS files (the original is kept as .orig).
 
-Export / Replace / Import buttons: DDS, PNG, WAV, FBX, glTF, text, CSV, .bres (one resource with all its data),
+Export / Replace / Import buttons: DDS, PNG, WAV, FBX, glTF, text, Lua source, CSV, .bres (one resource with all its data),
 raw chunks.
 ... (See more) > Extract all / Import resources from folder work on whole bundles.
 
 Convert: saves a PS3 bundle for PC or a PC bundle for PS3: textures, Genesys types and objects, colour cubes,
 text files and strings are converted; meshes, materials and shaders are platform-specific and left out (the
-report lists them).
+report lists them). The result holds only what could be converted, so it is not a drop-in game bundle.
 
-Themes: ... > Options (dark is the default, light is available)."""
+Port into a game bundle (... > Port into a PC game bundle...): a window in three steps. 1: the PS3 bundle with
+the data you want. 2: the PC game's bundle of the same name. 3: where to save the result. "Scan the game and
+preview" then reads the game folder (once; remembered) and lists exactly what will come from the PS3 bundle
+(textures, colour cubes, texts, and Genesys objects whose schema is identical in both builds and that convert
+back to the same bytes) and what stays as the game has it, with the reason for each; nothing is written until you
+press "Write the ported bundle". The result has the game bundle's resources (same ids, types, order and count:
+nothing is added or removed). The checkbox also converts objects whose data the schema does not fully describe
+when it is clearly float32 (a guess).
+
+The application uses a dark theme."""
 
 ABOUT = f"""{APP} {VERSION}
 Bundle explorer for Need for Speed: Most Wanted (2012): PC retail and PS3 prototype (bnd2 version 5).
@@ -4113,47 +5411,14 @@ def runner_params(app, title=f'{APP} {VERSION}'):
     params.ini_folder_type = hello_imgui.IniFolderType.app_user_config_folder
     params.ini_filename = 'BNDLExplorer/imgui.ini'
     params.imgui_window_params.default_imgui_window_type =         hello_imgui.DefaultImGuiWindowType.provide_full_screen_window
-    dark = app.cfg.get('theme', 'dark') == 'dark'
-    params.imgui_window_params.background_color = imgui.ImVec4(*(theme.DARK if dark else theme.LIGHT)['bg'])
+    params.imgui_window_params.background_color = imgui.ImVec4(*theme.PALETTE['bg'])
     params.callbacks.post_init = app.post_init
     params.callbacks.load_additional_fonts = theme.load_fonts
-    params.callbacks.setup_imgui_style = lambda: theme.apply(dark)
+    params.callbacks.setup_imgui_style = theme.apply
     return params
 
 
 def run(paths=(), screenshot=None, frames=12, select=None, tab=None, expand=False, view=None, folder=None,
         type_filter=None):
-    immvision.use_rgb_color_order()
-    app = App(paths, select)
-    app.test_tab = tab
-    app.expand_all = expand
-    if view:
-        app.cfg['view'] = view
-    if folder:
-        app.go_folder(folder)
-    if type_filter is not None and app.cur is not None:
-        app.cur.type_filter = type_filter
-    params = runner_params(app)
-    count = [0]
-
-    def gui():
-        app.gui()
-        if screenshot:
-            ready = app.preview_ready()
-            if ready and app.job is None and not app.thumbs.pending:
-                count[0] += 1
-            if count[0] > frames:
-                hello_imgui.get_runner_params().app_shall_exit = True
-                app.exit_ok = True
-
-    params.callbacks.show_gui = gui
-    hello_imgui.run(params)
-    if app.names.dirty:
-        try:
-            app.names.save()
-        except OSError:
-            pass
-    if screenshot:
-        img = hello_imgui.final_app_window_screenshot()
-        from PIL import Image
-        Image.fromarray(np.asarray(img)[..., :3]).save(screenshot)
+    from .new_ui import run as dashboard_run
+    return dashboard_run(paths, screenshot, frames, select, tab, expand, view, folder, type_filter)

@@ -236,7 +236,8 @@ class Library:
         import zlib
         key = ('consts', root)
         if key not in self.globals:
-            names = {}
+            from . import knownids
+            names = dict(knownids.PARAMETERS)          # known names first; the shaders' own identifiers add to them
             for b in self.global_bundles(root):
                 if not os.path.basename(b.path or '').upper().startswith('SHADERS'):
                     continue

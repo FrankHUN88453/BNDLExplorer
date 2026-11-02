@@ -3,3 +3,4 @@ numpy
 Pillow
 soundfile>=0.12
 PyOpenGL
+capstone>=5.0

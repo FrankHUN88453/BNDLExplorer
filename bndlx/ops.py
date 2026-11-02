@@ -5,9 +5,9 @@ import struct
 
 import numpy as np
 
-from . import colourcube, convert, eal3, raster, resfile, textfile, vehiclelist
+from . import colourcube, convert, eal3, luafile, raster, resfile, textfile, vehiclelist
 from .localised import StringTable
-from .restypes import T_CUBE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
+from .restypes import T_CUBE, T_LUA_CODE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 from .vehiclelist import T_VEHICLELIST
 
 T_WAVE = 0x81
@@ -311,8 +311,7 @@ def strings_from_csv(b, res, text, add_new=False):
 # whole resources
 # ---------------------------------------------------------------------------------------------------------------
 def export_native(b, res, folder, texture_format='.dds'):
-    """Export in the resource's own exchange format when it has one (texture, text, strings, cube), else .bres.
-    Returns the path written."""
+    """Export in the resource's own exchange format when it has one, else .bres. Returns the path written."""
     base = os.path.join(folder, id_text(res.id))
     t = res.type
     if t == T_TEXTURE:
@@ -321,6 +320,15 @@ def export_native(b, res, folder, texture_format='.dds'):
     elif t == T_TEXT:
         path = base + '.txt'
         write_file(path, textfile.read(res, b.e))
+    elif t == T_LUA_CODE:
+        try:
+            luafile.decode(res.data(0))
+        except ValueError:
+            path = base + '.bres'
+            export_bres(b, res, path)
+        else:
+            path = base + '.lua'
+            write_file(path, res.data(0))
     elif t == T_STRINGS:
         path = base + '.csv'
         write_file(path, strings_to_csv(b, res).encode('utf-8-sig'))
@@ -374,7 +382,7 @@ def extract_all(b, folder, progress=None, texture_format='.dds'):
         os.makedirs(sub, exist_ok=True)
         export_bres(b, r, os.path.join(sub, id_text(r.id) + '.bres'))
         written += 1
-        if r.type in (T_TEXTURE, T_TEXT, T_STRINGS, T_CUBE, T_WAVE, T_VEHICLELIST):
+        if r.type in (T_TEXTURE, T_TEXT, T_LUA_CODE, T_STRINGS, T_CUBE, T_WAVE, T_VEHICLELIST):
             try:
                 export_native(b, r, sub, texture_format)
             except Exception:
@@ -384,7 +392,8 @@ def extract_all(b, folder, progress=None, texture_format='.dds'):
 
 def import_folder(b, folder, types, progress=None):
     """Add / replace resources from a folder: .bres files, and files named <id>.dds/.png/... (textures),
-    <id>.txt (text files), <id>.csv (strings, vehicle list), <id>.png (colour cubes). Returns (changes, errors);
+    <id>.txt (text files), <id>.lua (LuaCode source), <id>.csv (strings, vehicle list), <id>.png (colour cubes).
+    Returns (changes, errors);
     changes = [(id, 'added'|'replaced', path)]."""
     files = []
     for dp, _, fn in os.walk(folder):
@@ -418,6 +427,11 @@ def import_folder(b, folder, types, progress=None):
             elif r.type == T_TEXT and ext in ('.txt', '.json', '.xml'):
                 with open(path, 'rb') as f:
                     replace_text(b, r, f.read())
+            elif r.type == T_LUA_CODE and ext == '.lua':
+                with open(path, 'rb') as f:
+                    data = f.read()
+                luafile.decode(data)
+                r.set_data(0, data)
             elif r.type == T_STRINGS and ext == '.csv':
                 with open(path, encoding='utf-8-sig') as f:
                     strings_from_csv(b, r, f.read())
@@ -454,6 +468,9 @@ def text_summary(b, res, types):
         if t == T_TEXT:
             s = textfile.decode(textfile.read(res, b.e)[:80]).replace('\n', ' ').replace('\t', ' ')
             return ' '.join(s.split())[:60]
+        if t == T_LUA_CODE:
+            source, _ = luafile.decode(res.data(0))
+            return ' '.join(source[:80].replace('\n', ' ').replace('\t', ' ').split())[:60]
         if t == T_STRINGS:
             n = struct.unpack_from(b.e + 'I', res.data(0), 4)[0]
             return f'{n} strings'

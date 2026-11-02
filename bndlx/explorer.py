@@ -9,7 +9,7 @@ from imgui_bundle import hello_imgui, imgui
 
 from . import filedialog, mesh, ops, theme, winclip
 from . import names as N
-from .restypes import T_TEXTURE, name as type_name
+from .restypes import T_LUA_CODE, T_TEXTURE, name as type_name
 from .theme import I, icon_text
 
 PAYLOAD = 'BNDLX_RES'
@@ -191,7 +191,7 @@ class ExplorerUI:
     # -- frame --------------------------------------------------------------------------------------------------
     def gui(self):
         if not self._themed:
-            theme.apply(self.cfg.get('theme', 'dark') == 'dark')
+            theme.apply()
             self._themed = True
         self.pump_job()
         self.update_roots()
@@ -244,8 +244,11 @@ class ExplorerUI:
         self.texture_window()
         self.model_textures_window()
         self.modals()
+        self.genesys_string_window()
         self.results_window()
         self.soundtrack_window()
+        self.port_window()
+        self.gameplay_reference_window()
         if self.drag is not None:
             payload = imgui.get_drag_drop_payload_py_id()
             if payload is None or payload.type != PAYLOAD:
@@ -578,95 +581,95 @@ class ExplorerUI:
         if imgui.menu_item('Preview / details pane', 'Alt+P', self.cfg.get('preview', True))[0]:
             self.cfg['preview'] = not self.cfg.get('preview', True)
             self.save_cfg()
-        imgui.separator()
-        dark = self.cfg.get('theme', 'dark') == 'dark'
-        if imgui.menu_item('Dark theme (default)', '', dark)[0]:
-            self.cfg['theme'] = 'dark'
-            theme.apply(True)
-            self.save_cfg()
-        if imgui.menu_item('Light theme', '', not dark)[0]:
-            self.cfg['theme'] = 'light'
-            theme.apply(False)
-            self.save_cfg()
 
     def more_items(self):
         d = self.cur
-        if imgui.menu_item('Open by path...', 'Ctrl+L', False)[0]:
+        dashboard = getattr(self, 'dashboard_ui', None)
+        if dashboard is not None:
+            menu_item = dashboard.dashboard_menu_item
+        else:
+            def menu_item(label, shortcut='', selected=False, enabled=True, group='more'):
+                return imgui.menu_item(label, shortcut, selected, enabled)
+        begin_menu = dashboard.dashboard_begin_menu if dashboard is not None else imgui.begin_menu
+        peers = [other for other in self.docs if d is not None and other is not d
+                 and os.path.basename(other.path or '').casefold() == os.path.basename(d.path or '').casefold()
+                 and os.path.basename(d.path or '').casefold().endswith('.bndl')]
+        if begin_menu('Compare same-name bundle', bool(peers)):
+            for other in peers:
+                label = f'{other.path} [{other.b.platform}]'
+                if menu_item(label, '', False, group='compare')[0]:
+                    self.compare_same_name(d, other)
+            imgui.end_menu()
+        if menu_item('Open by path...', 'Ctrl+L', False)[0]:
             self.modal = {'kind': 'open_path', 'text': self.cfg.get('last_bundle', '')}
-        if imgui.begin_menu('Recent bundles', bool(self.cfg.get('recent'))):
+        if begin_menu('Recent bundles', bool(self.cfg.get('recent'))):
             for p in self.cfg.get('recent', []):
-                if imgui.menu_item(p, '', False)[0]:
+                if menu_item(p, '', False, group='recent')[0]:
                     self.open_path(p)
             imgui.end_menu()
-        if imgui.menu_item('Save as...', 'Ctrl+Shift+S', False, d is not None)[0]:
+        if menu_item('Save as...', 'Ctrl+Shift+S', False, d is not None)[0]:
             self.action_save_as(d)
         imgui.separator()
-        if imgui.menu_item('Undo', 'Ctrl+Z', False, d is not None and bool(d.undo))[0]:
+        if menu_item('Undo', 'Ctrl+Z', False, d is not None and bool(d.undo))[0]:
             self.undo(d)
-        if imgui.menu_item('Redo', 'Ctrl+Y', False, d is not None and bool(d.redo))[0]:
+        if menu_item('Redo', 'Ctrl+Y', False, d is not None and bool(d.redo))[0]:
             self.redo(d)
-        if imgui.menu_item('Select all', 'Ctrl+A', False, d is not None)[0]:
+        if menu_item('Select all', 'Ctrl+A', False, d is not None)[0]:
             d.sel = {r.id for r in self.visible_rows(d)}
         imgui.separator()
-        if imgui.menu_item('Convert to PC (save as)...', '', False, d is not None and d.b.platform == 'PS3')[0]:
+        if menu_item('Convert to PC (save as)...', '', False, d is not None and d.b.platform == 'PS3')[0]:
             self.action_convert(d, 'PC')
-        if imgui.menu_item('Convert to PS3 (save as)...', '', False, d is not None and d.b.platform == 'PC')[0]:
+        if menu_item('Convert to PS3 (save as)...', '', False, d is not None and d.b.platform == 'PC')[0]:
             self.action_convert(d, 'PS3')
-        if imgui.menu_item('Extract all resources...', '', False, d is not None)[0]:
+        if menu_item('Port into a PC game bundle...', '', False, self.job is None)[0]:
+            self.open_port(d)
+        if menu_item('Extract all resources...', '', False, d is not None)[0]:
             self.action_extract(d)
-        if imgui.menu_item('Import resources from folder...', '', False, d is not None and not d.b.truncated)[0]:
+        if menu_item('Import resources from folder...', '', False, d is not None and not d.b.truncated)[0]:
             self.action_import_folder(d)
-        if imgui.menu_item('Export sound streams (.SPS) of a folder as WAV...', '', False, self.job is None)[0]:
+        if menu_item('Export sound streams (.SPS) of a folder as WAV...', '', False, self.job is None)[0]:
             self.action_export_sps()
-        if imgui.menu_item('Soundtrack editor (songs and playlists)...', '', False, self.job is None)[0]:
+        if menu_item('Soundtrack editor (songs and playlists)...', '', False, self.job is None)[0]:
             self.open_soundtrack()
-        if imgui.menu_item('License plates (texts of the car packs, registration)...', '', False, self.job is None)[0]:
+        if menu_item('License plates (texts of the car packs, registration)...', '', False, self.job is None)[0]:
             self.action_plate()
+        if menu_item('Event / traffic reference viewer...', '', False, self.job is None)[0]:
+            self.load_gameplay_reference()
         imgui.separator()
-        if imgui.menu_item('Find names (scan the game folders)...', '', False, self.job is None)[0]:
+        if menu_item('Find names (scan the game folders)...', '', False, self.job is None)[0]:
             self.action_find_names()
-        if imgui.menu_item('Find in all open bundles...', 'Ctrl+Shift+F', False, bool(self.docs))[0]:
+        if menu_item('Find in all open bundles...', 'Ctrl+Shift+F', False, bool(self.docs))[0]:
             self.modal = {'kind': 'find', 'text': self.find_text}
-        if imgui.menu_item('Go to id...', 'Ctrl+G', False, bool(self.docs))[0]:
+        if menu_item('Go to id...', 'Ctrl+G', False, bool(self.docs))[0]:
             self.modal = {'kind': 'goto', 'text': ''}
-        if imgui.menu_item('Bundle properties...', 'Alt+Enter', False, d is not None)[0]:
+        if menu_item('Bundle properties...', 'Alt+Enter', False, d is not None)[0]:
             self.modal = {'kind': 'properties', 'doc': d.uid}
         imgui.separator()
-        if imgui.begin_menu('Options'):
-            dark = self.cfg.get('theme', 'dark') == 'dark'
-            if imgui.menu_item('Dark theme (default)', '', dark)[0]:
-                self.cfg['theme'] = 'dark'
-                theme.apply(True)
-                self.save_cfg()
-            if imgui.menu_item('Light theme', '', not dark)[0]:
-                self.cfg['theme'] = 'light'
-                theme.apply(False)
-                self.save_cfg()
-            imgui.separator()
+        if begin_menu('Options'):
             ext = self.cfg.get('drag_texture_ext', '.png')
-            if imgui.menu_item('Drag / copy textures out as PNG', '', ext == '.png')[0]:
+            if menu_item('Drag / copy textures out as PNG', '', ext == '.png', group='options')[0]:
                 self.cfg['drag_texture_ext'] = '.png'
                 self.save_cfg()
-            if imgui.menu_item('Drag / copy textures out as DDS', '', ext == '.dds')[0]:
+            if menu_item('Drag / copy textures out as DDS', '', ext == '.dds', group='options')[0]:
                 self.cfg['drag_texture_ext'] = '.dds'
                 self.save_cfg()
             imgui.separator()
             ext = self.cfg.get('texture_ext', '.dds')
-            if imgui.menu_item('Extract all: textures as DDS', '', ext == '.dds')[0]:
+            if menu_item('Extract all: textures as DDS', '', ext == '.dds', group='options')[0]:
                 self.cfg['texture_ext'] = '.dds'
                 self.save_cfg()
-            if imgui.menu_item('Extract all: textures as PNG', '', ext == '.png')[0]:
+            if menu_item('Extract all: textures as PNG', '', ext == '.png', group='options')[0]:
                 self.cfg['texture_ext'] = '.png'
                 self.save_cfg()
             imgui.end_menu()
-        if imgui.menu_item('How to use', 'F1', False)[0]:
+        if menu_item('How to use', 'F1', False)[0]:
             from .app import HELP
             self.modal = {'kind': 'message', 'title': 'How to use', 'text': HELP}
-        if imgui.menu_item('About', '', False)[0]:
+        if menu_item('About', '', False)[0]:
             from .app import ABOUT
             self.modal = {'kind': 'message', 'title': 'About', 'text': ABOUT}
         imgui.separator()
-        if imgui.menu_item('Exit', 'Alt+F4', False)[0]:
+        if menu_item('Exit', 'Alt+F4', False)[0]:
             hello_imgui.get_runner_params().app_shall_exit = True
 
     # -- navigation pane ----------------------------------------------------------------------------------------
@@ -1197,6 +1200,8 @@ class ExplorerUI:
             self.action_export(d, r, 'png')
         if r.type == 0x70 and imgui.menu_item('As text...', '', False)[0]:
             self.action_export(d, r, 'text')
+        if r.type == T_LUA_CODE and imgui.menu_item('As Lua source (.lua)...', '', False)[0]:
+            self.action_export(d, r, 'lua')
         if r.type in mesh.MODEL_TYPES and imgui.menu_item('As glTF (.glb) with textures...', '', False)[0]:
             self.action_export(d, r, 'glb')
         if r.type in (0xB0, 0xB3) and imgui.menu_item('As FBX with skeleton and animation...', '', False)[0]:

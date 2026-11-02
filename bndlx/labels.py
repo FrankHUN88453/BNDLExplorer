@@ -1,6 +1,6 @@
 """Display names for hashed Genesys field and enum value names.
 
-The hash is known (gnames.name_hash); the names come from Find names (gnames.solve over the game's identifiers).
+The hash is known (gnames.name_hash); names come from Find names, bundled verified source maps, or user labels.
 Names of four characters or fewer are their own hash (ASCII). A few environment fields are named here so that
 they read well before a scan; names marked '(?)' describe what the field holds (its real name was not found).
 Users can name any field (right click in the object view); those names are saved in the user config folder.
@@ -10,6 +10,7 @@ import os
 
 from .genesys import hash_name
 from .gnames import name_hash
+from .ts_names import FIELD_NAME_ALIASES, FIELD_NAMES
 
 KNOWN = {
     # EnvironmentKeyframe sub-structs and fields (checked against the hash, except '(?)')
@@ -42,7 +43,7 @@ class Labels:
 
     def name(self, h):
         """Readable name of a field / enum value hash, or None."""
-        return self.user.get(h) or self.found.get(h) or KNOWN.get(h) or hash_name(h)
+        return self.user.get(h) or self.found.get(h) or KNOWN.get(h) or FIELD_NAMES.get(h) or hash_name(h)
 
     def source(self, h):
         """Where the name comes from, for the tooltip."""
@@ -53,6 +54,10 @@ class Labels:
             return 'the real name: found in the game\'s identifiers, its hash matches'
         if h in KNOWN:
             return 'named from the data (not the real name)' if KNOWN[h].endswith('(?)') else 'the real name'
+        if h in FIELD_NAMES:
+            aliases = FIELD_NAME_ALIASES.get(h)
+            suffix = f'; hash collision candidates: {", ".join(aliases)}' if aliases else ''
+            return 'verified Genesys name from the TypeScript hash maps' + suffix
         if hash_name(h):
             return 'short names are stored as they are'
         return 'unknown name (run Find names; right click to name it)'

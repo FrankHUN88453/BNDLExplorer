@@ -42,7 +42,7 @@ DDS = [('DirectDraw Surface (*.dds)', '*.dds')]
 PNG = [('PNG image (*.png)', '*.png')]
 RES = [('BNDL Explorer resource (*.bres)', '*.bres'), ('All files', '*.*')]
 BIN = [('Raw data (*.bin)', '*.bin'), ('All files', '*.*')]
-TEXT = [('Text (*.txt, *.json, *.xml)', '*.txt;*.json;*.xml'), ('All files', '*.*')]
+TEXT = [('Text (*.txt, *.json, *.xml, *.lua)', '*.txt;*.json;*.xml;*.lua'), ('All files', '*.*')]
 CSV = [('CSV (*.csv)', '*.csv'), ('All files', '*.*')]
 AUDIO = [('Audio (*.wav, *.flac, *.ogg, *.mp3, *.aiff, *.sps)', '*.wav;*.flac;*.ogg;*.mp3;*.aif;*.aiff;*.sps;*.SPS'),
          ('All files', '*.*')]
