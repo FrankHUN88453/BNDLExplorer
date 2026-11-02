@@ -226,6 +226,36 @@ def ops_id(rid):
     return f'{rid:#018x}'
 
 
+def test_luabc(folder):
+    """UI scripts (Lua 5.1 bytecode in TextFiles): every chunk of the folder reads and writes back byte for byte; a
+    changed string constant reads back; the listing names the globals the code uses."""
+    from bndlx import luabc, textfile
+    ok = n = 0
+    sample = None
+    for name in sorted(os.listdir(folder)):
+        if not name.upper().endswith('.BNDL'):
+            continue
+        b = Bundle.open(os.path.join(folder, name))
+        for r in b.resources:
+            if r.type != 0x70 or r.missing or len(r.data(0)) < 8:
+                continue
+            raw = textfile.read(r, b.e)
+            if not luabc.is_bytecode(raw):
+                continue
+            n += 1
+            c = luabc.read(raw)
+            ok += luabc.write(c) == raw
+            if sample is None and any(isinstance(k, str) and k for k in c.main.constants):
+                sample = c
+    check(n > 0 and ok == n, f'Lua: {ok}/{n} chunks in {os.path.basename(folder)} written back byte for byte')
+    i = next(j for j, k in enumerate(sample.main.constants) if isinstance(k, str) and k)
+    sample.main.constants[i] = sample.main.constants[i] + '_changed'
+    back = luabc.read(luabc.write(sample))
+    text = luabc.listing(back)
+    check(back.main.constants[i].endswith('_changed') and 'GETGLOBAL' in text and '_changed' in text,
+          'Lua: a changed string constant reads back and shows in the listing')
+
+
 def test_wave_convert(path):
     """PS3 sounds converted for PC have the PC wave layout: 0x04 and 0x1C zero (PS3 memory size / size of the
     PS3-only data after the stream) and nothing after the stream; the sound itself is unchanged."""
@@ -1037,6 +1067,7 @@ def main():
         test_gwrite(os.path.join(PC, 'GAMELOGIC', 'WEAPONS', '457359.BNDL'))
         test_gwrite(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'))
         test_gwrite(os.path.join(PC, 'GAMELOGIC', 'GAMEMODES.BNDL'))
+        test_luabc(os.path.join(PC, 'UI', 'SCREENS2'))
         test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
         test_animations(PC)
@@ -1053,6 +1084,7 @@ def main():
         test_convert(os.path.join(PS3, 'HAWAII', 'ENVIRONMENT.BNDL'))
         test_convert(os.path.join(PS3, 'POSTFX.BNDL'))
         test_wave_convert(os.path.join(PS3, 'GAMELOGIC', 'WEAPONS', '457359.BNDL'))
+        test_luabc(os.path.join(PS3, 'UI', 'SCREENS'))
         test_strings(os.path.join(PS3, 'UI', 'LANGUAGE', '0001.BNDL'))
         test_sounds(os.path.join(PS3, 'UI', 'SCREENS2', 'BLACKLISTHUD.BNDL'))
         test_models(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'))

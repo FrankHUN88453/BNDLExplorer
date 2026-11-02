@@ -5,7 +5,7 @@ import struct
 
 import numpy as np
 
-from . import colourcube, convert, eal3, luafile, raster, resfile, textfile, vehiclelist
+from . import colourcube, convert, eal3, luabc, luafile, raster, resfile, textfile, vehiclelist
 from .localised import StringTable
 from .restypes import T_CUBE, T_LUA_CODE, T_STRINGS, T_TEXT, T_TEXTURE, name as type_name
 from .vehiclelist import T_VEHICLELIST
@@ -318,8 +318,9 @@ def export_native(b, res, folder, texture_format='.dds'):
         path = base + texture_format
         export_texture(b, res, path)
     elif t == T_TEXT:
-        path = base + '.txt'
-        write_file(path, textfile.read(res, b.e))
+        raw = textfile.read(res, b.e)
+        path = base + ('.luac' if luabc.is_bytecode(raw) else '.txt')
+        write_file(path, raw)
     elif t == T_LUA_CODE:
         try:
             luafile.decode(res.data(0))
@@ -446,9 +447,12 @@ def import_folder(b, folder, types, progress=None):
                 replace_texture(b, r, path)
             elif r.type == T_CUBE and ext in IMAGE_EXT:
                 replace_cube(b, r, path)
-            elif r.type == T_TEXT and ext in ('.txt', '.json', '.xml'):
+            elif r.type == T_TEXT and ext in ('.txt', '.json', '.xml', '.lua', '.luac'):
                 with open(path, 'rb') as f:
-                    replace_text(b, r, f.read())
+                    data = f.read()
+                if luabc.is_bytecode(data):
+                    luabc.read(data)               # a damaged chunk is not put into the game
+                replace_text(b, r, data)
             elif r.type == T_LUA_CODE and ext == '.lua':
                 with open(path, 'rb') as f:
                     data = f.read()
@@ -488,7 +492,13 @@ def text_summary(b, res, types):
             if tt is not None:
                 return tt.name
         if t == T_TEXT:
-            s = textfile.decode(textfile.read(res, b.e)[:80]).replace('\n', ' ').replace('\t', ' ')
+            raw = textfile.read(res, b.e)
+            if luabc.is_bytecode(raw):
+                try:
+                    return f'Lua 5.1 bytecode, {len(luabc.functions(luabc.read(raw)))} functions'
+                except luabc.LuaError as ex:
+                    return f'Lua bytecode ({ex})'
+            s = textfile.decode(raw[:80]).replace('\n', ' ').replace('\t', ' ')
             return ' '.join(s.split())[:60]
         if t == T_LUA_CODE:
             source, _ = luafile.decode(res.data(0))

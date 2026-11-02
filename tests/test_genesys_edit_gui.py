@@ -1,7 +1,7 @@
 """Genesys object editing in the real window, on a copy of GAMELOGIC/GAMEMODES.BNDL: the event list (its largest
 object, which did not open before) shows; "duplicate" on an element (a real click inside the frame) adds an event,
 undo takes it back; an edited JSON imported into the object lands in it; a longer text (in a copy of the WEAPONS
-bundle) is written through the writer.
+bundle) is written through the writer; a UI script (Lua bytecode) shows, a changed constant is applied and undone.
 Needs BNDLX_PC (see test_core.py)."""
 import json
 import os
@@ -13,7 +13,7 @@ import traceback
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from imgui_bundle import hello_imgui, imgui, immvision  # noqa: E402
 
-from bndlx import app as A, genesys, gjson, roots  # noqa: E402
+from bndlx import app as A, genesys, gjson, luabc, roots, textfile  # noqa: E402
 
 PC = os.environ['BNDLX_PC']
 TMP = tempfile.mkdtemp(prefix='bndlx_gedit_')
@@ -33,13 +33,16 @@ def main():
     shutil.copyfile(os.path.join(PC, 'GAMELOGIC', 'GAMEMODES.BNDL'), path)
     weapons = os.path.join(TMP, '457359.BNDL')
     shutil.copyfile(os.path.join(PC, 'GAMELOGIC', 'WEAPONS', '457359.BNDL'), weapons)
+    screen = os.path.join(TMP, '1019407.BNDL')           # a UI screen with Lua scripts
+    shutil.copyfile(os.path.join(PC, 'UI', 'SCREENS2', '1019407.BNDL'), screen)
     roots.set_fallbacks([PC])
     immvision.use_rgb_color_order()
-    app = A.App([path, weapons])
+    app = A.App([path, weapons, screen])
     app.pinned = lambda: [PC]
     params = A.runner_params(app, 'BNDL Explorer Genesys edit test')
     state = {'f': 0, 'errors': [], 'press': None}
     orig_button = imgui.small_button
+    orig_big = imgui.button
 
     def small_button(label):
         hit = orig_button(label)
@@ -48,7 +51,15 @@ def main():
             return True
         return hit
 
+    def button(label, *a):
+        hit = orig_big(label, *a)
+        if state['press'] and label.startswith(state['press']):
+            state['press'] = None
+            return True
+        return hit
+
     A.imgui.small_button = small_button
+    A.imgui.button = button
 
     def items(d):
         return genesys.Reader(app.types, d.b.e).read_resource(d.b.find(EVENTS)).fields[ITEMS]
@@ -119,7 +130,30 @@ def main():
                 back = genesys.Reader(app.types, w.b.e).read_resource(res)
                 state['text_back'] = any(isinstance(v, str) and v == state['text'] for v in iter_values(back))
                 state['text_clean'] = app.genesys_rewritable(w, res)     # still a well-formed object
-        if f == 70:
+        if f == 70:                          # a UI script: Lua view, a constant changed, Apply (clicked), undo
+            s3 = app.docs[2]
+            state['lua_rid'] = next(x.id for x in s3.b.resources if x.type == 0x70 and len(x.data(0)) > 8
+                                    and luabc.is_bytecode(textfile.read(x, s3.b.e)))
+            state['lua_old'] = bytes(s3.b.find(state['lua_rid']).data(0))
+            app.goto(state['lua_rid'], s3)
+        if f == 80:
+            st = app.lua_bc
+            state['lua_shown'] = st.get('chunk') is not None and 'GETGLOBAL' in st.get('listing', '')
+            if state['lua_shown']:
+                k = st['chunk'].main.constants
+                i = next(j for j, v in enumerate(k) if isinstance(v, str) and v)
+                state['lua_new'] = k[i] + '_X'
+                k[i] = state['lua_new']
+                st['dirty'] = True
+                state['press'] = 'Apply changes'
+        if f == 85:
+            s3 = app.docs[2]
+            raw = textfile.read(s3.b.find(state['lua_rid']), s3.b.e)
+            state['lua_applied'] = state.get('lua_new') in luabc.read(raw).main.constants
+            s3.do_undo()
+            app.changed(s3, s3.b.find(state['lua_rid']))
+            state['lua_undo'] = bytes(s3.b.find(state['lua_rid']).data(0)) == state['lua_old']
+        if f == 95:
             hello_imgui.get_runner_params().app_shall_exit = True
             app.exit_ok = True
 
@@ -142,6 +176,7 @@ def main():
         hello_imgui.run(params)
     finally:
         A.imgui.small_button = orig_button
+        A.imgui.button = orig_big
     for f, tb in state['errors'][:3]:
         print(f'frame {f}:')
         print(tb)
@@ -152,6 +187,8 @@ def main():
     check(state.get('json_ok') and state.get('json_back') == state.get('json_val'),
           f'an edited JSON imported: {state.get("json_key")} = {state.get("json_back")} (expected '
           f'{state.get("json_val")})')
+    check(state.get('lua_shown') and state.get('lua_applied') and state.get('lua_undo'),
+          'a UI script shows as Lua bytecode; a changed constant is applied (clicked) and undone')
     check(state.get('text_ok') and state.get('text_back') and state.get('text_clean'),
           f'a longer text written through the writer: {state.get("text")!r}')
     shutil.rmtree(TMP, ignore_errors=True)

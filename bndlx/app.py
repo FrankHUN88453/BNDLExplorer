@@ -18,6 +18,7 @@ from imgui_bundle import hello_imgui, imgui, immvision
 
 from . import (convert, dragdrop, eal3, event_data, filedialog, gameplay_data, genesys, gltf, hsm, mesh, ops,
                raster, resfile, textfile, theme, traffic, ts_names, compare)
+from . import luabc
 from . import luafile
 from . import vehiclelist as VL
 from . import zonelist as ZL
@@ -247,6 +248,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
         self.genesys_string_edit = None
         self.text_edit = {'key': None, 'text': ''}
         self.lua_edit = {'key': None, 'text': '', 'encoding': 'utf-8', 'dirty': False}
+        self.lua_bc = {}
         self.str_filter = ''
         self.str_cache = {'key': None, 'table': None}
         self.hsm_cache = {'key': None, 'result': None, 'error': None}
@@ -745,6 +747,10 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
                 p = filedialog.save_file('Export text', base + '.txt', filedialog.TEXT, 'txt')
                 if p:
                     ops.write_file(p, textfile.read(res, d.b.e))
+            elif kind == 'luac':
+                p = filedialog.save_file('Export Lua bytecode', base + '.luac', filedialog.LUA, 'luac')
+                if p:
+                    ops.write_file(p, textfile.read(res, d.b.e))
             elif kind == 'lua':
                 p = filedialog.save_file('Export Lua source', base + '.lua', filedialog.TEXT, 'lua')
                 if p:
@@ -818,7 +824,9 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
             elif res.type == T_CUBE and ext in ops.IMAGE_EXT:
                 ops.replace_cube(d.b, res, path)
                 msg = f'Colour cube {res.id:#x} replaced.'
-            elif res.type == T_TEXT and ext in ('.txt', '.json', '.xml', '.lua'):
+            elif res.type == T_TEXT and ext in ('.txt', '.json', '.xml', '.lua', '.luac'):
+                if luabc.is_bytecode(data):
+                    luabc.read(data)               # a damaged chunk is not put into the game
                 ops.replace_text(d.b, res, data)
                 msg = f'Text {res.id:#x} replaced ({len(data)} bytes).'
             elif res.type == T_LUA_CODE and ext == '.lua':
@@ -3872,6 +3880,9 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
 
     def text_view(self, d, r):
         key = (d.uid, r.id, id(r.data(0)))
+        if luabc.is_bytecode(textfile.read(r, d.b.e)[:4]):
+            self.lua_bytecode_view(d, r, key)
+            return
         if self.text_edit['key'] != key:
             self.text_edit = {'key': key, 'text': textfile.decode(textfile.read(r, d.b.e)), 'dirty': False}
         te = self.text_edit
@@ -3888,6 +3899,111 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI):
                                                     imgui.InputTextFlags_.allow_tab_input)
         if ch:
             te['dirty'] = True
+
+    def lua_bytecode_view(self, d, r, key):
+        """A compiled UI script: listing, constants (editable), export / replace."""
+        st = self.lua_bc
+        if st.get('key') != key:
+            raw = textfile.read(r, d.b.e)
+            try:
+                chunk = luabc.read(raw)
+                st.clear()
+                st.update(key=key, chunk=chunk, listing=luabc.listing(chunk, ops.id_text(r.id)), dirty=False,
+                          error=None, filter='')
+            except luabc.LuaError as ex:
+                st.clear()
+                st.update(key=key, chunk=None, error=str(ex))
+        if st.get('error'):
+            imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.3, 1.0), f'Lua bytecode cannot be read: {st["error"]}')
+            return
+        chunk = st['chunk']
+        funcs = luabc.functions(chunk)
+        imgui.text(f'Lua 5.1 bytecode: {len(funcs)} functions, '
+                   f'{sum(len(f.constants) for _, f in funcs)} constants')
+        imgui.same_line()
+        if imgui.button('Apply changes') and st['dirty'] and not d.b.truncated:
+            d.checkpoint(f'lua constants {r.id:#x}', [r.id])
+            ops.replace_text(d.b, r, luabc.write(chunk))
+            self.changed(d, r)
+            st['key'] = None
+            self.status = f'Lua constants of {r.id:#x} updated (Ctrl+Z to undo).'
+            return
+        imgui.same_line()
+        if imgui.button('Export .luac...'):
+            self.action_export(d, r, 'luac')
+        imgui.same_line()
+        if imgui.button('Export listing...'):
+            p = filedialog.save_file('Export Lua listing', os.path.join(self.cfg.get('last_export', ''),
+                                     ops.id_text(r.id) + '.txt'), filedialog.TEXT)
+            if p:
+                self.remember('last_export', os.path.dirname(p))
+                ops.write_file(p, st['listing'].encode('utf-8'))
+                self.status = f'Listing written to {os.path.basename(p)}.'
+        imgui.same_line()
+        if imgui.button('Replace...') and not d.b.truncated:
+            p = filedialog.open_file('Replace the script (.luac bytecode, or .lua source)',
+                                     self.cfg.get('last_import', ''), filedialog.LUA)
+            if p:
+                self.remember('last_import', p)
+                self.replace_from_file(d, r, p)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('.luac: Lua 5.1 bytecode (luac 5.1, 32-bit). .lua: source text; the game has the '
+                              'Lua compiler, so it should load source as well (test it in game).')
+        if st['dirty']:
+            imgui.same_line()
+            imgui.text_colored(imgui.ImVec4(1.0, 0.75, 0.3, 1.0), 'modified')
+        if imgui.begin_tab_bar('luabc'):
+            if imgui.begin_tab_item('Constants')[0]:
+                imgui.set_next_item_width(260)
+                _, st['filter'] = imgui.input_text_with_hint('##lfilter', 'filter', st['filter'])
+                flt = st['filter'].lower()
+                flags = (imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_v | imgui.TableFlags_.resizable
+                         | imgui.TableFlags_.scroll_y)
+                if imgui.begin_table('luak', 3, flags):
+                    imgui.table_setup_scroll_freeze(0, 1)
+                    imgui.table_setup_column('Function', imgui.TableColumnFlags_.width_fixed, 150)
+                    imgui.table_setup_column('#', imgui.TableColumnFlags_.width_fixed, 40)
+                    imgui.table_setup_column('Value', imgui.TableColumnFlags_.width_stretch)
+                    imgui.table_headers_row()
+                    for path, f in funcs:
+                        for i, k in enumerate(f.constants):
+                            if flt and flt not in luabc.constant_text(k).lower():
+                                continue
+                            imgui.table_next_row()
+                            imgui.table_next_column()
+                            imgui.text_disabled(f'[{path}] line {f.line}' if path != '0' else 'main')
+                            imgui.table_next_column()
+                            imgui.text_disabled(str(i + 1))
+                            imgui.table_next_column()
+                            imgui.set_next_item_width(-1)
+                            if isinstance(k, str):
+                                ch, v = imgui.input_text(f'##k{path}.{i}', k)
+                                if ch:
+                                    try:
+                                        v.encode('latin1')
+                                        f.constants[i] = v
+                                        st['dirty'] = True
+                                    except UnicodeEncodeError:
+                                        self.status = 'Lua strings take Latin-1 characters only.'
+                            elif isinstance(k, bool):
+                                ch, v = imgui.checkbox(f'##k{path}.{i}', k)
+                                if ch:
+                                    f.constants[i] = v
+                                    st['dirty'] = True
+                            elif isinstance(k, (int, float)):
+                                ch, v = imgui.input_double(f'##k{path}.{i}', float(k), 0.0, 0.0, '%.10g')
+                                if ch:
+                                    f.constants[i] = v
+                                    st['dirty'] = True
+                            else:
+                                imgui.text_disabled('nil')
+                    imgui.end_table()
+                imgui.end_tab_item()
+            if imgui.begin_tab_item('Listing')[0]:
+                imgui.input_text_multiline('##llist', st['listing'], imgui.ImVec2(-1, -1),
+                                           imgui.InputTextFlags_.read_only)
+                imgui.end_tab_item()
+            imgui.end_tab_bar()
 
     def lua_view(self, d, r):
         key = (d.uid, r.id, id(r.data(0)))
