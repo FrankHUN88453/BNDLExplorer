@@ -44,6 +44,10 @@ H_MASK_END = 0x528d6281
 H_SHAPE_COLOUR = 0x9e7e5867
 H_STYLE_COLOUR = 0x80ea78f4
 H_WIDGETS = 0xc7413006         # WidgetGroup's widgets
+H_IMAGE_BIND = name_hash('ImageBinding')     # the picture comes from the game at run time (mirror, icons, ...)
+H_MATERIAL = name_hash('Material')           # UIMaterial object {Material: GameChanger id of the material}
+T_MINIMAP = 0x100000000002a7d                # UIElement_MiniMap (unnamed in the type data)
+KIND_NAMES = {T_MINIMAP: 'MiniMap'}
 
 BEHAVIOURS = (('in', H_IN, 'Transition in'), ('out', H_OUT, 'Transition out'), ('idle', H_IDLE, 'Idle'))
 BEHAVIOUR_TYPES = ('Fade', 'Move', 'MoveTo', 'MoveFrom', 'Scale', 'Approach', 'Type 6', 'Decode', 'Rotate',
@@ -58,7 +62,7 @@ class Element:
     """One entry of a layout's Elements, with the values the preview needs (the node keeps the offsets)."""
     __slots__ = ('index', 'node', 'kind', 'x', 'y', 'w', 'h', 'rot', 'anchor', 'vis', 'rot_bind', 'x_bind',
                  'y_bind', 'tint', 'opacity', 'texture', 'quad', 'text', 'string_id', 'style', 'just', 'mask_end',
-                 'colour', 'behaviours', 'gc')
+                 'colour', 'behaviours', 'gc', 'image_bind', 'material')
 
     def __init__(self, index, node, kind):
         self.index = index
@@ -94,7 +98,7 @@ def elements(types, layout):
         if not isinstance(n, Node):
             continue
         f = n.fields
-        el = Element(i, n, short_kind(types.name(n.type)))
+        el = Element(i, n, KIND_NAMES.get(n.type) or short_kind(types.name(n.type)))
         el.gc = f.get(H_GC)
         el.x, el.y = _num(f.get(H_X)), _num(f.get(H_Y))
         el.w, el.h = _num(f.get(H_W)), _num(f.get(H_H))
@@ -123,6 +127,8 @@ def elements(types, layout):
         col = f.get(H_SHAPE_COLOUR)
         el.colour = [float(x) for x in col] if isinstance(col, list) and len(col) == 4 else None
         el.behaviours = {k: [b for b in (f.get(h) or []) if isinstance(b, Node)] for k, h, _ in BEHAVIOURS}
+        el.image_bind = f.get(H_IMAGE_BIND) or ''
+        el.material = _ref(f.get(H_MATERIAL))
         out.append(el)
     return out
 
@@ -212,6 +218,7 @@ DEFAULT_STATE = {
     'Players.LocalPlayer.HeatLevelInt': 2,
     'Players.LocalPlayer.DamageBarState': 0,
     'Language.IsMetric': 1,
+    'CurrentRoad.Visible': 1,
     'GameWorld.Compass': 35.0,
 }
 CONSTANTS = {'Signals.False': 0.0, 'Signals.True': 1.0, 'Signals.One': 1.0, 'Signals.Zero': 0.0}

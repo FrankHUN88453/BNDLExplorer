@@ -62,6 +62,25 @@ def main():
         d = app.docs[0]
         if f == 10:
             app.goto(SCREEN, d)
+        if f == 30:                          # the large editor window
+            app.uied_state(('screen', d.uid, SCREEN))
+            app.uied['window'] = {'key': ('screen', d.uid, SCREEN), 'focus': True}
+        if f == 58:                          # how images draw: game pictures, additive glows, the mirror
+            modes = {}
+            for res in d.b.resources:
+                if res.type != 0x15:
+                    continue
+                n = app.ui_read(d, res)
+                if n is None or app.types.name(n.type) != 'UILayout':
+                    continue
+                for el in U.elements(app.types, n):
+                    if el.kind == 'Image' or el.texture is not None:
+                        modes.setdefault(app.ui_mode(d, el), []).append(el)
+            state['modes'] = {k: len(v) for k, v in modes.items()}
+            state['mirror_ok'] = all(el.image_bind == 'Graphics.RearViewMirror' or 'Mirror' in
+                                     app.ui_shader(d, el.material) for el in modes.get('mirror', []))
+            state['bound_ok'] = all(el.image_bind for el in modes.get('bound', []))
+            state['additive_ok'] = all('Additive' in app.ui_shader(d, el.material) for el in modes.get('additive', []))
         if f == 60:
             st = view()
             state['drawn'] = st is not None
@@ -147,6 +166,10 @@ def main():
     check(not state['errors'], f'no frame raised ({len(state["errors"])} errors)')
     check(state.get('drawn') and state.get('textures', 0) > 5 and state.get('quads', 0) > 5,
           f'the screen preview draws the HUD ({state.get("textures")} textures, {state.get("quads")} quads)')
+    m = state.get('modes', {})
+    check(m.get('additive', 0) > 0 and m.get('bound', 0) > 0 and state.get('mirror_ok') and state.get('bound_ok')
+          and state.get('additive_ok'), f'images draw by their kind: {m} (mirror: game camera stand-in; bound: '
+                                        'game pictures; additive: UIAdditiveShader)')
     check(state.get('moved'), 'an element moved / resized in place reads back')
     check(state.get('fade') and state.get('alpha') == (0.0, 1.0),
           f'a fade in added to the element reads back and animates (alpha {state.get("alpha")})')

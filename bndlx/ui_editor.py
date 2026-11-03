@@ -9,12 +9,15 @@ behaviours re-writes the layout object (gwrite), only when the object comes back
 """
 import math
 import os
+import re
 import struct
 import time
 
+import numpy as np
+
 from imgui_bundle import imgui, immvision
 
-from . import filedialog, genesys, gjson, mesh, ops, roots, uiscene as U
+from . import filedialog, genesys, gjson, mesh, ops, roots, uirender, uiscene as U
 from .genesys import Node, Ref
 
 T_TEXTURE = 0x01
@@ -31,20 +34,73 @@ class UIEditorUI:
     # -- state ----------------------------------------------------------------------------------------------
     def uied_state(self, key):
         if not hasattr(self, 'uied'):
-            self.uied = {'tex': {}, 'quads': {}, 'styles': {}, 'bg': None, 'views': {}}
+            self.uied = {'tex': {}, 'quads': {}, 'styles': {}, 'bg': None, 'views': {}, 'shaders': {}}
         v = self.uied['views'].get(key)
         if v is None:
             v = self.uied['views'][key] = {
-                'sel': None, 'drag': None, 'state': {}, 'respect_vis': True, 'unknown_visible': True,
+                'sel': None, 'drag': None, 'state': {}, 'respect_vis': True, 'unknown_visible': False,
                 'show_hidden': False, 'show_masks': False, 'outlines': False, 'play': None, 'widget': 0,
-                'zoom': 1.0, 'clip': True}
+                'zoom': 1.0, 'clip': True, 'bound_faded': True}
         return v
 
-    # -- entry points (tabs of the object view) -------------------------------------------------------------
-    def ui_layout_preview(self, d, r, node):
-        self.ui_editor(d, [(r, node)], ('layout', d.uid, r.id))
+    # -- entry points (tabs of the object view, and the large window) --------------------------------------
+    def ui_layout_preview(self, d, r, node, window=False):
+        key = ('layout', d.uid, r.id)
+        if not window and self.ui_in_window(key):
+            return
+        self.ui_editor(d, [(r, node)], key, window)
 
-    def ui_screen_preview(self, d, r, node):
+    def ui_in_window(self, key):
+        """In the object view: the button for the large window, or a note when it shows this already."""
+        self.uied_state(key)
+        win = self.uied.get('window')
+        if win is not None and win['key'] == key:
+            imgui.text_disabled('Shown in the UI editor window.')
+            imgui.same_line()
+            if imgui.small_button('Close the window'):
+                self.uied['window'] = None
+            return True
+        if imgui.button('Open in a large window'):
+            self.uied['window'] = {'key': key, 'focus': True}
+            return True
+        imgui.same_line()
+        imgui.text_disabled('(or edit here)')
+        return False
+
+    def ui_editor_window(self):
+        """The editor in its own window over the app (called every frame)."""
+        win = getattr(self, 'uied', {}).get('window')
+        if not win:
+            return
+        kind, uid, rid = win['key']
+        d = self.doc_by_uid(uid)
+        r = d.b.find(rid) if d is not None else None
+        node = self.ui_read(d, r) if r is not None else None
+        if node is None:
+            self.uied['window'] = None
+            return
+        vp = imgui.get_main_viewport()
+        imgui.set_next_window_pos(imgui.ImVec2(vp.work_pos.x + 24, vp.work_pos.y + 24), imgui.Cond_.first_use_ever)
+        imgui.set_next_window_size(imgui.ImVec2(vp.work_size.x - 48, vp.work_size.y - 48), imgui.Cond_.first_use_ever)
+        if win.get('focus'):
+            imgui.set_next_window_focus()
+            win['focus'] = False
+        title = f'UI editor - {self.display_name(d, r)[0]}  ({rid:#x})###uieditor'
+        _, keep = imgui.begin(title, True, imgui.WindowFlags_.no_collapse | imgui.WindowFlags_.no_scrollbar)
+        if not keep or (imgui.is_window_focused(imgui.FocusedFlags_.root_and_child_windows)
+                        and imgui.is_key_pressed(imgui.Key.escape)):
+            imgui.end()
+            self.uied['window'] = None
+            return
+        if kind == 'layout':
+            self.ui_layout_preview(d, r, node, window=True)
+        else:
+            self.ui_screen_preview(d, r, node, window=True)
+        imgui.end()
+
+    def ui_screen_preview(self, d, r, node, window=False):
+        if not window and self.ui_in_window(('screen', d.uid, r.id)):
+            return
         widgets = U.screen_widgets(self.types, node)
         if not widgets:
             imgui.text_disabled('This screen has no widgets with layouts.')
@@ -68,7 +124,7 @@ class UIEditorUI:
         if missing:
             imgui.same_line()
             imgui.text_disabled(f'({missing} layouts are in other bundles and not shown)')
-        self.ui_editor(d, items, ('screen', d.uid, r.id))
+        self.ui_editor(d, items, ('screen', d.uid, r.id), window)
 
     def ui_read(self, d, r):
         key = ('uilayout', d.uid, r.id, id(r.data(0)), len(self.types.types))
@@ -82,21 +138,80 @@ class UIEditorUI:
         return hit
 
     # -- resources ------------------------------------------------------------------------------------------
-    def ui_texture(self, d, tid):
-        """(GL texture, w, h) of a texture (decoded once per data)."""
+    def ui_texture(self, d, tid, additive=False):
+        """(GL texture, w, h) of a texture (decoded once per data). additive: a version that, drawn with the
+        usual alpha blending, looks like the additive shader's result (black = see-through)."""
         if not tid:
             return None
         cache = self.uied['tex']
         img = self.texture_image(d, tid, 1024)
         if img is None:
             return None
-        key = (tid, id(img))
+        key = (tid, id(img), additive)
         hit = cache.get(key)
         if hit is None:
-            for k in [k for k in cache if k[0] == tid]:
+            for k in [k for k in cache if k[0] == tid and k[2] == additive]:
                 del cache[k]
-            hit = cache[key] = (immvision.GlTexture(img), img.shape[1], img.shape[0], img)
+            src = img
+            if additive:
+                rgb = img[..., :3].astype(np.float32)
+                m = rgb.max(axis=-1)
+                out = np.empty_like(img)
+                out[..., :3] = np.clip(rgb * (255.0 / np.maximum(m, 1.0))[..., None], 0, 255).astype(np.uint8)
+                out[..., 3] = np.clip(img[..., 3].astype(np.float32) * m / 255.0, 0, 255).astype(np.uint8)
+                src = out
+            hit = cache[key] = (immvision.GlTexture(src), img.shape[1], img.shape[0], img)
         return hit
+
+    def ui_shader(self, d, uimat):
+        """The shader name of an element's UIMaterial (its Material is a GameChanger id of a material in the
+        bundle or GLOBALMATERIALDICTIONARY; the name is read from the shader resource)."""
+        if not uimat:
+            return ''
+        cache = self.uied['shaders']
+        key = (d.uid, uimat)
+        if key in cache:
+            return cache[key]
+        name = ''
+        try:
+            r = d.b.find(uimat)
+            n = self.ui_read(d, r) if r is not None and r.type == 0x15 else None
+            gc = n.fields.get(U.H_MATERIAL) if n is not None else None
+            if isinstance(gc, int) and gc:
+                root = roots.root_for(d.path, d.b.platform)
+                mb, mr = self.mesh_lib.find((1 << 56) | gc, self.model_bundles(d), root)
+                if mr is not None:
+                    imps = {i.offset: i.id for i in mr.imports()}
+                    sh = imps.get(0x8) or next(iter(imps.values()), None)
+                    sb, sr = self.mesh_lib.find(sh, self.model_bundles(d), root) if sh else (None, None)
+                    for c in range(3):
+                        if sr is None:
+                            break
+                        try:
+                            m = re.search(rb'UI[A-Za-z0-9_]*Shader', bytes(sr.data(c)))
+                        except Exception:
+                            m = None
+                        if m:
+                            name = m.group(0).decode()
+                            break
+        except Exception:
+            name = ''
+        cache[key] = name
+        return name
+
+    def ui_mode(self, d, el):
+        """How an image draws: 'mirror' (the game's mirror camera), 'minimap', 'bound' (the picture comes from
+        the game: profile pictures, icons, map tiles; the stored texture is a stand-in), 'additive', 'normal'."""
+        shader = self.ui_shader(d, el.material)
+        if el.image_bind == 'Graphics.RearViewMirror' or 'Mirror' in shader:
+            return 'mirror'
+        if el.kind == 'MiniMap' or 'RoadRibbon' in shader:
+            return 'minimap'
+        if el.image_bind:
+            return 'bound'
+        if 'Additive' in shader:
+            return 'additive'
+        return 'normal'
 
     def ui_quad(self, d, qid):
         """The quad's corners: [(u, v)] for top-left, top-right, bottom-right, bottom-left (None: 0..1)."""
@@ -143,7 +258,7 @@ class UIEditorUI:
         if el.text:
             v = ev.value(el.text)
             if v is not None:
-                return f'{v:.0f}' if abs(v - round(v)) < 1e-6 else f'{v:.1f}'
+                return f'{v:.0f}'                              # HUD numbers are whole numbers
             path = U.binding_path(el.text)
             if path and '.' in path:
                 return '[' + path.split('.')[-1] + ']'
@@ -151,12 +266,12 @@ class UIEditorUI:
         return ''
 
     # -- the editor -----------------------------------------------------------------------------------------
-    def ui_editor(self, d, items, key):
+    def ui_editor(self, d, items, key, window=False):
         st = self.uied_state(key)
         ev = U.Evaluator(st['state'])
         layouts = [(r, n, U.elements(self.types, n)) for r, n in items]
         avail = imgui.get_content_region_avail()
-        panel = 360
+        panel = 420 if window else 360
         cw = max(320.0, avail.x - panel - 12)
         ch = cw * U.H / U.W
         if ch > avail.y - 8:
@@ -180,15 +295,6 @@ class UIEditorUI:
 
         imgui.invisible_button('##uihit', imgui.ImVec2(cw, ch))
         hovered = imgui.is_item_hovered()
-        dl.add_rect_filled(o, imgui.ImVec2(o.x + cw, o.y + ch), _u32((0.11, 0.12, 0.14, 1)))
-        if self.uied['bg'] is not None:
-            dl.add_image(imgui.ImTextureRef(self.uied['bg'][0].texture_id), o, imgui.ImVec2(o.x + cw, o.y + ch))
-        else:
-            for k in range(0, U.W, 80):                       # a faint grid (80 px)
-                dl.add_line(P(k, 0), P(k, U.H), _u32((1, 1, 1, 0.035)))
-            for k in range(0, U.H, 80):
-                dl.add_line(P(0, k), P(U.W, k), _u32((1, 1, 1, 0.035)))
-        dl.push_clip_rect(o, imgui.ImVec2(o.x + cw, o.y + ch), True)
         now = time.time()
         play = st['play']
         if play is not None:
@@ -196,11 +302,109 @@ class UIEditorUI:
             longest = max((U.phase_length(el, play[0]) for _, _, els in layouts for el in els), default=0.0)
             if play[0] != 'idle' and t > longest + 400:
                 st['play'] = play = None
-        sel = st['sel']
-        drag = st['drag']
-        shapes = []                                           # (rid, el, corners) of the drawn elements, for picking
-        for r, _n, els in layouts:
+        fbs = imgui.get_io().display_framebuffer_scale.x or 1.0
+        k = s * fbs                                          # layout units -> render target pixels
+        ops, shapes, overlays = self.ui_build(d, st, layouts, ev, play, now, k)
+        tex = None
+        if st.get('gl', True):
+            if not hasattr(self, 'uirender'):
+                self.uirender = uirender.UIRenderer()
+            bg = []
+            if self.uied['bg'] is not None:
+                bg = [('quad', self.uied['bg'][0].texture_id, [(0, 0), (U.W, 0), (U.W, U.H), (0, U.H)],
+                       [(0, 0), (1, 0), (1, 1), (0, 1)], (1, 1, 1, 1), 'alpha')]
+            scaled = [op if op[0] == 'unmask' else
+                      (op[0], op[1], [(x * k, y * k) for x, y in op[2]]) + tuple(op[3:]) for op in bg + ops]
+            tex = self.uirender.render(cw * fbs, ch * fbs, scaled)
+        if tex is not None:
+            dl.add_image(imgui.ImTextureRef(tex), o, imgui.ImVec2(o.x + cw, o.y + ch), imgui.ImVec2(0, 1),
+                         imgui.ImVec2(1, 0))
+        else:                                                # no GL renderer: ImGui quads (masks as rectangles)
+            dl.add_rect_filled(o, imgui.ImVec2(o.x + cw, o.y + ch), _u32((0.11, 0.12, 0.14, 1)))
+            dl.push_clip_rect(o, imgui.ImVec2(o.x + cw, o.y + ch), True)
             clips = 0
+            for op in ops:
+                if op[0] == 'mask':
+                    xs, ys = [p[0] for p in op[2]], [p[1] for p in op[2]]
+                    dl.push_clip_rect(P(min(xs), min(ys)), P(max(xs), max(ys)), True)
+                    clips += 1
+                elif op[0] == 'unmask':
+                    if clips:
+                        dl.pop_clip_rect()
+                        clips -= 1
+                else:
+                    _, t, pts, uv, rgba, _blend = op
+                    q = [P(*p) for p in pts]
+                    dl.add_image_quad(imgui.ImTextureRef(t or self.ui_white()), q[0], q[1], q[2], q[3],
+                                      imgui.ImVec2(*uv[0]), imgui.ImVec2(*uv[1]), imgui.ImVec2(*uv[2]),
+                                      imgui.ImVec2(*uv[3]), _u32(rgba))
+            for _ in range(clips):
+                dl.pop_clip_rect()
+            dl.pop_clip_rect()
+        dl.push_clip_rect(o, imgui.ImVec2(o.x + cw, o.y + ch), True)
+        for pts, colour, text in overlays:
+            self.ui_outline(dl, P, pts, colour)
+            if text:
+                dl.add_text(P(*pts[0]), _u32(colour), text)
+        cur = None
+        sel = st['sel']
+        for r, el, pts in shapes:
+            if sel == (r.id, el.index):
+                cur = (r, el, pts)
+                self.ui_outline(dl, P, pts, (1.0, 0.75, 0.1, 1), 2.0)
+                hx, hy = P(*pts[2])
+                dl.add_rect_filled(imgui.ImVec2(hx - HANDLE / 2, hy - HANDLE / 2),
+                                   imgui.ImVec2(hx + HANDLE / 2, hy + HANDLE / 2), _u32((1.0, 0.75, 0.1, 1)))
+                ax_, ay_ = P(el.x, el.y)
+                dl.add_circle(imgui.ImVec2(ax_, ay_), 4, _u32((1.0, 0.75, 0.1, 1)), 0, 1.5)
+        dl.pop_clip_rect()
+        self.ui_mouse(d, st, shapes, cur, o, s, hovered)
+
+    def ui_white(self):
+        if 'white' not in self.uied:
+            self.uied['white'] = immvision.GlTexture(np.full((4, 4, 4), 255, np.uint8))
+        return self.uied['white'].texture_id
+
+    def ui_stand_in_texture(self, mode):
+        """What the game draws there itself: the mirror camera (sky over road) or the minimap (a dark disc)."""
+        key = 'stand-in-' + mode
+        if key not in self.uied:
+            if mode == 'mirror':
+                v = np.linspace(0, 1, 64)[:, None]
+                sky = np.array([110, 128, 150], np.float32)
+                road = np.array([40, 42, 46], np.float32)
+                rgb = np.where(v < 0.55, sky * (1 - v * 0.6), road + (1 - v) * 20)
+                img = np.dstack([np.repeat(rgb[:, None, c], 64, 1) for c in range(3)]
+                                + [np.full((64, 64), 245, np.float32)]).astype(np.uint8)
+            else:
+                yy, xx = np.mgrid[0:128, 0:128]
+                r = np.hypot(xx - 63.5, yy - 63.5) / 63.5
+                img = np.zeros((128, 128, 4), np.uint8)
+                img[..., 0], img[..., 1], img[..., 2] = 26, 30, 34
+                img[..., 3] = np.clip((1.0 - r) * 400, 0, 215).astype(np.uint8)
+                road = np.abs((xx - 64) * 0.5 + (yy - 64)) < 3                       # a road through the middle
+                img[road & (r < 0.95)] = (200, 200, 200, 220)
+            self.uied[key] = immvision.GlTexture(img)
+        return self.uied[key].texture_id
+
+    def ui_text_texture(self, text, px):
+        cache = self.uied.setdefault('text', {})
+        key = (text, int(round(px)))
+        hit = cache.get(key)
+        if hit is None:
+            if len(cache) > 400:
+                cache.clear()
+            img = uirender.text_image(text, px)
+            hit = cache[key] = (immvision.GlTexture(img), img.shape[1], img.shape[0])
+        return hit
+
+    def ui_build(self, d, st, layouts, ev, play, now, k):
+        """The draw list (uirender ops, layout coordinates), the pickable shapes and the overlay outlines."""
+        ops, shapes, overlays = [], [], []
+        unit = [(0, 0), (1, 0), (1, 1), (0, 1)]
+        drag = st['drag']
+        for r, _n, els in layouts:
+            depth = 0
             for el in els:
                 x, y, w, h, rot = el.x, el.y, el.w, el.h, el.rot
                 if drag is not None and drag['key'] == (r.id, el.index):
@@ -216,36 +420,43 @@ class UIEditorUI:
                 pts = U.corners(x, y, w, h, el.anchor, rot, scale)
                 if el.kind == 'Mask':
                     if el.mask_end:
-                        if clips:
-                            dl.pop_clip_rect()
-                            clips -= 1
-                    elif st['clip'] and visible:
-                        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-                        dl.push_clip_rect(P(min(xs), min(ys)), P(max(xs), max(ys)), True)
-                        clips += 1
+                        if depth:
+                            ops.append(('unmask',))
+                            depth -= 1
+                    elif st['clip']:
+                        tex = self.ui_texture(d, el.texture)
+                        uv = self.ui_quad(d, el.quad) or unit
+                        ops.append(('mask', tex[0].texture_id if tex else None, pts, uv))
+                        depth += 1
                     if st['show_masks']:
-                        self.ui_outline(dl, P, pts, (0.3, 0.8, 1.0, 0.7))
+                        overlays.append((pts, (0.3, 0.8, 1.0, 0.7), None))
                     shapes.append((r, el, pts))
                     continue
                 if not visible:
                     if st['show_hidden']:
-                        self.ui_outline(dl, P, pts, (1, 1, 1, 0.18))
+                        overlays.append((pts, (1, 1, 1, 0.18), None))
                         shapes.append((r, el, pts))
                     continue
                 shapes.append((r, el, pts))
                 op = max(0.0, min(1.0, el.opacity / 100.0)) * alpha
-                if el.texture is not None or el.kind == 'Image':
+                mode = self.ui_mode(d, el) if (el.texture is not None or el.kind in ('Image', 'MiniMap')) else None
+                if mode in ('mirror', 'minimap'):
+                    if mode == 'minimap':                    # the game turns the map inside, not the element
+                        pts = U.corners(x, y, w, h, el.anchor, el.rot, scale)
+                    ops.append(('quad', self.ui_stand_in_texture(mode), pts, unit, (1, 1, 1, op), 'alpha'))
+                elif mode is not None:
                     tex = self.ui_texture(d, el.texture)
                     if tex is None:
-                        self.ui_outline(dl, P, pts, (1, 0.4, 0.3, 0.6))
+                        overlays.append((pts, (0.3, 0.8, 1.0, 0.6) if mode == 'bound' else (1, 0.4, 0.3, 0.6),
+                                         el.image_bind.split('.')[-1] if mode == 'bound' else None))
                         continue
-                    uv = self.ui_quad(d, el.quad) or [(0, 0), (1, 0), (1, 1), (0, 1)]
+                    uv = self.ui_quad(d, el.quad) or unit
                     tint = el.tint or [1, 1, 1, 1]
-                    col = (tint[0], tint[1], tint[2], tint[3] * op)
-                    q = [P(*p) for p in pts]
-                    dl.add_image_quad(imgui.ImTextureRef(tex[0].texture_id), q[0], q[1], q[2], q[3],
-                                      imgui.ImVec2(*uv[0]), imgui.ImVec2(*uv[1]), imgui.ImVec2(*uv[2]),
-                                      imgui.ImVec2(*uv[3]), _u32(col))
+                    faded = 0.45 if mode == 'bound' and st['bound_faded'] else 1.0
+                    ops.append(('quad', tex[0].texture_id, pts, uv, (tint[0], tint[1], tint[2], tint[3] * op * faded),
+                                'add' if mode == 'additive' else 'alpha'))
+                    if mode == 'bound' and st['bound_faded']:
+                        overlays.append((pts, (0.3, 0.8, 1.0, 0.45), None))
                 elif el.kind in ('Label', 'BackedLabel', 'ScrollingText', 'ScrollableLabel'):
                     text = self.ui_text(d, el, ev)
                     size, colour = self.ui_style(d, el.style)
@@ -255,38 +466,23 @@ class UIEditorUI:
                         colour = [a * b for a, b in zip(colour, el.tint)]
                     colour[3] *= op
                     if text:
-                        imgui.push_font(None, max(4.0, size * s))
-                        tw = imgui.calc_text_size(text).x / s
-                        imgui.pop_font()
+                        tt = self.ui_text_texture(text, size * k)
+                        tw, th = tt[1] / k, tt[2] / k
                         ax, ay = U.anchor_frac(el.anchor)
                         left, top = x - ax * w * scale, y - ay * h * scale
                         tx = left + {1: (w * scale - tw) / 2, 2: w * scale - tw}.get(el.just, 0)
-                        ty = top + (h * scale - size) / 2
-                        dl.add_text(imgui.get_font(), max(4.0, size * s), P(tx, ty), _u32(colour), text)
+                        ty = top + (h * scale - th) / 2
+                        ops.append(('quad', tt[0].texture_id, [(tx, ty), (tx + tw, ty), (tx + tw, ty + th), (tx, ty + th)],
+                                    unit, tuple(colour), 'alpha'))
                 elif el.kind == 'Shape':
                     c = el.colour or [1, 1, 1, 1]
-                    q = [P(*p) for p in pts]
-                    dl.add_quad_filled(q[0], q[1], q[2], q[3], _u32((c[0], c[1], c[2], c[3] * op)))
+                    ops.append(('quad', None, pts, unit, (c[0], c[1], c[2], c[3] * op), 'alpha'))
                 else:
-                    self.ui_outline(dl, P, pts, (0.9, 0.8, 0.3, 0.5))
-                    dl.add_text(P(*pts[0]), _u32((0.9, 0.8, 0.3, 0.8)), el.kind)
+                    overlays.append((pts, (0.9, 0.8, 0.3, 0.5), el.kind))
                 if st['outlines']:
-                    self.ui_outline(dl, P, pts, (1, 1, 1, 0.25))
-            for _ in range(clips):
-                dl.pop_clip_rect()
-        # selection: outline and the resize handle (bottom-right corner)
-        cur = None
-        for r, el, pts in shapes:
-            if sel == (r.id, el.index):
-                cur = (r, el, pts)
-                self.ui_outline(dl, P, pts, (1.0, 0.75, 0.1, 1), 2.0)
-                hx, hy = P(*pts[2])
-                dl.add_rect_filled(imgui.ImVec2(hx - HANDLE / 2, hy - HANDLE / 2),
-                                   imgui.ImVec2(hx + HANDLE / 2, hy + HANDLE / 2), _u32((1.0, 0.75, 0.1, 1)))
-                ax_, ay_ = P(el.x, el.y)
-                dl.add_circle(imgui.ImVec2(ax_, ay_), 4, _u32((1.0, 0.75, 0.1, 1)), 0, 1.5)
-        dl.pop_clip_rect()
-        self.ui_mouse(d, st, shapes, cur, o, s, hovered)
+                    overlays.append((pts, (1, 1, 1, 0.25), None))
+            ops.extend([('unmask',)] * depth)
+        return ops, shapes, overlays
 
     @staticmethod
     def ui_outline(dl, P, pts, colour, thick=1.0):
@@ -441,6 +637,11 @@ class UIEditorUI:
             _, st['show_masks'] = imgui.checkbox('Masks', st['show_masks'])
             imgui.same_line()
             _, st['clip'] = imgui.checkbox('Mask clipping', st['clip'])
+            _, st['bound_faded'] = imgui.checkbox('Game pictures faded', st['bound_faded'])
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Images whose picture the game sets at run time (ImageBinding: profile pictures, '
+                                  'icons, map tiles) show their stored stand-in texture faded and outlined.\n'
+                                  'The rear-view mirror and the minimap are drawn by the game: shown as stand-ins.')
             if imgui.button('Background image...'):
                 p = filedialog.open_file('Background image (a screenshot of the game)', self.cfg.get('last_import', ''),
                                          filedialog.IMAGES)
@@ -545,8 +746,13 @@ class UIEditorUI:
                 s = ops.game_strings(d.path).get(el.string_id) if el.string_id else None
                 if s:
                     imgui.text_disabled(f'"{s[:60]}"')
-        if el.texture is not None:
-            imgui.text_disabled(f'texture {el.texture:#x}, quad {el.quad or 0:#x}')
+        if el.texture is not None or el.image_bind:
+            imgui.text_disabled(f'texture {el.texture or 0:#x}, quad {el.quad or 0:#x}')
+            shader = self.ui_shader(d, el.material)
+            if shader:
+                imgui.text_disabled(f'shader {shader}')
+            if el.image_bind:
+                imgui.text_disabled(f'picture from the game: {el.image_bind}')
 
     def ui_text_field(self, d, r, node, h, label, value):
         key = f'##uitf{label}{id(node)}'
