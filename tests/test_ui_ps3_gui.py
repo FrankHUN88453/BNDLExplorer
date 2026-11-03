@@ -97,9 +97,83 @@ def main():
                               and got.quad is not None and got.base is None)
             state['paste_info'] = (src.gc, 'texture converted' if state['tex_new'] else 'texture already there',
                                    inf.describe() if inf else None)
+        if f == 58:                                       # a label: its style converted; a minimap; bindings
+            st = app.uied['views'][('screen', dp.uid, SCREEN)]
+            lc = state['lc']
+            allps3 = [(l_, e) for l_ in st['params'] for e in els(dp, l_)]
+            labs = [(l_, e) for l_, e in allps3 if e.kind == 'Label' and e.style and dp.b.find(e.style)]
+            lid, lab = next(((l_, e) for l_, e in labs if dc.b.find(e.style) is None), labs[0])
+            kept = dc.b.find(lab.style) is not None        # the PC HUD has a style of that id: it stays
+            app.ui_copy(dp, dp.b.find(lid), lab)
+            idx = app.ui_paste(dc, dc.b.find(lc))
+            got = els(dc, lc)[idx] if idx is not None else None
+            sr = dc.b.find(got.style) if got is not None and got.style else None
+            sn = genesys.Reader(app.types, dc.b.e).read_resource(sr) if sr is not None else None
+            from bndlx.gnames import name_hash
+            pc_fonts = {i for i, _n in app.ui_fonts(dc)}
+            src_size = genesys.Reader(app.types, dp.b.e).read_resource(dp.b.find(lab.style)).fields.get(U.H_FONTSIZE)
+            state['style'] = (sn is not None and (got.style == lab.style if kept else got.style != lab.style
+                                                  and sn.fields.get(U.H_FONTSIZE) == src_size)
+                              and sn.fields.get(name_hash('Font_Asset')) in pc_fonts)
+            state['style_how'] = 'kept the PC style of that id' if kept else 'converted to a new PC style'
+            app.modal = None
+            # the minimap: its sub-images come from the PC HUD's minimap
+            lid, mm = next((l_, e) for l_, e in allps3 if e.kind == 'MiniMap')
+            app.ui_copy(dp, dp.b.find(lid), mm)
+            idx = app.ui_paste(dc, dc.b.find(lc))
+            got = els(dc, lc)[idx] if idx is not None else None
+            subs = [f.name_hash for f in app.types.view('<').get(got.node.type).fields
+                    if app.types.name(f.type_id) == 'UISubImage'] if got is not None else []
+            state['minimap'] = got is not None and subs and all(got.node.fields.get(h) is not None for h in subs)
+            app.modal = None
+            saved = app.ui_template_element
+            app.ui_template_element = lambda d, n, t=None: None
+            cn = app.uied['clip']['node']                  # a minimap without its sub-images (ProtoHUD's crash)
+            for h in (0x4d61736b, 0x918fa729):
+                app.ui_holder(cn, h).fields[h] = None
+            n0 = len(els(dc, lc))
+            refused = app.ui_paste(dc, dc.b.find(lc)) is None and app.modal is not None and len(els(dc, lc)) == n0
+            app.ui_template_element = saved
+            state['minimap_refused'] = refused
+            app.modal = None
+            # an element reading a source retail does not have: neutralised on paste
+            checker = app.ui_checker(dc)
+
+            def strings(n):
+                out = []
+
+                def w(v):
+                    if isinstance(v, genesys.Node):
+                        for x in v.fields.values():
+                            w(x)
+                    elif isinstance(v, list):
+                        for x in v:
+                            w(x)
+                    elif isinstance(v, str):
+                        out.append(v)
+                w(n)
+                return out
+            # the minimap's unknown bindings sit in prototype-only fields: dropped by the conversion
+            lid, mm = next((l_, e) for l_, e in allps3 if e.kind == 'MiniMap')
+            app.ui_copy(dp, dp.b.find(lid), mm)
+            idx = app.ui_paste(dc, dc.b.find(lc))
+            got = els(dc, lc)[idx] if idx is not None else None
+            clean = got is not None and not any(checker.bad(x) for x in strings(got.node))
+            app.modal = None
+            # a kept field reading a source retail does not have: neutralised, and reported
+            lid, im = next((l_, e) for l_, e in allps3 if e.kind == 'Image' and e.texture and not e.image_bind)
+            app.ui_copy(dp, dp.b.find(lid), im)
+            clip_node = app.uied['clip']['node']
+            app.ui_holder(clip_node, U.H_VIS).fields[U.H_VIS] = 'Players.LocalPlayer.CopAmmo(GTEQ:1)'
+            idx = app.ui_paste(dc, dc.b.find(lc))
+            got = els(dc, lc)[idx] if idx is not None else None
+            state['neutral'] = (clean and got is not None and got.vis == 'Signals.GetIntValue[0]'
+                                and app.modal is not None and 'CopAmmo' in app.modal.get('text', ''))
+            state['neutral_what'] = ['Players.LocalPlayer.CopAmmo -> ' + (got.vis if got else '?')]
+            app.modal = None
         if f == 65:
             for d, rid, old in ((dp, state['lid'], state['old_ps3']), (dc, state['lc'], state['old_pc'])):
-                for _ in range(20):
+                for _ in range(40):
                     if bytes(d.b.find(rid).data(0)) == old or not d.undo:
                         break
                     d.do_undo()
@@ -146,6 +220,11 @@ def main():
           f'the prototype HUD shows {state.get("ps3_layouts")} layouts with {state.get("ps3_tex")} textures')
     check(state.get('ps3_move'), 'a prototype element moved: written into its base struct')
     check(state.get('paste'), f'a prototype element pasted into the PC HUD, converted: {state.get("paste_info")}')
+    check(state.get('style'), f'a prototype label pasted: {state.get("style_how")}, with a PC font')
+    check(state.get('minimap'), 'a prototype minimap pasted with its mask / road sub-images (its own converted, '
+                                "else the PC minimap's)")
+    check(state.get('minimap_refused'), 'without a minimap to take them from the paste is refused (no NULL crash)')
+    check(state.get('neutral'), f'unknown bindings neutralised on paste {state.get("neutral_what")}')
     check(state.get('undo'), 'undo restores both bundles')
     shutil.rmtree(TMP, ignore_errors=True)
     print(f'{len(failures)} failure(s)')

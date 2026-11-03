@@ -23,7 +23,8 @@ import numpy as np
 
 from imgui_bundle import imgui, immvision
 
-from . import filedialog, genesys, gjson, mesh, ops, raster, roots, uifont, uirender, uiscene as U
+from . import bindings as BD
+from . import filedialog, genesys, gjson, gwrite, mesh, ops, raster, roots, uifont, uirender, uiscene as U
 from .bundle import Bundle
 from .genesys import Node, Ref, STRINGBASE
 from .gnames import name_hash
@@ -1410,14 +1411,16 @@ class UIEditorUI:
         db.add_bundle(b)
         return {db.name(t): t for t in db.types}, db
 
-    def ui_convert_node(self, node, names, db):
+    def ui_convert_node(self, node, names, db, template=None, template_all=False):
         """A node of another build as a node of this bundle's types, field by field (by name hash), guided by the
         target's schema: a PS3 prototype element's base struct is merged into the element (retail keeps those
         fields in the element); sub-structs take the target field's type, objects their type by name."""
-        def conv_node(v, tid):
+        def conv_node(v, tid, tpl=None):
             t = db.get(tid)
             if t is None:
                 raise ValueError(f'type {tid:#x} is not in this bundle')
+            if tpl is not None and tpl.type != tid:
+                tpl = None
             src = dict(v.fields)
             base = src.get(U.H_BASE)
             if isinstance(base, Node) and all(f.name_hash != U.H_BASE for f in t.fields):
@@ -1427,18 +1430,26 @@ class UIEditorUI:
             n = Node(tid, -1)
             n.raw = None
             for f in t.fields:
-                n.fields[f.name_hash] = conv_val(src[f.name_hash], f) if f.name_hash in src else \
-                    gjson.default_of(db, f)
+                h = f.name_hash
+                sub = tpl.fields.get(h) if tpl is not None else None
+                if h in src:
+                    n.fields[h] = conv_val(src[h], f, sub if isinstance(sub, Node) else None)
+                elif tpl is not None and h in tpl.fields and (template_all or (f.flags & 1 and not f.flags & 8)
+                                                               or isinstance(sub, Node)):
+                    n.fields[h] = gjson.clone(sub)        # e.g. the minimap's mask / road images, a style's fonts
+                    borrowed.append(h)
+                else:                                     # a pointer the source lacks stays NULL
+                    n.fields[h] = None if f.flags & 1 and not f.flags & 8 else gjson.default_of(db, f)
             return n
 
-        def conv_val(v, f):
+        def conv_val(v, f, tpl=None):
             if isinstance(v, list):
                 if f.flags & 2 and f.count > 1 and len(v) != f.count:
                     v = (v + [v[-1] if v else 0] * f.count)[:f.count]
                 return [conv_one(x, f) for x in v]
-            return conv_one(v, f)
+            return conv_one(v, f, tpl)
 
-        def conv_one(v, f):
+        def conv_one(v, f, tpl=None):
             if not isinstance(v, Node):
                 ft = db.get(f.type_id)
                 if ft is not None and ft.kind == 2 and isinstance(v, int):
@@ -1447,20 +1458,78 @@ class UIEditorUI:
                     return int(round(v))
                 return v
             ft = db.get(f.type_id)
-            own = names.get(self.types.name(v.type))
+            own = names.get(self.types.name(v.type)) or (v.type if db.get(v.type) is not None else None)
             if f.flags & 16 or (ft is not None and ft.base and own is not None):
-                return conv_node(v, own or f.type_id)
-            return conv_node(v, f.type_id)
+                return conv_node(v, own or f.type_id, tpl)
+            return conv_node(v, f.type_id, tpl)
 
-        tid = names.get(self.types.name(node.type))
+        borrowed = []
+        tid = names.get(self.types.name(node.type)) or (node.type if db.get(node.type) is not None else None)
         if tid is None:
             raise ValueError(f'the element type {self.types.name(node.type)} is not in this bundle')
-        return conv_node(node, tid)
+        out = conv_node(node, tid, template)
+        self.uied['borrowed'] = borrowed
+        return out
+
+    def ui_template_element(self, d, type_name, type_id=None):
+        """An element of this type in the bundle's layouts (to take what a converted one lacks from)."""
+        for x in d.b.resources:
+            if x.type != 0x15 or not x.imports() or self.types.name(x.imports()[0].id) != 'UILayout':
+                continue
+            n = self.ui_read(d, x)
+            for e in (n.fields.get(U.H_ELEMENTS) or []) if n is not None else []:
+                if isinstance(e, Node) and (self.types.name(e.type) == type_name or e.type == type_id):
+                    return e
+        return None
+
+    def ui_checker(self, d):
+        """The retail bindings of the PC game folder (for checking / neutralising prototype bindings)."""
+        root = next((r for r in [roots.root_for(d.path, 'PC')] + list(roots.FALLBACK.values())
+                     if r and os.path.isfile(os.path.join(r, 'NFS13.exe'))), None)
+        if root is None:
+            return None
+        cache = self.uied.setdefault('checkers', {})
+        if root not in cache:
+            from .labels import config_dir
+            cache[root] = BD.Bindings(root, config_dir())
+        return cache[root]
+
+    def ui_convert_style(self, d, res, platform):
+        """A text style of another build as a new style object of this bundle (fields it lacks and the fonts the
+        game does not have come from this bundle's styles)."""
+        tpl_res = next((x for x in d.b.resources if x.type == 0x15 and x.imports()
+                        and self.types.name(x.imports()[0].id) == 'TextStyle'), None)
+        if tpl_res is None:
+            return None, None
+        tpl = genesys.Reader(self.types, d.b.e).read_resource(tpl_res)
+        src = genesys.Reader(self.types, '>' if platform == 'PS3' else '<').read_resource(res)
+        names, db = self.ui_dest_types(d.b)
+        node = self.ui_convert_node(src, names, db, tpl, template_all=True)
+        fonts = {i for i, _n in self.ui_fonts(d)} - {97111}           # 97111 is a CJK font on PC
+        main = node.fields.get(name_hash('Font_Asset'))
+        main = main if main in fonts else 1206237
+        node.fields[name_hash('Font_Asset')] = main
+        for f in db.get(node.type).fields:                            # the other font ids (fallbacks)
+            v = node.fields.get(f.name_hash)
+            if f.name_hash != U.H_GC and isinstance(v, int) and 90000 < v < 3000000 and \
+                    db.name(f.type_id) == 'CgsCore.UniqueId' and v not in fonts:
+                node.fields[f.name_hash] = tpl.fields.get(f.name_hash) or main
+        gc = self.ui_alloc_gc(d)
+        node.fields[U.H_GC] = gc
+        data, off, cnt = gwrite.write(self.types, d.b.e, node)
+        out = tpl_res.copy()
+        out.id = (1 << 56) | gc
+        out.set_data(0, data)
+        out.import_offset, out.import_count = off, cnt
+        out.modified = True
+        return out, main
 
     def ui_map_refs(self, d, node, clip):
         """References of an element pasted from another platform: textures come along (converted), materials,
         text styles and quads become the target bundle's, other references are left out. -> resources to add."""
         news = []
+        notes = self.uied.setdefault('paste_notes', [])
+        converted = {}
         mats = self.ui_materials(d)
         styles = [x.id for x in d.b.resources if x.type == 0x15 and x.imports()
                   and self.types.name(x.imports()[0].id) == 'TextStyle']
@@ -1492,7 +1561,17 @@ class UIEditorUI:
                             None)
                 return same or (mats[0][0] if mats else None)
             if kind == 'TextStyle':
-                return styles[0] if styles else None
+                conv = converted.get(rid)
+                if conv is None:
+                    try:
+                        conv, font = self.ui_convert_style(d, res, clip['platform'])
+                    except Exception:
+                        conv, font = None, None
+                    if conv is not None:
+                        news.append(conv)
+                        notes.append(f'text style {rid & 0xFFFFFFFF} converted to {conv.id & 0xFFFFFFFF} (font {font})')
+                    converted[rid] = conv
+                return conv.id if conv is not None else (styles[0] if styles else None)
             if kind == T_RENDERABLE:
                 return quad
             return None
@@ -1531,15 +1610,34 @@ class UIEditorUI:
         node = gjson.clone(clip['node'])
         cross = clip['platform'] != d.b.platform
         news = []
+        self.uied['paste_notes'] = []
         if cross:
             names, db = self.ui_dest_types(d.b)
+            tpl = self.ui_template_element(d, self.types.name(node.type), node.type)
             try:
-                node = self.ui_convert_node(node, names, db)
+                node = self.ui_convert_node(node, names, db, tpl)
             except ValueError as ex:
                 self.modal = {'kind': 'message', 'title': 'Paste', 'text': f'This element cannot go into this '
                               f'{d.b.platform} bundle: {ex}.'}
                 return None
+            borrowed = list(self.uied.get('borrowed') or [])
+            t = db.get(node.type)
+            empty = [f for f in t.fields if f.flags & 1 and not f.flags & 8 and node.fields.get(f.name_hash) is None
+                     and db.name(f.type_id) == 'UISubImage']
+            if empty:
+                self.modal = {'kind': 'message', 'title': 'Paste', 'text':
+                              f'A {clip["kind"]} element needs its {len(empty)} sub-images (mask, road images) and '
+                              f'there is no {clip["kind"]} in this bundle to take them from: in the game it would '
+                              f'crash (a NULL sub-image). Paste it into a screen that has one.'}
+                return None
             news = self.ui_map_refs(d, node, clip)
+            notes = self.uied['paste_notes']
+            if borrowed:
+                notes.append(f'{len(borrowed)} field(s) the prototype element lacks taken from a '
+                             f'{self.types.name(node.type)} of this bundle')
+            checker = self.ui_checker(d) if self.uied.get('neutralise', True) else None
+            if checker is not None:
+                notes.extend(BD.fix_node(node, checker))
         if not self.genesys_rewritable(d, r):
             self.status = 'This layout cannot be re-written exactly.'
             return None
@@ -1567,6 +1665,10 @@ class UIEditorUI:
             return None
         self.status = f'{clip["kind"]} element {gc} pasted' + (f' with {len(news)} resource(s) it needs' if news
                                                                  else '') + ' (Ctrl+Z to undo).'
+        notes = self.uied.get('paste_notes') or []
+        if cross and notes:
+            self.modal = {'kind': 'message', 'title': 'Pasted from the ' + clip['platform'],
+                          'text': f'{clip["kind"]} element {gc}:\n' + '\n'.join(f'- {n}' for n in notes)}
         return out.get('index')
 
     # -- own pictures -----------------------------------------------------------------------------------------
@@ -1937,6 +2039,10 @@ class UIEditorUI:
             if ch:
                 st['snap'] = snaps[k]
             _, st['bound_faded'] = imgui.checkbox('Game pictures faded', st['bound_faded'])
+            imgui.same_line()
+            ch, v = imgui.checkbox('Neutralise unknown bindings on paste', self.uied.get('neutralise', True))
+            if ch:
+                self.uied['neutralise'] = v
             imgui.same_line()
             _, st['game_fonts'] = imgui.checkbox('Game fonts', st.get('game_fonts', True))
             if imgui.is_item_hovered():
@@ -2643,7 +2749,38 @@ class UIEditorUI:
             n.fields[h] = (cur if isinstance(cur, list) else []) + [b]
         self.ui_restructure(d, r, el.index, mutate, f'add a {desc} to element {el.index}')
 
+    def ui_binding_check(self, d, r, el):
+        checker = self.ui_checker(d)
+        if checker is None:
+            return
+        bad = []
+
+        def walk(v, holder):
+            if isinstance(v, Node):
+                for k, x in v.fields.items():
+                    if isinstance(x, str) and x and checker.bad(x):
+                        bad.append((v, k, x))
+                    else:
+                        walk(x, v)
+            elif isinstance(v, list):
+                for x in v:
+                    walk(x, holder)
+        walk(el.node, el.node)
+        if not bad:
+            return
+        imgui.text_colored(imgui.ImVec4(1.0, 0.6, 0.3, 1), f'{len(bad)} binding(s) the retail game does not have:')
+        for _n, _k, x in bad[:6]:
+            imgui.text_disabled(f'  {x[:60]}')
+        if imgui.small_button('Neutralise them') and not d.b.truncated:
+            for n, k, x in bad:
+                self.ui_set_text(d, r, n, k, checker.fix(x)[0])
+            self.status = f'{len(bad)} binding(s) of element {el.index} set to {BD.NEUTRAL}.'
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(f'Each becomes {BD.NEUTRAL} (constant 0: hidden / no movement), as a missing source '
+                              'can make the whole widget vanish in game')
+
     def ui_element_ops(self, d, r, el):
+        self.ui_binding_check(d, r, el)
         imgui.separator()
         i = el.index
         if imgui.button('Copy'):
