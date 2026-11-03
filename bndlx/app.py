@@ -1069,6 +1069,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI):
             paths, self.dropped = self.dropped, []
         if not paths:
             return
+        if self.ui_drop(paths):                # pictures dropped on the UI editor's canvas
+            return
         d, target, area = self.drop_target()
         bundles, others = [], []
         for p in paths:

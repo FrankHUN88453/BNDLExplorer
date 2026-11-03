@@ -2,6 +2,9 @@
 screen's widget shows, drawn as the game draws them (textured quads with their UVs, tint, opacity, masks as
 clip rectangles, labels in the style's size and colour) against made-up game values.
 
+Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste elements between layouts, screens and bundles (the materials,
+textures, quads and styles they use come along; PS3 elements are converted field by field by name); a PNG
+dropped on the canvas (or Image from PNG...) becomes an image element with its own texture.
 Click selects, dragging moves, the corner handle resizes, arrow keys nudge (Shift: 10 px); Ctrl+T transforms
 freely (8 handles: scale, Shift proportional, Alt from the centre; the knob rotates, Shift 15 degrees; Enter
 applies as one undo step, Esc cancels); Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo / redo the edited bundle, Ctrl+J
@@ -420,7 +423,10 @@ class UIEditorUI:
     # -- the editor -----------------------------------------------------------------------------------------
     def ui_editor(self, d, items, key, window=False):
         st = self.uied_state(key)
-        ev = U.Evaluator(st['state'])
+        state = dict(st['state'])
+        if st.get('live'):
+            state.update(U.live_state(time.time()))
+        ev = U.Evaluator(state)
         layouts = [(r, n, U.elements(self.types, n)) for r, n in items]
         avail = imgui.get_content_region_avail()
         panel = 420 if window else 360
@@ -455,6 +461,9 @@ class UIEditorUI:
 
         imgui.invisible_button('##uihit', imgui.ImVec2(cw, ch))
         hovered = imgui.is_item_hovered()
+        key = next((k for k, v in self.uied['views'].items() if v is st), None)
+        self.uied['canvas'] = {'frame': imgui.get_frame_count(), 'rect': (o.x, o.y, cw, ch, s, d.uid, key),
+                               'first': layouts[0][0].id if layouts else None}
         now = time.time()
         play = st['play']
         if play is not None:
@@ -786,6 +795,12 @@ class UIEditorUI:
             cmd = 'apply'
         elif st['xf'] is not None and k(imgui.Key.escape):
             cmd = 'cancel'
+        elif ctrl and k(imgui.Key.c):
+            cmd = 'copy'
+        elif ctrl and k(imgui.Key.x):
+            cmd = 'cut'
+        elif ctrl and k(imgui.Key.v):
+            cmd = 'paste'
         elif ctrl and k(imgui.Key.j):
             cmd = 'duplicate'
         elif k(imgui.Key.delete):
@@ -819,8 +834,23 @@ class UIEditorUI:
             self.redo(d)
         elif cmd == 'deselect':
             st['sel'] = st['xf'] = None
-        elif hit is None or ro:
+        elif cmd == 'paste':
+            if not ro and layouts:
+                r = hit[0] if hit else layouts[0][0]
+                idx = self.ui_paste(d, r)
+                if idx is not None:
+                    st['sel'] = (r.id, idx)
+        elif hit is None:
             return
+        elif cmd == 'copy':
+            self.ui_copy(d, *hit)
+        elif ro:
+            return
+        elif cmd == 'cut':
+            r, el = hit
+            self.ui_copy(d, r, el)
+            if self.ui_restructure(d, r, el.index, lambda root, els: els.pop(el.index), f'cut element {el.index}'):
+                st['sel'] = None
         elif cmd == 'transform':
             r, el = hit
             if st['xf'] is None:
@@ -868,6 +898,229 @@ class UIEditorUI:
                 if i + 1 < n and self.ui_restructure(d, r, i, lambda root, els: els.insert(i + 1, els.pop(i)),
                                                      'draw later'):
                     st['sel'] = (r.id, i + 1)
+
+    # -- clipboard ----------------------------------------------------------------------------------------------
+    def ui_refs(self, b, node):
+        """The resources of bundle b an element needs (what it refers to, and what those import, in b)."""
+        want, out = [], {}
+
+        def walk(v):
+            if isinstance(v, Node):
+                for x in v.fields.values():
+                    walk(x)
+            elif isinstance(v, list):
+                for x in v:
+                    walk(x)
+            elif isinstance(v, Ref):
+                want.append(v.id)
+
+        walk(node)
+        while want:
+            rid = want.pop()
+            if rid in out:
+                continue
+            res = b.find(rid)
+            if res is None or res.missing:
+                continue
+            out[rid] = res.copy()
+            want.extend(i.id for i in res.imports())
+        return out
+
+    def ui_copy(self, d, r, el):
+        self.uied['clip'] = {'node': gjson.clone(el.node), 'platform': d.b.platform, 'path': d.path,
+                             'refs': self.ui_refs(d.b, el.node), 'kind': el.kind, 'from': (d.uid, r.id, el.index)}
+        self.status = f'{el.kind} element {el.gc} copied ({len(self.uied["clip"]["refs"])} resources it uses).'
+
+    def ui_dest_types(self, b):
+        """{type name: type id} of the Genesys types in bundle b."""
+        db = genesys.TypeDB()
+        db.add_bundle(b)
+        return {db.name(t): t for t in db.types}, db
+
+    def ui_convert_node(self, node, names, db):
+        """A node of another build as a node of this bundle's types, field by field (by name hash)."""
+        def conv(v):
+            if isinstance(v, list):
+                return [conv(x) for x in v]
+            if not isinstance(v, Node):
+                return v
+            tname = self.types.name(v.type)
+            tid = names.get(tname)
+            if tid is None:
+                raise ValueError(f'the type {tname} is not in this bundle')
+            t = db.get(tid)
+            n = Node(tid, -1)
+            n.raw = None
+            for f in t.fields:
+                if f.name_hash in v.fields:
+                    n.fields[f.name_hash] = conv(v.fields[f.name_hash])
+                else:
+                    n.fields[f.name_hash] = gjson.default_of(db, f)
+            return n
+        return conv(node)
+
+    def ui_paste(self, d, r):
+        """The copied element into layout r (on top, same position, new id); -> its index or None."""
+        clip = self.uied.get('clip')
+        if not clip:
+            self.status = 'Nothing copied (Ctrl+C on an element first).'
+            return None
+        node = gjson.clone(clip['node'])
+        if clip['platform'] != d.b.platform:
+            names, db = self.ui_dest_types(d.b)
+            try:
+                node = self.ui_convert_node(node, names, db)
+            except ValueError as ex:
+                self.modal = {'kind': 'message', 'title': 'Paste', 'text': f'This element cannot go into this '
+                              f'{d.b.platform} bundle: {ex}.'}
+                return None
+        if not self.genesys_rewritable(d, r):
+            self.status = 'This layout cannot be re-written exactly.'
+            return None
+        n = self.ui_read(d, r)
+        gc = self.ui_alloc_gc(d, [e.gc for e in U.elements(self.types, n) if isinstance(e.gc, int)])
+        node.fields[U.H_GC] = gc
+        news = []
+        for rid, res in clip['refs'].items():
+            if d.b.find(rid) is None:
+                news.append(ops.adopt(d.b, res, clip['platform'], self.types))
+        out = {}
+
+        def mutate(root, els):
+            els.append(node)
+            out['index'] = len(els) - 1
+        d.checkpoint(f'paste a {clip["kind"]} element', [r.id] + [x.id for x in news])
+        for x in news:
+            d.b.add(x)
+        if any(x.type == 0x14 for x in news):
+            self.rebuild_types()
+        ok = self.ui_restructure(d, r, None, mutate, f'paste a {clip["kind"]} element ({gc})', checkpoint=False)
+        if not ok:
+            d.do_undo()
+            self.changed(d)
+            return None
+        self.status = f'{clip["kind"]} element {gc} pasted' + (f' with {len(news)} resource(s) it needs' if news
+                                                                 else '') + ' (Ctrl+Z to undo).'
+        return out.get('index')
+
+    # -- own pictures -----------------------------------------------------------------------------------------
+    def ui_add_png(self, d, r, path, pos=None):
+        """An image element showing a picture file, with a texture of its own; -> its index or None."""
+        from PIL import Image
+        try:
+            im = Image.open(path).convert('RGBA')
+        except Exception as ex:
+            self.status = f'Cannot read {os.path.basename(path)}: {ex}'
+            return None
+        if max(im.size) > 1024:
+            k = 1024 / max(im.size)
+            im = im.resize((max(4, int(im.width * k)), max(4, int(im.height * k))), Image.LANCZOS)
+        w, h = im.size
+        pw, ph = (w + 3) // 4 * 4, (h + 3) // 4 * 4                 # block compressed: sides of 4
+        canvas = Image.new('RGBA', (pw, ph), (0, 0, 0, 0))
+        canvas.paste(im, (0, 0))
+        img = np.array(canvas, np.uint8)
+        tpl = self.ui_templates(d).get('Image')
+        quad = self.ui_full_quad(d)
+        if tpl is None or quad is None:
+            self.status = 'This bundle has no image element / whole-texture quad to start from.'
+            return None
+        tn = (self.ui_read(d, d.b.find(tpl[0])).fields.get(U.H_ELEMENTS) or [])[tpl[1]]
+        src_tex = None
+        for x in d.b.resources:                                       # a BC3 texture to take the format from
+            if x.type == T_TEXTURE:
+                try:
+                    if raster.info(x, d.b.platform).fmt == 'BC3':
+                        src_tex = x
+                        break
+                except Exception:
+                    continue
+        src_tex = src_tex or next((x for x in d.b.resources if x.type == T_TEXTURE), None)
+        if src_tex is None or not self.genesys_rewritable(d, r):
+            self.status = 'No texture to start from, or the layout cannot be re-written exactly.'
+            return None
+        n = self.ui_read(d, r)
+        gc = self.ui_alloc_gc(d, [e.gc for e in U.elements(self.types, n) if isinstance(e.gc, int)])
+        tid = (0x0101 << 48) | gc
+        tex = src_tex.copy()
+        tex.id = tid
+        tex.modified = True
+        try:
+            ops.replace_texture(d.b, tex, image=img, mips='none')
+        except Exception as ex:
+            self.status = f'The picture cannot be made a texture: {ex}'
+            return None
+        x0, y0 = pos if pos is not None else (U.W / 2, U.H / 2)
+        out = {}
+
+        def mutate(root, els):
+            c = gjson.clone(tn)
+            c.fields[U.H_GC] = gc
+            c.fields[U.H_X], c.fields[U.H_Y] = float(round(x0)), float(round(y0))
+            c.fields[U.H_W], c.fields[U.H_H] = float(w), float(h)
+            c.fields[U.H_ANCHOR] = 4
+            c.fields[U.H_ROT] = 0.0
+            for hh in (U.H_VIS, U.H_ROTBIND, U.H_XBIND, U.H_YBIND, U.H_IMAGE_BIND):
+                if hh in c.fields:
+                    c.fields[hh] = ''
+            for _, hh, _ in U.BEHAVIOURS:
+                if hh in c.fields:
+                    c.fields[hh] = None
+            if name_hash('ImageSource') in c.fields:
+                c.fields[name_hash('ImageSource')] = gc
+            tint = c.fields.get(U.H_TINT)
+            if isinstance(tint, Node) and isinstance(tint.fields.get(U.H_VALUE), list):
+                tint.fields[U.H_VALUE] = [1.0, 1.0, 1.0, 1.0]
+            op = c.fields.get(U.H_OPACITY)
+            if isinstance(op, Node) and U.H_VALUE in op.fields:
+                op.fields[U.H_VALUE] = 100
+            rd = c.fields.get(U.H_RDATA)
+            if isinstance(rd, Node):
+                rd.fields[U.H_TEXHANDLE] = Ref(tid)
+                if isinstance(rd.fields.get(U.H_QUADS), list) and rd.fields[U.H_QUADS]:
+                    rd.fields[U.H_QUADS] = [Ref(quad)]
+            els.append(c)
+            out['index'] = len(els) - 1
+        d.checkpoint(f'image from {os.path.basename(path)}', [r.id, tid])
+        d.b.add(tex)
+        if not self.ui_restructure(d, r, None, mutate, f'image {gc} from {os.path.basename(path)}', checkpoint=False):
+            d.do_undo()
+            self.changed(d)
+            return None
+        self.status = (f'Image element {gc} ({w} x {h}) from {os.path.basename(path)} with its own texture {tid:#x} '
+                       '(Ctrl+Z to undo).')
+        return out.get('index')
+
+    def ui_drop(self, paths):
+        """Pictures dropped on the editor's canvas become image elements there (True when it took them)."""
+        info = getattr(self, 'uied', {}).get('canvas')
+        if not info or info['frame'] < imgui.get_frame_count() - 2:
+            return False
+        io = imgui.get_io()
+        ox, oy, cw, ch, s, uid, key = info['rect']
+        mx, my = io.mouse_pos.x, io.mouse_pos.y
+        if not (ox <= mx <= ox + cw and oy <= my <= oy + ch):
+            return False
+        pics = [p for p in paths if os.path.splitext(p)[1].lower() in ('.png', '.jpg', '.jpeg', '.bmp', '.tga',
+                                                                        '.webp')]
+        if not pics:
+            return False
+        d = self.doc_by_uid(uid)
+        st = self.uied['views'].get(key)
+        if d is None or st is None or d.b.truncated:
+            return False
+        sel = st['sel']
+        r = d.b.find(sel[0]) if sel else None
+        if r is None:
+            r = d.b.find(info['first'])
+        if r is None:
+            return False
+        pos = ((mx - ox) / s, (my - oy) / s)
+        for i, p in enumerate(pics):
+            idx = self.ui_add_png(d, r, p, (pos[0] + 20 * i, pos[1] + 20 * i))
+            if idx is not None:
+                st['sel'] = (r.id, idx)
+        return True
 
     # -- free transform (Ctrl+T) -------------------------------------------------------------------------------
     XF_HANDLES = ('tl', 't', 'tr', 'r', 'br', 'b', 'bl', 'l')
@@ -1131,8 +1384,8 @@ class UIEditorUI:
                 imgui.same_line()
                 if imgui.button('No background'):
                     self.uied['bg'] = None
-            imgui.text_disabled('Ctrl+T transform, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+J duplicate, Delete, '
-                                'Ctrl+D deselect, Ctrl+[ ] order, arrows nudge')
+            imgui.text_disabled('Ctrl+T transform, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+C / X / V, Ctrl+J duplicate, '
+                                'Delete, Ctrl+D deselect, Ctrl+[ ] order, arrows nudge; drop PNGs on the canvas')
             imgui.text('Play:')
             for ph, label in (('in', 'Transition in'), ('out', 'Transition out'), ('idle', 'Idle')):
                 imgui.same_line()
@@ -1142,6 +1395,19 @@ class UIEditorUI:
                 imgui.same_line()
                 if imgui.small_button('Stop'):
                     st['play'] = None
+        imgui.text('Situation:')
+        for name in U.STATE_PRESETS:
+            imgui.same_line()
+            if imgui.get_content_region_avail().x < imgui.calc_text_size(name).x + 16:
+                imgui.new_line()
+            if imgui.small_button(name):
+                st['state'] = dict(U.STATE_PRESETS['Free roam']) if name != 'Free roam' else {}
+                st['state'].update(U.STATE_PRESETS[name])
+                st['preset'] = name
+        _, st['live'] = imgui.checkbox('Live (revs, speed, gear and heading move)', st.get('live', False))
+        if st.get('preset'):
+            imgui.same_line()
+            imgui.text_disabled(f'({st["preset"]})')
         if imgui.collapsing_header('Game values'):
             imgui.text_disabled('Made-up values the bindings read (preview only).')
             allels = [el for _, _, els in layouts for el in els]
@@ -1550,6 +1816,25 @@ class UIEditorUI:
             idx = self.ui_add_element(d, target, kind)
             if idx is not None:
                 st['sel'] = (target.id, idx)
+        imgui.same_line()
+        if imgui.button('Image from PNG...'):
+            p = filedialog.open_file('A picture for a new image element', self.cfg.get('last_import', ''),
+                                     filedialog.IMAGES)
+            if p:
+                self.remember('last_import', p)
+                idx = self.ui_add_png(d, target, p)
+                if idx is not None:
+                    st['sel'] = (target.id, idx)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip('Or drop picture files on the canvas: an image element with its own texture each')
+        clip = self.uied.get('clip')
+        imgui.same_line()
+        if imgui.button('Paste') and clip:
+            idx = self.ui_paste(d, target)
+            if idx is not None:
+                st['sel'] = (target.id, idx)
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(f'Ctrl+V: the copied {clip["kind"]} element' if clip else 'Ctrl+C an element first')
         if imgui.is_item_hovered():
             imgui.set_tooltip(f'A new element in layout {target.id:#x} (the selected element\'s), drawn on top, '
                               'started from one of its kind in this bundle (no bindings, no transitions).')
@@ -1714,6 +1999,15 @@ class UIEditorUI:
     def ui_element_ops(self, d, r, el):
         imgui.separator()
         i = el.index
+        if imgui.button('Copy'):
+            self.ui_copy(d, r, el)
+        imgui.same_line()
+        if imgui.button('Cut'):
+            self.ui_copy(d, r, el)
+            if self.ui_restructure(d, r, i, lambda root, els: els.pop(i), f'cut element {i}'):
+                self.uied_sel_shift(r, None)
+                return
+        imgui.same_line()
         if imgui.button('Duplicate'):
             def dup(root, els):
                 c = gjson.clone(els[i])

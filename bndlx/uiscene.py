@@ -222,6 +222,38 @@ DEFAULT_STATE = {
     'GameWorld.Compass': 35.0,
 }
 CONSTANTS = {'Signals.False': 0.0, 'Signals.True': 1.0, 'Signals.One': 1.0, 'Signals.Zero': 0.0}
+_LP = 'Players.LocalPlayer.'
+# game situations for the preview (made-up values of the bindings the HUDs read)
+STATE_PRESETS = {
+    'Free roam': {_LP + 'IsInChase': 0, _LP + 'IsInCooldown': 0, _LP + 'IsInChaseOrCooldown': 0,
+                  _LP + 'PursuitBarEnum': 0, _LP + 'HeatLevelInt': 1, _LP + 'Jammed': 0, _LP + 'DamageBarState': 0,
+                  _LP + 'NitrousState.UsingNitrous': 0, 'CurrentRoad.Visible': 1},
+    'Pursuit': {_LP + 'IsInChase': 1, _LP + 'IsInCooldown': 0, _LP + 'IsInChaseOrCooldown': 1,
+                _LP + 'PursuitBarEnum': 1, _LP + 'HeatLevelInt': 4, _LP + 'HeatProgress': 0.6,
+                _LP + 'ChaseHeat': 4, _LP + 'CopsInChase': 5, _LP + 'PursuitBarProgress': 0.55,
+                _LP + 'StaticBustProgress': 0.0, 'CurrentRoad.Visible': 1},
+    'Busted soon': {_LP + 'IsInChase': 1, _LP + 'IsInChaseOrCooldown': 1, _LP + 'PursuitBarEnum': 1,
+                    _LP + 'HeatLevelInt': 5, _LP + 'StaticBustProgress': 0.75, _LP + 'CopsInChase': 8},
+    'Cooldown': {_LP + 'IsInChase': 0, _LP + 'IsInCooldown': 1, _LP + 'IsInChaseOrCooldown': 1,
+                 _LP + 'PursuitBarEnum': 2, _LP + 'HeatLevelInt': 3, _LP + 'PursuitBarProgress': 0.35,
+                 _LP + 'ChanceOfEscape': 0.6},
+    'Nitro': {_LP + 'NitrousState.UsingNitrous': 1, _LP + 'NitrousState.NitrousAmount': 0.45,
+              _LP + 'GetPlayerRPM': 7400, 'Players.GetLocalCompetitor.GetPlayerSpeed': 62.0},
+    'Damaged': {_LP + 'DamageBarState': 2, _LP + 'IsHealthRecharging': 1},
+    'Jammed': {_LP + 'Jammed': 1},
+    'Miles (not metric)': {'Language.IsMetric': 0},
+}
+
+
+def live_state(t):
+    """Values that move with the time t (seconds): revs sweep, speed and gear follow, the car turns."""
+    phase = (t % 6.0) / 6.0
+    rpm = 1200 + 6800 * (phase * 4 % 1.0) ** 0.7
+    gear = 1 + int(phase * 4)
+    return {_LP + 'GetPlayerRPM': rpm, _LP + 'GetPlayerVehicleGear': gear,
+            'Players.GetLocalCompetitor.GetPlayerSpeed': 8.0 + 60.0 * phase,
+            _LP + 'GetPlayerDirection': (t * 25.0) % 360.0, 'GameWorld.Compass': (t * 25.0) % 360.0,
+            _LP + 'NitrousState.NitrousAmount': 0.5 + 0.5 * math.sin(t)}
 _EXPR = re.compile(r'\s*([A-Za-z_][\w\.]*(?:\[[^\]]*\])?(?:\.[\w\.]+)*)\s*(?:\((.*)\))?\s*$')
 
 
