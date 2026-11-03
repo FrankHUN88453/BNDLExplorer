@@ -277,8 +277,9 @@ class UIRenderer:
 _FONTS = {}
 
 
-def text_image(text, px, bold=True):
-    """White text on transparent, `px` pixels high (PIL; Arial as a stand-in for the game's fonts)."""
+def text_image(text, px, bold=True, spacing=0.0, italic=0.0):
+    """White text on transparent, `px` pixels high (PIL; Arial as a stand-in for the game's fonts); spacing:
+    extra pixels between characters, italic: slant in degrees."""
     from PIL import Image, ImageDraw, ImageFont
     px = max(4, int(round(px)))
     key = (px, bold)
@@ -294,9 +295,21 @@ def text_image(text, px, bold=True):
             font = ImageFont.load_default()
         _FONTS[key] = font
     box = font.getbbox(text or ' ')
-    w = max(1, box[2] - min(0, box[0]) + 2)
+    extra = int(round(spacing * max(0, len(text) - 1)))
+    slant = abs(np.tan(np.radians(italic))) if italic else 0.0
     h = max(1, int(px * 1.25))
+    w = max(1, box[2] - min(0, box[0]) + 2 + max(0, extra) + int(slant * h))
     img = Image.new('RGBA', (w, h), (255, 255, 255, 0))
-    ImageDraw.Draw(img).text((1 - min(0, box[0]), (h - px) // 2 - box[1] // 4), text, font=font,
-                             fill=(255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    y = (h - px) // 2 - box[1] // 4
+    if spacing:
+        x = 1 - min(0, box[0])
+        for ch in text:
+            draw.text((x, y), ch, font=font, fill=(255, 255, 255, 255))
+            x += font.getlength(ch) + spacing
+    else:
+        draw.text((1 - min(0, box[0]), y), text, font=font, fill=(255, 255, 255, 255))
+    if slant:
+        img = img.transform(img.size, Image.AFFINE, (1, slant if italic > 0 else -slant,
+                                                     -slant * h if italic > 0 else 0, 0, 1, 0), Image.BICUBIC)
     return np.array(img, np.uint8)              # a writable copy (GlTexture takes no read-only arrays)

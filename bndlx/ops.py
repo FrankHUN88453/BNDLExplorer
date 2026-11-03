@@ -157,9 +157,10 @@ def game_root(bundle_path):
 _STRINGS = {}
 
 
-def game_strings(bundle_path, language='0001'):
-    """{string id: text} of the game's UI/LANGUAGE/<language>.BNDL (0001 = English), for showing names."""
-    root = game_root(bundle_path)
+def game_strings(bundle_path, language='0001', root=None):
+    """{string id: text} of the game's UI/LANGUAGE/<language>.BNDL (0001 = English), for showing names (root: the
+    game folder when the bundle is not inside one)."""
+    root = game_root(bundle_path) or root
     path = os.path.join(root, 'UI', 'LANGUAGE', language + '.BNDL') if root else None
     if path not in _STRINGS:
         out = {}

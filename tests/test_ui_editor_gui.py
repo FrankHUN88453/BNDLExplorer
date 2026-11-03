@@ -16,6 +16,7 @@ from bndlx import app as A, genesys, roots, uiscene as U  # noqa: E402
 
 PC = os.environ['BNDLX_PC']
 SHOT = os.environ.get('BNDLX_SHOT')
+SHOT2 = os.environ.get('BNDLX_SHOT2')       # the panel with the new text selected
 TMP = tempfile.mkdtemp(prefix='bndlx_uied_')
 SCREEN = 0x10000000005aba5
 failures = []
@@ -124,14 +125,65 @@ def main():
             app.ui_restructure(d, r, el.index, dup, 'duplicate')
             els = layout_of(d, state['lid'])
             state['dup'] = len(els) == n0 + 1 and els[el.index + 1].gc >= 0x7E000001
-        if f == 95:
-            for _ in range(20):
+        if f == 88:                          # new elements: an image and a text, on top, at the centre
+            r = d.b.find(state['lid'])
+            n0 = len(layout_of(d, state['lid']))
+            i1 = app.ui_add_element(d, r, 'Image')
+            i2 = app.ui_add_element(d, d.b.find(state['lid']), 'Label')
+            els = layout_of(d, state['lid'])
+            state['added'] = (len(els) == n0 + 2 and i1 is not None and i2 is not None
+                              and els[i1].kind == 'Image' and els[i2].kind == 'Label'
+                              and (els[i1].x, els[i1].y) == (640.0, 360.0) and els[i2].gc > els[i1].gc >= 0x7E000001
+                              and not els[i1].behaviours['in'] and not els[i1].vis)
+            view()['sel'] = (state['lid'], i2)          # the panel draws the text style / all properties
+        if f == 91:                          # own style for the new text, a bigger size and another font
+            r = d.b.find(state['lid'])
+            els = layout_of(d, state['lid'])
+            lab = els[-1]
+            old_style = lab.style
+            app.ui_fork_style(d, r, lab)
+            lab = layout_of(d, state['lid'])[-1]
+            sr = d.b.find(lab.style)
+            sn = genesys.Reader(app.types, d.b.e).read_resource(sr) if sr is not None else None
+            if sn is not None:
+                from bndlx.gnames import name_hash
+                app.ui_set(d, sr, sn, {U.H_FONTSIZE: 33.0, name_hash('Font_Asset'): 1206238})
+                sn = genesys.Reader(app.types, d.b.e).read_resource(d.b.find(lab.style))
+            state['style'] = (sn is not None and lab.style != old_style and d.b.find(old_style) is not None
+                              and sn.fields.get(U.H_FONTSIZE) == 33.0
+                              and sn.fields.get(name_hash('Font_Asset')) == 1206238
+                              and sn.fields.get(U.H_GC) == lab.style & 0xFFFFFFFF)
+        if f == 91:
+            view()['tab_request'] = 'Text'
+        if f == 92 and SHOT2:
+            state['shot2'] = True
+        if f == 93:                          # the new text shows a game string chosen by id
+            from bndlx import ops
+            strings = app.ui_strings(d)
+            sid = next((k for k, v in strings.items() if v.strip().upper() == 'HEAT'), None) or next(iter(strings))
+            lab = layout_of(d, state['lid'])[-1]
+            app.ui_set(d, d.b.find(state['lid']), lab.node.fields[U.H_TEXT], {U.H_STRING_ID: sid})
+            lab = layout_of(d, state['lid'])[-1]
+            state['text'] = lab.string_id == sid and app.ui_text(d, lab, U.Evaluator()) == strings[sid]
+        if f == 94:                          # another material for the first image
+            r = d.b.find(state['lid'])
+            mats = app.ui_materials(d)
+            el = next(e for e in layout_of(d, state['lid']) if e.index == state['idx'])
+            other = next((m[0] for m in mats if m[0] != el.material), None)
+            if other is not None:
+                def mutate(root, els):
+                    els[el.index].fields[U.H_MATERIAL] = genesys.Ref(other)
+                app.ui_restructure(d, r, el.index, mutate, 'material')
+            back = next(e for e in layout_of(d, state['lid']) if e.index == state['idx'])
+            state['material'] = other is not None and back.material == other
+        if f == 99:
+            for _ in range(40):
                 if bytes(d.b.find(state['lid']).data(0)) == state['old'] or not d.undo:
                     break
                 d.do_undo()
                 app.changed(d, d.b.find(state['lid']))
             state['undo'] = bytes(d.b.find(state['lid']).data(0)) == state['old']
-        if f == 110:
+        if f == 115:
             hello_imgui.get_runner_params().app_shall_exit = True
             app.exit_ok = True
 
@@ -157,6 +209,8 @@ def main():
             prev_swap()
         if SHOT and state['f'] >= 62 and state.pop('shot', False):
             screenshot(SHOT)
+        if SHOT2 and state['f'] >= 93 and state.pop('shot2', False):
+            screenshot(SHOT2)
 
     params.callbacks.before_swap = before_swap
     hello_imgui.run(params)
@@ -174,6 +228,10 @@ def main():
     check(state.get('fade') and state.get('alpha') == (0.0, 1.0),
           f'a fade in added to the element reads back and animates (alpha {state.get("alpha")})')
     check(state.get('dup'), 'a duplicated element appears with a new id')
+    check(state.get('added'), 'new image and text elements are added on top at the centre with new ids')
+    check(state.get('style'), 'the text gets its own style copy; its size and font change, the shared one stays')
+    check(state.get('text'), 'the new text shows the game string given by its id')
+    check(state.get('material'), 'an image gets another material')
     check(state.get('undo'), 'undo restores the layout bytes')
     shutil.rmtree(TMP, ignore_errors=True)
     print(f'{len(failures)} failure(s)')

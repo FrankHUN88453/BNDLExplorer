@@ -5109,8 +5109,9 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI):
             self.gcache[key] = hit
         return hit
 
-    def genesys_rewrite(self, d, r, root, mutate, desc):
-        """Change the node tree with mutate(), then write the object again (undoable)."""
+    def genesys_rewrite(self, d, r, root, mutate, desc, checkpoint=True):
+        """Change the node tree with mutate(), then write the object again (undoable; checkpoint=False when the
+        caller made the undo step already)."""
         try:
             mutate()
             data, off, cnt = gwrite.write(self.types, d.b.e, root)
@@ -5118,7 +5119,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI):
             self.gcache.clear()
             self.status = f'Cannot rewrite {r.id:#x}: {ex}'
             return False
-        d.checkpoint(desc, [r.id])
+        if checkpoint:
+            d.checkpoint(desc, [r.id])
         r.set_data(0, data)
         r.import_offset, r.import_count = off, cnt
         self.changed(d, r)
