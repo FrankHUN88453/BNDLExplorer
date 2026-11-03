@@ -104,30 +104,78 @@ def parse_type(res, e):
 
 
 class TypeDB:
-    """GenesysTypes of every open bundle (objects often use types stored in other bundles)."""
+    """GenesysTypes of every open bundle (objects often use types stored in other bundles). The PS3 prototype and
+    the PC game use the same type ids with different schemas, so the types are also kept per byte order (PC '<',
+    PS3 '>'): readers / writers take a view of their byte order, `prefer` makes plain lookups prefer one."""
 
     def __init__(self):
         self.types = {}
+        self.by_order = {}
+        self.prefer = None
 
     def add_bundle(self, b):
+        own = self.by_order.setdefault(b.e, {})
         for r in b.resources:
-            if r.type == T_TYPE and r.id not in self.types and not r.missing:
+            if r.type == T_TYPE and r.id not in own and not r.missing:
                 try:
-                    self.types[r.id] = parse_type(r, b.e)
+                    t = parse_type(r, b.e)
                 except (struct.error, IndexError, UnicodeDecodeError):
-                    pass
+                    continue
+                own[r.id] = t
+                self.types.setdefault(r.id, t)
 
     def get(self, tid):
+        if self.prefer is not None:
+            t = self.by_order.get(self.prefer, {}).get(tid)
+            if t is not None:
+                return t
         return self.types.get(tid)
+
+    def view(self, e):
+        return TypeView(self, e)
 
     def __contains__(self, tid):
         return tid in self.types
 
     def __getitem__(self, tid):
-        return self.types[tid]
+        t = self.get(tid)
+        if t is None:
+            raise KeyError(tid)
+        return t
 
     def name(self, tid):
-        t = self.types.get(tid)
+        t = self.get(tid)
+        if t is None:
+            return f'{tid:#x}'
+        return (t.name or f'{tid:#x}').replace('Genesys.Gen.', '')
+
+
+class TypeView:
+    """The types of one byte order first, then any (what a reader / writer of that platform uses)."""
+
+    def __init__(self, db, e):
+        self.db = db
+        self.own = db.by_order.get(e, {})
+        self.types = db.types
+
+    def get(self, tid):
+        t = self.own.get(tid)
+        return t if t is not None else self.db.types.get(tid)
+
+    def view(self, e):
+        return self.db.view(e)
+
+    def __contains__(self, tid):
+        return tid in self.own or tid in self.db.types
+
+    def __getitem__(self, tid):
+        t = self.get(tid)
+        if t is None:
+            raise KeyError(tid)
+        return t
+
+    def name(self, tid):
+        t = self.get(tid)
         if t is None:
             return f'{tid:#x}'
         return (t.name or f'{tid:#x}').replace('Genesys.Gen.', '')
@@ -165,7 +213,7 @@ class MissingType(Exception):
 
 class Reader:
     def __init__(self, types, e):
-        self.T = types
+        self.T = types.view(e) if hasattr(types, 'view') else types
         self.e = e
 
     def read_resource(self, res):
@@ -450,7 +498,7 @@ def type_layout(res, e):
 
 class ObjectLayout:
     def __init__(self, types, e):
-        self.T = types
+        self.T = types.view(e) if hasattr(types, 'view') else types
         self.e = e
 
     def build(self, res):

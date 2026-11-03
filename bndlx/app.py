@@ -4409,6 +4409,7 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI):
             imgui.end_popup()
 
     def object_view(self, d, r):
+        self.types.prefer = d.b.e              # this bundle's schemas first (PS3 prototype vs PC share type ids)
         event_catalog = None
         event_error = None
         try:

@@ -44,6 +44,8 @@ H_MASK_END = 0x528d6281
 H_SHAPE_COLOUR = 0x9e7e5867
 H_STYLE_COLOUR = 0x80ea78f4
 H_WIDGETS = 0xc7413006         # WidgetGroup's widgets
+H_BASE = 0x1927e85f            # PS3 prototype: the element's UIElementBase struct (position, size, material, ...)
+H_TINT_NAME = 0x3d9d3579       # PS3 prototype: the tint's palette colour name
 H_IMAGE_BIND = name_hash('ImageBinding')     # the picture comes from the game at run time (mirror, icons, ...)
 H_MATERIAL = name_hash('Material')           # UIMaterial object {Material: GameChanger id of the material}
 T_MINIMAP = 0x100000000002a7d                # UIElement_MiniMap (unnamed in the type data)
@@ -62,7 +64,7 @@ class Element:
     """One entry of a layout's Elements, with the values the preview needs (the node keeps the offsets)."""
     __slots__ = ('index', 'node', 'kind', 'x', 'y', 'w', 'h', 'rot', 'anchor', 'vis', 'rot_bind', 'x_bind',
                  'y_bind', 'tint', 'opacity', 'texture', 'quad', 'text', 'string_id', 'style', 'just', 'mask_end',
-                 'colour', 'behaviours', 'gc', 'image_bind', 'material')
+                 'colour', 'behaviours', 'gc', 'image_bind', 'material', 'base', 'tint_name')
 
     def __init__(self, index, node, kind):
         self.index = index
@@ -97,8 +99,12 @@ def elements(types, layout):
     for i, n in enumerate(layout.fields.get(H_ELEMENTS) or []):
         if not isinstance(n, Node):
             continue
-        f = n.fields
+        base = n.fields.get(H_BASE)
+        base = base if isinstance(base, Node) else None
+        f = dict(base.fields) if base is not None else {}          # PS3 prototype: the base's fields too
+        f.update(n.fields)
         el = Element(i, n, KIND_NAMES.get(n.type) or short_kind(types.name(n.type)))
+        el.base = base
         el.gc = f.get(H_GC)
         el.x, el.y = _num(f.get(H_X)), _num(f.get(H_Y))
         el.w, el.h = _num(f.get(H_W)), _num(f.get(H_H))
@@ -108,19 +114,20 @@ def elements(types, layout):
         el.rot_bind = f.get(H_ROTBIND) or ''
         el.x_bind = f.get(H_XBIND) or ''
         el.y_bind = f.get(H_YBIND) or ''
-        tint = _sub(n, H_TINT)
+        tint = f.get(H_TINT) if isinstance(f.get(H_TINT), Node) else None
         tv = tint.fields.get(H_VALUE) if tint is not None else None
         el.tint = [float(x) for x in tv] if isinstance(tv, list) and len(tv) == 4 else None
-        op = _sub(n, H_OPACITY)
+        el.tint_name = (tint.fields.get(H_TINT_NAME) or '') if tint is not None else ''
+        op = f.get(H_OPACITY) if isinstance(f.get(H_OPACITY), Node) else None
         el.opacity = _num(op.fields.get(H_VALUE), 100.0) if op is not None else 100.0
-        rd = _sub(n, H_RDATA)
+        rd = f.get(H_RDATA) if isinstance(f.get(H_RDATA), Node) else None
         el.texture = _ref(rd.fields.get(H_TEXHANDLE)) if rd is not None else None
         quads = rd.fields.get(H_QUADS) if rd is not None else None
         el.quad = _ref(quads[0]) if isinstance(quads, list) and quads else None
-        txt = _sub(n, H_TEXT)
+        txt = f.get(H_TEXT) if isinstance(f.get(H_TEXT), Node) else None
         el.text = (txt.fields.get(H_BINDING) or '') if txt is not None else None
         el.string_id = (txt.fields.get(H_STRING_ID) or 0) if txt is not None else 0
-        props = _sub(n, H_PROPS)
+        props = f.get(H_PROPS) if isinstance(f.get(H_PROPS), Node) else None
         el.style = _ref(props.fields.get(H_STYLE)) if props is not None else None
         el.just = int(props.fields.get(H_JUST) or 0) if props is not None else 0
         el.mask_end = bool(f.get(H_MASK_END))
@@ -141,12 +148,20 @@ def behaviour(node):
 
 
 # -- screens --------------------------------------------------------------------------------------------------
-def screen_widgets(types, root):
-    """[(widget name, [(layout id, params id)])] of a Screen2 node: the widgets that show layouts."""
+def screen_widgets(types, root, resolve=None):
+    """[(widget name, [(layout id, params id)])] of a Screen2 node: the widgets that show layouts. resolve(id) ->
+    Node reads referenced objects (the PS3 prototype keeps its widget groups and widgets as objects)."""
     out = []
+    seen = set()
 
     def walk(v, depth):
-        if depth > 8:
+        if depth > 10:
+            return
+        if isinstance(v, Ref) and resolve is not None and v.id not in seen:
+            seen.add(v.id)
+            n = resolve(v.id)
+            if n is not None:
+                walk(n, depth + 1)
             return
         if isinstance(v, Node):
             lay = v.fields.get(H_LAYOUTS)
@@ -154,13 +169,14 @@ def screen_widgets(types, root):
                 ids = []
                 for e in lay:
                     if isinstance(e, Node):
-                        lid = _ref(e.fields.get(H_LAYOUT))
+                        lv = e.fields.get(H_LAYOUT)
+                        lid = _ref(lv) or ((1 << 56) | lv if isinstance(lv, int) and lv else None)
                         if lid:
                             ids.append((lid, _ref(e.fields.get(name_hash('LayoutInstanceParams')))))
                 if ids:
                     out.append((v.fields.get(H_NAME) or types.name(v.type), ids))
             for x in v.fields.values():
-                if isinstance(x, (Node, list)):
+                if isinstance(x, (Node, list)) or (isinstance(x, Ref) and resolve is not None):
                     walk(x, depth + 1)
         elif isinstance(v, list):
             for x in v:
@@ -168,6 +184,25 @@ def screen_widgets(types, root):
 
     walk(root, 0)
     return out
+
+
+def bundle_resolver(types, b):
+    """resolve(id) -> Node of a GenesysObject of bundle b (None for others)."""
+    from .genesys import Reader
+    cache = {}
+
+    def resolve(rid):
+        if rid not in cache:
+            r = b.find(rid)
+            node = None
+            if r is not None and r.type == 0x15 and not r.missing:
+                try:
+                    node = Reader(types, b.e).read_resource(r)
+                except Exception:
+                    node = None
+            cache[rid] = node
+        return cache[rid]
+    return resolve
 
 
 # -- geometry -------------------------------------------------------------------------------------------------
@@ -638,6 +673,11 @@ def load_palette(root):
                     name, col = c.fields.get(0x263d15bc), c.fields.get(name_hash('Colour'))
                     if isinstance(name, str) and isinstance(col, list) and len(col) == 4:
                         pal[name] = [x / 255.0 for x in col]
+            for c in n.fields.get(0x2a8d0a3e) or []:            # PS3 prototype: {EntryName, Colour float4}
+                if isinstance(c, Node):
+                    name, col = c.fields.get(name_hash('EntryName')), c.fields.get(name_hash('Colour'))
+                    if isinstance(name, str) and isinstance(col, list) and len(col) == 4:
+                        pal.setdefault(name, [float(x) for x in col])
     except Exception:
         pass
     return pal
@@ -665,7 +705,7 @@ def screen_info(path):
         if not imps or types.name(imps[0].id) != 'Screen2':
             continue
         n = Reader(types, b.e).read_resource(r)
-        widgets = screen_widgets(types, n)
+        widgets = screen_widgets(types, n, bundle_resolver(types, b))
         gc = n.fields.get(H_GC)
         name = n.fields.get(name_hash('BundleName')) or ''
         hud = 'hud' in name.lower() or gc in KNOWN_HUDS or any(w[0] == 'HUD' for w in widgets)

@@ -277,7 +277,7 @@ def main():
             app.ui_command(d, view(), state['xf_lays'], 'cancel')
         if f == 110:                         # every screen of the game folder, HUDs first; one picked opens
             app.open_ui_browser()
-        if f > 110 and 'picked' not in state and app.job is None:
+        if f > 110 and 'picked' not in state and app.job is None and not app.uied['browser'].get('scan_later')                 and app.uied['browser'].get('screens') is not None:
             br = app.uied['browser']
             scr = br['screens'] or []
             state['screens'] = (len(scr), sum(1 for x in scr if x['hud']))

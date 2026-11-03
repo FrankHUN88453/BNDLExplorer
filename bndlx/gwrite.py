@@ -23,7 +23,7 @@ class WriteError(ValueError):
 
 class Writer:
     def __init__(self, types, e, obj_align=4, sort_arrays=True):
-        self.T = types
+        self.T = types.view(e) if hasattr(types, 'view') else types
         self.e = e
         self.obj_align = obj_align
         self.sort_arrays = sort_arrays

@@ -145,6 +145,8 @@ class UIEditorUI:
                 cache = json.load(fh)
         except (OSError, ValueError):
             cache = {}
+        if cache.get('__version__') != 2:          # 2: PS3 prototype widgets / layouts are followed
+            cache = {'__version__': 2}
 
         def work(progress):
             res = U.scan_screens(folders, progress, cache)
@@ -160,11 +162,16 @@ class UIEditorUI:
 
         if self.job is None:
             br['screens'] = []
+            br['scan_later'] = False
             self.run_job('Reading the UI screens of the game', work, done)
+        else:                                      # another job runs: start when it is done
+            br['scan_later'] = True
 
     def ui_browser_list(self):
         br = self.uied['browser']
         win = self.uied['window']
+        if br.get('scan_later') and self.job is None:
+            self.ui_scan_screens()
         if imgui.small_button('Rescan'):
             self.ui_scan_screens()
         imgui.same_line()
@@ -267,9 +274,11 @@ class UIEditorUI:
         imgui.end()
 
     def ui_screen_preview(self, d, r, node, window=False):
+        self.types.prefer = d.b.e
         if not window and self.ui_in_window(('screen', d.uid, r.id)):
             return
-        widgets = U.screen_widgets(self.types, node)
+        node = self.ui_read(d, r) or node                 # read with this bundle's schemas
+        widgets = U.screen_widgets(self.types, node, self.ui_resolver(d))
         if not widgets:
             imgui.text_disabled('This screen has no widgets with layouts.')
             return
@@ -315,24 +324,43 @@ class UIEditorUI:
             state[U.binding_path(binding) or binding] = t
         ev = U.Evaluator(state)
         shown, params, times = [], {}, {}
-        black = 0.0
-        for it in items:
-            if not (it.start <= t < it.end or (it.end <= it.start and abs(t - it.start) < 1e-6)):
-                continue
-            if it.enabled and not ev.visible(it.enabled, True):
-                continue
-            if it.layout:
-                lr = d.b.find(it.layout)
-                ln = self.ui_read(d, lr) if lr is not None and lr.type == 0x15 else None
-                if ln is not None and all(x[0].id != lr.id for x in shown):
-                    shown.append((lr, ln))
-                    if it.params:
-                        params[lr.id] = it.params
-                    times[lr.id] = (t - it.start) * 1000.0 if not binding else 10000.0
-            elif it.kind == 'BlackQuad':
-                span = max(it.end - it.start, 1e-6)
-                k = (t - it.start) / span
-                black = max(black, min(1.0, 2 * min(k, 1 - k) * 2))
+        black = [0.0]
+
+        def collect(its, t, on_binding, depth):
+            for it in its:
+                if not (it.start <= t < it.end or (it.end <= it.start and abs(t - it.start) < 1e-6)):
+                    continue
+                if it.enabled and not ev.visible(it.enabled, True):
+                    continue
+                if it.layout:
+                    lr = d.b.find(it.layout)
+                    ln = self.ui_read(d, lr) if lr is not None and lr.type == 0x15 else None
+                    if ln is not None and all(x[0].id != lr.id for x in shown):
+                        shown.append((lr, ln))
+                        if it.params:
+                            params[lr.id] = it.params
+                        times[lr.id] = (t - it.start) * 1000.0 if not on_binding else 10000.0
+                elif it.kind == 'BlackQuad':
+                    span = max(it.end - it.start, 1e-6)
+                    k = (t - it.start) / span
+                    black[0] = max(black[0], min(1.0, 2 * min(k, 1 - k) * 2))
+                elif it.sequence and depth < 4:          # a nested sequence: its own items on its own clock
+                    sr = d.b.find(it.sequence)
+                    sn = self.ui_read(d, sr) if sr is not None and sr.type == 0x15 else None
+                    if sn is None:
+                        continue
+                    sub = U.sequence_items(self.types, sn)
+                    sub_binding, sub_end = U.sequence_axis(sn, sub)
+                    if sub_binding:
+                        continue
+                    if on_binding:                       # it loops while the parent's value keeps it on
+                        local = time.time() % max(sub_end, 0.05)
+                    else:
+                        local = t - it.start
+                    collect(sub, local, False, depth + 1)
+
+        collect(items, t, bool(binding), 0)
+        black = black[0]
         st['params'] = params
         st['layout_time'] = times
         st['black'] = black
@@ -431,6 +459,12 @@ class UIEditorUI:
             sq['sel'] = it.index
             sq['drag'] = {'i': it.index, 'mode': mode, 'mx': mx, 's0': it.start, 's1': it.end, 'b0': it.start,
                           'b1': it.end}
+
+    def ui_resolver(self, d):
+        def resolve(rid):
+            r = d.b.find(rid)
+            return self.ui_read(d, r) if r is not None and r.type == 0x15 else None
+        return resolve
 
     def ui_read(self, d, r):
         key = ('uilayout', d.uid, r.id, id(r.data(0)), len(self.types.types))
@@ -577,6 +611,7 @@ class UIEditorUI:
 
     # -- the editor -----------------------------------------------------------------------------------------
     def ui_editor(self, d, items, key, window=False, bottom=None):
+        self.types.prefer = d.b.e
         st = self.uied_state(key)
         state = dict(st['state'])
         if st.get('live'):
@@ -1104,6 +1139,10 @@ class UIEditorUI:
                         continue
                     uv = self.ui_quad(d, el.quad) or unit
                     tint = an.tint or el.tint or [1, 1, 1, 1]
+                    if el.tint_name and not an.tint:
+                        pc = self.ui_palette(d).get(el.tint_name)
+                        if pc is not None:
+                            tint = [a * b for a, b in zip(tint, pc)]
                     faded = 0.45 if mode == 'bound' and st['bound_faded'] else 1.0
                     ops.append(('quad', tex[0].texture_id, pts, uv, (tint[0], tint[1], tint[2], tint[3] * op * faded),
                                 'add' if mode == 'additive' else 'alpha'))
@@ -1372,26 +1411,116 @@ class UIEditorUI:
         return {db.name(t): t for t in db.types}, db
 
     def ui_convert_node(self, node, names, db):
-        """A node of another build as a node of this bundle's types, field by field (by name hash)."""
-        def conv(v):
-            if isinstance(v, list):
-                return [conv(x) for x in v]
-            if not isinstance(v, Node):
-                return v
-            tname = self.types.name(v.type)
-            tid = names.get(tname)
-            if tid is None:
-                raise ValueError(f'the type {tname} is not in this bundle')
+        """A node of another build as a node of this bundle's types, field by field (by name hash), guided by the
+        target's schema: a PS3 prototype element's base struct is merged into the element (retail keeps those
+        fields in the element); sub-structs take the target field's type, objects their type by name."""
+        def conv_node(v, tid):
             t = db.get(tid)
+            if t is None:
+                raise ValueError(f'type {tid:#x} is not in this bundle')
+            src = dict(v.fields)
+            base = src.get(U.H_BASE)
+            if isinstance(base, Node) and all(f.name_hash != U.H_BASE for f in t.fields):
+                merged = dict(base.fields)
+                merged.update({k: x for k, x in src.items() if k != U.H_BASE})
+                src = merged
             n = Node(tid, -1)
             n.raw = None
             for f in t.fields:
-                if f.name_hash in v.fields:
-                    n.fields[f.name_hash] = conv(v.fields[f.name_hash])
-                else:
-                    n.fields[f.name_hash] = gjson.default_of(db, f)
+                n.fields[f.name_hash] = conv_val(src[f.name_hash], f) if f.name_hash in src else \
+                    gjson.default_of(db, f)
             return n
-        return conv(node)
+
+        def conv_val(v, f):
+            if isinstance(v, list):
+                if f.flags & 2 and f.count > 1 and len(v) != f.count:
+                    v = (v + [v[-1] if v else 0] * f.count)[:f.count]
+                return [conv_one(x, f) for x in v]
+            return conv_one(v, f)
+
+        def conv_one(v, f):
+            if not isinstance(v, Node):
+                ft = db.get(f.type_id)
+                if ft is not None and ft.kind == 2 and isinstance(v, int):
+                    return float(v)
+                if ft is not None and ft.kind in (0, 1, 5) and isinstance(v, float):
+                    return int(round(v))
+                return v
+            ft = db.get(f.type_id)
+            own = names.get(self.types.name(v.type))
+            if f.flags & 16 or (ft is not None and ft.base and own is not None):
+                return conv_node(v, own or f.type_id)
+            return conv_node(v, f.type_id)
+
+        tid = names.get(self.types.name(node.type))
+        if tid is None:
+            raise ValueError(f'the element type {self.types.name(node.type)} is not in this bundle')
+        return conv_node(node, tid)
+
+    def ui_map_refs(self, d, node, clip):
+        """References of an element pasted from another platform: textures come along (converted), materials,
+        text styles and quads become the target bundle's, other references are left out. -> resources to add."""
+        news = []
+        mats = self.ui_materials(d)
+        styles = [x.id for x in d.b.resources if x.type == 0x15 and x.imports()
+                  and self.types.name(x.imports()[0].id) == 'TextStyle']
+        quad = self.ui_full_quad(d)
+
+        def src_kind(rid):
+            res = clip['refs'].get(rid)
+            if res is None:
+                return None, None
+            if res.type != 0x15:
+                return res.type, res
+            imps = res.imports()
+            return (self.types.name(imps[0].id) if imps else None), res
+
+        def mapped(rid):
+            if d.b.find(rid) is not None:
+                return rid
+            kind, res = src_kind(rid)
+            if kind == T_TEXTURE:
+                news.append(ops.adopt(d.b, res, clip['platform'], self.types))
+                return rid
+            if kind == 'UIMaterial':
+                try:
+                    sn = genesys.Reader(self.types, '>' if clip['platform'] == 'PS3' else '<').read_resource(res)
+                    gc = sn.fields.get(U.H_MATERIAL)
+                except Exception:
+                    gc = None
+                same = next((m[0] for m in mats if self.ui_read(d, d.b.find(m[0])).fields.get(U.H_MATERIAL) == gc),
+                            None)
+                return same or (mats[0][0] if mats else None)
+            if kind == 'TextStyle':
+                return styles[0] if styles else None
+            if kind == T_RENDERABLE:
+                return quad
+            return None
+
+        def walk(v):
+            if isinstance(v, Node):
+                for k, x in list(v.fields.items()):
+                    if isinstance(x, Ref):
+                        m = mapped(x.id)
+                        v.fields[k] = Ref(m) if m else None
+                    elif isinstance(x, list):
+                        nl = []
+                        for y in x:
+                            if isinstance(y, Ref):
+                                m = mapped(y.id)
+                                if m:
+                                    nl.append(Ref(m))
+                            else:
+                                walk(y)
+                                nl.append(y)
+                        v.fields[k] = nl
+                    else:
+                        walk(x)
+        walk(node)
+        rd = node.fields.get(U.H_RDATA)
+        if isinstance(rd, Node) and quad and not rd.fields.get(U.H_QUADS):
+            rd.fields[U.H_QUADS] = [Ref(quad)]
+        return news
 
     def ui_paste(self, d, r):
         """The copied element into layout r (on top, same position, new id); -> its index or None."""
@@ -1400,7 +1529,9 @@ class UIEditorUI:
             self.status = 'Nothing copied (Ctrl+C on an element first).'
             return None
         node = gjson.clone(clip['node'])
-        if clip['platform'] != d.b.platform:
+        cross = clip['platform'] != d.b.platform
+        news = []
+        if cross:
             names, db = self.ui_dest_types(d.b)
             try:
                 node = self.ui_convert_node(node, names, db)
@@ -1408,16 +1539,17 @@ class UIEditorUI:
                 self.modal = {'kind': 'message', 'title': 'Paste', 'text': f'This element cannot go into this '
                               f'{d.b.platform} bundle: {ex}.'}
                 return None
+            news = self.ui_map_refs(d, node, clip)
         if not self.genesys_rewritable(d, r):
             self.status = 'This layout cannot be re-written exactly.'
             return None
         n = self.ui_read(d, r)
         gc = self.ui_alloc_gc(d, [e.gc for e in U.elements(self.types, n) if isinstance(e.gc, int)])
         node.fields[U.H_GC] = gc
-        news = []
-        for rid, res in clip['refs'].items():
-            if d.b.find(rid) is None:
-                news.append(ops.adopt(d.b, res, clip['platform'], self.types))
+        if not cross:
+            for rid, res in clip['refs'].items():
+                if d.b.find(rid) is None:
+                    news.append(ops.adopt(d.b, res, clip['platform'], self.types))
         out = {}
 
         def mutate(root, els):
@@ -1721,10 +1853,20 @@ class UIEditorUI:
         d.checkpoint(desc, [r.id])
         d.last_edit = (r.id, time.time())
 
+    @staticmethod
+    def ui_holder(node, h):
+        """The node that holds field h: the node itself, or its PS3 prototype base struct."""
+        if h in node.locs:
+            return node
+        base = node.fields.get(U.H_BASE)
+        if isinstance(base, Node) and h in base.locs:
+            return base
+        return node
+
     def ui_set(self, d, r, node, values, desc=None):
-        """Write scalar fields of a node in place: {field hash: value}."""
+        """Write scalar fields of a node in place: {field hash: value} (fields of a prototype base go there)."""
         for h, v in values.items():
-            loc = node.locs.get(h)
+            loc = self.ui_holder(node, h).locs.get(h)
             if loc is None:
                 continue
             fmt = self.ui_fmt(loc[1])
@@ -1747,7 +1889,7 @@ class UIEditorUI:
         self.write(d, r, ptr, d.b.e + f'{len(values)}f', *[float(x) for x in values])
 
     def ui_set_text(self, d, r, node, h, text):
-        loc = node.locs.get(h)
+        loc = self.ui_holder(node, h).locs.get(h)
         if loc is not None:
             self.write_string(d, r, loc[0], text)
 
@@ -1916,7 +2058,7 @@ class UIEditorUI:
                 self.ui_material(d, r, el)
                 self.ui_element_ops(d, r, el)
                 imgui.end_tab_item()
-            if isinstance(node.fields.get(U.H_PROPS), Node) and tab('Text'):
+            if isinstance(self.ui_holder(node, U.H_PROPS).fields.get(U.H_PROPS), Node) and tab('Text'):
                 self.ui_text_style(d, r, el, node)
                 imgui.end_tab_item()
             if tab('Transitions'):
@@ -2009,7 +2151,8 @@ class UIEditorUI:
         return hit
 
     def ui_text_style(self, d, r, el, node):
-        txt = node.fields.get(U.H_TEXT)
+        node = self.ui_holder(node, U.H_PROPS)
+        txt = self.ui_holder(el.node, U.H_TEXT).fields.get(U.H_TEXT)
         if isinstance(txt, Node) and U.H_STRING_ID in txt.locs:
             self.ui_string_picker(d, r, el, txt)
         props = node.fields[U.H_PROPS]
@@ -2351,8 +2494,9 @@ class UIEditorUI:
             if ch:
                 self.ui_set(d, r, op, {U.H_VALUE: v})
         for h, label in ((U.H_VIS, 'Visibility'), (U.H_ROTBIND, 'Rotation binding')):
-            if h in node.locs:
-                self.ui_text_field(d, r, node, h, label, node.fields.get(h) or '')
+            holder = self.ui_holder(node, h)
+            if h in holder.locs:
+                self.ui_text_field(d, r, node, h, label, holder.fields.get(h) or '')
         txt = node.fields.get(U.H_TEXT)
         if isinstance(txt, Node):
             self.ui_text_field(d, r, txt, U.H_BINDING, 'Text binding', txt.fields.get(U.H_BINDING) or '')
