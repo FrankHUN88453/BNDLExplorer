@@ -10,7 +10,7 @@ import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import numpy as np  # noqa: E402
-from imgui_bundle import hello_imgui, immvision  # noqa: E402
+from imgui_bundle import hello_imgui, imgui, immvision  # noqa: E402
 
 from bndlx import app as A, genesys, roots, uiscene as U  # noqa: E402
 
@@ -18,6 +18,7 @@ PC = os.environ['BNDLX_PC']
 SHOT = os.environ.get('BNDLX_SHOT')
 SHOT2 = os.environ.get('BNDLX_SHOT2')       # the panel with the new text selected
 SHOT3 = os.environ.get('BNDLX_SHOT3')       # the screen list of the game
+SHOT4 = os.environ.get('BNDLX_SHOT4')       # free transform (Ctrl+T) on the tacho
 TMP = tempfile.mkdtemp(prefix='bndlx_uied_')
 SCREEN = 0x10000000005aba5
 failures = []
@@ -189,13 +190,91 @@ def main():
                 app.ui_restructure(d, r, el.index, mutate, 'material')
             back = next(e for e in layout_of(d, state['lid']) if e.index == state['idx'])
             state['material'] = other is not None and back.material == other
+        if f == 96:                          # Ctrl+T: scale from the corner (Shift), rotate, apply (one undo step)
+            st = view()
+            r = d.b.find(state['lid'])
+            els = layout_of(d, state['lid'])
+            lays = [(r, None, els)]
+            el = next(e for e in els if e.index == state['idx'])
+            st['sel'] = (state['lid'], el.index)
+            n_undo = len(d.undo)
+            app.ui_command(d, st, lays, 'transform')
+            xf = st['xf']
+            corner = U.corners(el.x, el.y, el.w, el.h, el.anchor, el.rot)[2]
+            app.ui_xf_apply_drag(xf, {'handle': 'br', 'mx': corner[0], 'my': corner[1],
+                                      'start': (xf['x'], xf['y'], xf['w'], xf['h'], xf['rot'])},
+                                 corner[0] + 40, corner[1] + 5, shift=True)
+            app.ui_xf_apply_drag(xf, {'handle': 'rot', 'mx': xf['x'], 'my': xf['y'] - 50,
+                                      'start': (xf['x'], xf['y'], xf['w'], xf['h'], xf['rot'])},
+                                 xf['x'] + 50, xf['y'], shift=True)
+            want = (xf['x'], xf['y'], xf['w'], xf['h'], xf['rot'])
+            app.ui_command(d, st, lays, 'apply')
+            back = next(e for e in layout_of(d, state['lid']) if e.index == el.index)
+            state['xf'] = ((back.x, back.y, back.w, back.h, back.rot) == want and st['xf'] is None
+                           and len(d.undo) == n_undo + 1 and abs(back.w / max(el.w, 1) - back.h / max(el.h, 1)) < 0.05
+                           and back.rot == el.rot + 90)
+            app.ui_command(d, st, lays, 'undo')
+            back = next(e for e in layout_of(d, state['lid']) if e.index == el.index)
+            state['xf_undo'] = (back.x, back.y, back.w, back.h, back.rot) == (el.x, el.y, el.w, el.h, el.rot)
+        if f == 97:                          # Ctrl+J, Delete, Ctrl+] / Ctrl+[
+            st = view()
+            r = d.b.find(state['lid'])
+            n0 = len(layout_of(d, state['lid']))
+            lays = lambda: [(d.b.find(state['lid']), None, layout_of(d, state['lid']))]  # noqa: E731
+            st['sel'] = (state['lid'], state['idx'])
+            app.ui_command(d, st, lays(), 'duplicate')
+            n1 = len(layout_of(d, state['lid']))
+            sel1 = st['sel']
+            app.ui_command(d, st, lays(), 'up')
+            sel2 = st['sel']
+            app.ui_command(d, st, lays(), 'down')
+            app.ui_command(d, st, lays(), 'delete')
+            n2 = len(layout_of(d, state['lid']))
+            state['cmds'] = (n1 == n0 + 1 and sel1 == (state['lid'], state['idx'] + 1)
+                             and sel2 == (state['lid'], state['idx'] + 2) and n2 == n0 and st['sel'] is None)
+        if f == 98:                          # Delete goes to the editor while it has the keyboard, not the list
+            d.sel = {d.b.resources[0].id}
+            orig = A.imgui.is_key_pressed
+            A.imgui.is_key_pressed = lambda key, repeat=True: key == imgui.Key.delete
+            try:
+                app.modal = None
+                app.uied['focus_frame'] = imgui.get_frame_count()
+                app.shortcuts()
+                routed = app.modal is None
+                app.uied['focus_frame'] = -9
+                app.shortcuts()
+                listed = app.modal is not None and app.modal.get('kind') == 'confirm_delete'
+            finally:
+                A.imgui.is_key_pressed = orig
+                app.modal = None
+                d.sel = set()
+            state['keys'] = routed and listed
         if f == 99:
-            for _ in range(40):
+            for _ in range(60):
                 if bytes(d.b.find(state['lid']).data(0)) == state['old'] or not d.undo:
                     break
                 d.do_undo()
                 app.changed(d, d.b.find(state['lid']))
             state['undo'] = bytes(d.b.find(state['lid']).data(0)) == state['old']
+        if f == 102 and SHOT4:               # a transform in progress, for the picture (cancelled after)
+            st = view()
+            lid = next(l for l, _p in U.screen_widgets(app.types, genesys.Reader(app.types, d.b.e).read_resource(
+                d.b.find(SCREEN)))[0][1] if any(e.w > 150 and e.kind == 'Image' for e in layout_of(d, l)))
+            el = max((e for e in layout_of(d, lid) if e.kind == 'Image'), key=lambda e: e.w * e.h)
+            st['sel'] = (lid, el.index)
+            lays = [(d.b.find(lid), None, layout_of(d, lid))]
+            app.ui_command(d, st, lays, 'transform')
+            xf = st['xf']
+            app.ui_xf_apply_drag(xf, {'handle': 'rot', 'mx': xf['x'], 'my': xf['y'] - 50,
+                                      'start': (xf['x'], xf['y'], xf['w'], xf['h'], xf['rot'])}, xf['x'] + 20, xf['y'] - 50)
+            cx, cy = U.corners(xf['x'], xf['y'], xf['w'], xf['h'], xf['anchor'], xf['rot'])[2]
+            app.ui_xf_apply_drag(xf, {'handle': 'br', 'mx': cx, 'my': cy, 'start': (xf['x'], xf['y'], xf['w'], xf['h'],
+                                                                                    xf['rot'])}, cx + 30, cy + 20,
+                                 shift=True)
+            state['shot4'] = f + 3
+            state['xf_lays'] = lays
+        if f == 107 and SHOT4:
+            app.ui_command(d, view(), state['xf_lays'], 'cancel')
         if f == 110:                         # every screen of the game folder, HUDs first; one picked opens
             app.open_ui_browser()
         if f > 110 and 'picked' not in state and app.job is None:
@@ -244,6 +323,9 @@ def main():
             screenshot(SHOT)
         if SHOT2 and state['f'] >= 93 and state.pop('shot2', False):
             screenshot(SHOT2)
+        if SHOT4 and state.get('shot4') and state['f'] >= state['shot4']:
+            state['shot4'] = None
+            screenshot(SHOT4)
         if SHOT3 and state.get('shot3') and state['f'] >= state['shot3']:
             state['shot3'] = None
             screenshot(SHOT3)
@@ -270,6 +352,10 @@ def main():
     check(state.get('style'), 'the text gets its own style copy; its size and font change, the shared one stays')
     check(state.get('text'), 'the new text shows the game string given by its id')
     check(state.get('material'), 'an image gets another material')
+    check(state.get('xf') and state.get('xf_undo'), 'Ctrl+T: proportional scale + 90 degrees applied as one undo step, '
+                                                    'Ctrl+Z restores')
+    check(state.get('cmds'), 'Ctrl+J duplicates, Ctrl+] / Ctrl+[ reorder, Delete deletes')
+    check(state.get('keys'), 'while the editor has the keyboard, Delete does not delete resources of the list')
     check(state.get('undo'), 'undo restores the layout bytes')
     n, h = state.get('screens', (0, 0))
     check(n > 10 and h > 5 and state.get('opened'), f'all screens of the game listed ({n}, {h} HUDs); the free roam '

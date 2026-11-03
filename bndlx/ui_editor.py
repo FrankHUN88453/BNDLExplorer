@@ -2,7 +2,10 @@
 screen's widget shows, drawn as the game draws them (textured quads with their UVs, tint, opacity, masks as
 clip rectangles, labels in the style's size and colour) against made-up game values.
 
-Click selects, dragging moves, the corner handle resizes, arrow keys nudge (Shift: 10 px); the panel edits
+Click selects, dragging moves, the corner handle resizes, arrow keys nudge (Shift: 10 px); Ctrl+T transforms
+freely (8 handles: scale, Shift proportional, Alt from the centre; the knob rotates, Shift 15 degrees; Enter
+applies as one undo step, Esc cancels); Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo / redo the edited bundle, Ctrl+J
+duplicates, Delete deletes, Ctrl+D deselects, Ctrl+[ / Ctrl+] draw earlier / later. The panel edits
 position, size, rotation, anchor, bindings, tint, opacity, text and the transition behaviours (fade in / out
 ...), which can be played in the preview. Values are written in place; adding / removing elements and
 behaviours re-writes the layout object (gwrite), only when the object comes back byte for byte unchanged.
@@ -60,7 +63,7 @@ class UIEditorUI:
                 'sel': None, 'drag': None, 'state': {}, 'respect_vis': True, 'unknown_visible': False,
                 'show_hidden': False, 'show_masks': False, 'outlines': False, 'play': None, 'widget': 0,
                 'zoom': 1.0, 'clip': True, 'bound_faded': True, 'hide': set(), 'lock': set(), 'snap': 1,
-                'add_kind': 0}
+                'add_kind': 0, 'xf': None}
         return v
 
     # -- entry points (tabs of the object view, and the large window) --------------------------------------
@@ -220,8 +223,10 @@ class UIEditorUI:
         title = (f'UI editor - {self.display_name(d, r)[0]}  ({r.id:#x})' if node is not None else 'UI editor') \
             + '###uieditor'
         _, keep = imgui.begin(title, True, imgui.WindowFlags_.no_collapse | imgui.WindowFlags_.no_scrollbar)
-        if not keep or (imgui.is_window_focused(imgui.FocusedFlags_.root_and_child_windows)
-                        and imgui.is_key_pressed(imgui.Key.escape)):
+        self.uied['win_focus'] = imgui.is_window_focused(imgui.FocusedFlags_.root_and_child_windows)
+        transforming = any(v.get('xf') for v in self.uied['views'].values())
+        if not keep or (self.uied['win_focus'] and imgui.is_key_pressed(imgui.Key.escape) and not transforming
+                        and not imgui.get_io().want_text_input):
             imgui.end()
             self.uied['window'] = None
             return
@@ -426,11 +431,19 @@ class UIEditorUI:
             cw = ch * U.W / U.H
         imgui.begin_child('##uicanvas', imgui.ImVec2(cw, ch))
         self.ui_canvas(d, st, layouts, ev, cw, ch)
+        focus = imgui.is_window_focused(imgui.FocusedFlags_.child_windows)
         imgui.end_child()
         imgui.same_line()
         imgui.begin_child('##uipanel', imgui.ImVec2(0, max(ch, avail.y - 4)))
         self.ui_panel(d, st, layouts, ev)
+        focus = focus or imgui.is_window_focused(imgui.FocusedFlags_.child_windows)
         imgui.end_child()
+        if window:
+            focus = self.uied.get('win_focus', False)
+        if focus:
+            self.uied['focus_frame'] = imgui.get_frame_count()
+            self.uied['focus_doc'] = d.uid
+            self.ui_keys(d, st, layouts)
 
     def ui_canvas(self, d, st, layouts, ev, cw, ch):
         dl = imgui.get_window_draw_list()
@@ -496,6 +509,10 @@ class UIEditorUI:
         cur = None
         sel = st['sel']
         for r, el, pts in shapes:
+            if sel == (r.id, el.index) and st['xf'] is not None and st['xf']['key'] == sel:
+                cur = (r, el, pts)
+                self.ui_xf_draw(dl, P, st['xf'], s)
+                continue
             if sel == (r.id, el.index):
                 cur = (r, el, pts)
                 self.ui_outline(dl, P, pts, (1.0, 0.75, 0.1, 1), 2.0)
@@ -599,6 +616,9 @@ class UIEditorUI:
                 x, y, w, h, rot = el.x, el.y, el.w, el.h, el.rot
                 if drag is not None and drag['key'] == (r.id, el.index):
                     x, y, w, h = drag['x'], drag['y'], drag['w'], drag['h']
+                xf = st['xf']
+                if xf is not None and xf['key'] == (r.id, el.index):
+                    x, y, w, h, rot = xf['x'], xf['y'], xf['w'], xf['h'], xf['rot']
                 visible = ev.visible(el.vis, st['unknown_visible']) or not st['respect_vis']
                 rb = ev.value(el.rot_bind)
                 if rb is not None:
@@ -691,6 +711,9 @@ class UIEditorUI:
     def ui_mouse(self, d, st, shapes, cur, o, s, hovered):
         io = imgui.get_io()
         mx, my = (io.mouse_pos.x - o.x) / s, (io.mouse_pos.y - o.y) / s
+        if st['xf'] is not None:
+            self.ui_xf_mouse(d, st, mx, my, s, hovered)
+            return
         drag = st['drag']
         if drag is not None:
             if imgui.is_mouse_down(0):
@@ -714,6 +737,8 @@ class UIEditorUI:
                 st['drag'] = None
                 r = d.b.find(drag['key'][0])
                 el = self.ui_find(d, r, drag['key'][1])
+                if el is not None and (drag['x'], drag['y'], drag['w'], drag['h']) !=                         (drag['x0'], drag['y0'], drag['w0'], drag['h0']):
+                    self.ui_step(d, r, f'{drag["mode"]} element {el.index}')
                 if el is not None:
                     if drag['mode'] == 'move' and (drag['x'], drag['y']) != (drag['x0'], drag['y0']):
                         self.ui_set(d, r, el.node, {U.H_X: drag['x'], U.H_Y: drag['y']}, 'move element')
@@ -741,15 +766,244 @@ class UIEditorUI:
             st['sel'] = (hit[0].id, hit[1].index)
             if not d.b.truncated:
                 st['drag'] = self.ui_drag(hit, 'move', mx, my)
-        if cur is not None and imgui.is_window_focused(imgui.FocusedFlags_.root_and_child_windows) \
-                and not imgui.get_io().want_text_input and not d.b.truncated:
-            step = 10 if io.key_shift else 1
-            for k, (dx, dy) in ((imgui.Key.left_arrow, (-step, 0)), (imgui.Key.right_arrow, (step, 0)),
-                                (imgui.Key.up_arrow, (0, -step)), (imgui.Key.down_arrow, (0, step))):
-                if imgui.is_key_pressed(k):
-                    r, el = cur[0], cur[1]
-                    self.ui_set(d, r, el.node, {U.H_X: el.x + dx, U.H_Y: el.y + dy}, 'nudge element')
+
+    # -- keyboard ---------------------------------------------------------------------------------------------
+    def ui_keys(self, d, st, layouts):
+        """The editor's shortcuts (while it has the keyboard focus)."""
+        io = imgui.get_io()
+        if io.want_text_input:
+            return
+        ctrl, shift = io.key_ctrl, io.key_shift
+        k = lambda key: imgui.is_key_pressed(key, False)  # noqa: E731
+        cmd = None
+        if ctrl and k(imgui.Key.z):
+            cmd = 'redo' if shift else 'undo'
+        elif ctrl and k(imgui.Key.y):
+            cmd = 'redo'
+        elif ctrl and k(imgui.Key.t):
+            cmd = 'transform'
+        elif st['xf'] is not None and (k(imgui.Key.enter) or k(imgui.Key.keypad_enter)):
+            cmd = 'apply'
+        elif st['xf'] is not None and k(imgui.Key.escape):
+            cmd = 'cancel'
+        elif ctrl and k(imgui.Key.j):
+            cmd = 'duplicate'
+        elif k(imgui.Key.delete):
+            cmd = 'delete'
+        elif ctrl and k(imgui.Key.d):
+            cmd = 'deselect'
+        elif ctrl and k(imgui.Key.left_bracket):
+            cmd = 'down'
+        elif ctrl and k(imgui.Key.right_bracket):
+            cmd = 'up'
+        else:
+            step = 10 if shift else 1
+            for key, delta in ((imgui.Key.left_arrow, (-step, 0)), (imgui.Key.right_arrow, (step, 0)),
+                               (imgui.Key.up_arrow, (0, -step)), (imgui.Key.down_arrow, (0, step))):
+                if imgui.is_key_pressed(key):
+                    cmd = ('nudge',) + delta
                     break
+        if cmd is not None:
+            self.ui_command(d, st, layouts, cmd)
+
+    def ui_command(self, d, st, layouts, cmd):
+        """One editor command (the shortcuts call these; tests too)."""
+        sel = st['sel']
+        hit = next(((r, el) for r, _n, els in layouts for el in els if sel == (r.id, el.index)), None)
+        ro = d.b.truncated
+        if cmd == 'undo':
+            st['xf'] = st['drag'] = None
+            self.undo(d)
+        elif cmd == 'redo':
+            st['xf'] = st['drag'] = None
+            self.redo(d)
+        elif cmd == 'deselect':
+            st['sel'] = st['xf'] = None
+        elif hit is None or ro:
+            return
+        elif cmd == 'transform':
+            r, el = hit
+            if st['xf'] is None:
+                st['xf'] = {'key': sel, 'x': el.x, 'y': el.y, 'w': el.w, 'h': el.h, 'rot': el.rot,
+                            'anchor': el.anchor, 'orig': (el.x, el.y, el.w, el.h, el.rot), 'drag': None}
+                self.status = 'Free transform: drag the handles (Shift: proportional / 15 degrees, Alt: from the ' \
+                              'centre), Enter applies, Esc cancels.'
+        elif cmd == 'apply':
+            xf, st['xf'] = st['xf'], None
+            r, el = hit
+            if xf is not None and (xf['x'], xf['y'], xf['w'], xf['h'], xf['rot']) != xf['orig']:
+                self.ui_step(d, r, f'transform element {el.index}')
+                self.ui_set(d, r, el.node, {U.H_X: xf['x'], U.H_Y: xf['y'], U.H_W: xf['w'], U.H_H: xf['h'],
+                                            U.H_ROT: xf['rot']}, f'transform element {el.index}')
+        elif cmd == 'cancel':
+            st['xf'] = None
+        elif isinstance(cmd, tuple) and cmd[0] == 'nudge':
+            r, el = hit
+            if st['xf'] is not None:
+                st['xf']['x'] += cmd[1]
+                st['xf']['y'] += cmd[2]
+            else:
+                self.ui_set(d, r, el.node, {U.H_X: el.x + cmd[1], U.H_Y: el.y + cmd[2]}, 'nudge element')
+        elif cmd in ('duplicate', 'delete', 'down', 'up'):
+            st['xf'] = None
+            r, el = hit
+            i = el.index
+            if cmd == 'duplicate':
+                gc = self.ui_alloc_gc(d)
+
+                def dup(root, els):
+                    c = gjson.clone(els[i])
+                    c.fields[U.H_GC] = gc
+                    els.insert(i + 1, c)
+                if self.ui_restructure(d, r, i, dup, f'duplicate element {i}'):
+                    st['sel'] = (r.id, i + 1)
+            elif cmd == 'delete':
+                if self.ui_restructure(d, r, i, lambda root, els: els.pop(i), f'delete element {i}'):
+                    st['sel'] = None
+            elif cmd == 'down' and i > 0:
+                if self.ui_restructure(d, r, i, lambda root, els: els.insert(i - 1, els.pop(i)), 'draw earlier'):
+                    st['sel'] = (r.id, i - 1)
+            elif cmd == 'up':
+                n = len(self.ui_read(d, r).fields.get(U.H_ELEMENTS) or [])
+                if i + 1 < n and self.ui_restructure(d, r, i, lambda root, els: els.insert(i + 1, els.pop(i)),
+                                                     'draw later'):
+                    st['sel'] = (r.id, i + 1)
+
+    # -- free transform (Ctrl+T) -------------------------------------------------------------------------------
+    XF_HANDLES = ('tl', 't', 'tr', 'r', 'br', 'b', 'bl', 'l')
+
+    @staticmethod
+    def ui_xf_local(xf):
+        """The rect in the element's own axes around its position (anchor point): l, t, r, b."""
+        ax, ay = U.anchor_frac(xf['anchor'])
+        return -ax * xf['w'], -ay * xf['h'], (1 - ax) * xf['w'], (1 - ay) * xf['h']
+
+    @staticmethod
+    def ui_xf_world(xf, lx, ly):
+        c, s = math.cos(math.radians(xf['rot'])), math.sin(math.radians(xf['rot']))
+        return xf['x'] + lx * c - ly * s, xf['y'] + lx * s + ly * c
+
+    def ui_xf_points(self, xf, s):
+        """{handle: layout point} of the transform box, 'rot' the rotation knob."""
+        l, t, r, b = self.ui_xf_local(xf)
+        mx, my = (l + r) / 2, (t + b) / 2
+        loc = {'tl': (l, t), 't': (mx, t), 'tr': (r, t), 'r': (r, my), 'br': (r, b), 'b': (mx, b), 'bl': (l, b),
+               'l': (l, my), 'rot': (mx, t - 28 / max(s, 1e-6))}
+        return {k: self.ui_xf_world(xf, *v) for k, v in loc.items()}
+
+    def ui_xf_draw(self, dl, P, xf, s):
+        pts = self.ui_xf_points(xf, s)
+        box = [P(*pts[k]) for k in ('tl', 'tr', 'br', 'bl')]
+        col = _u32((0.2, 0.75, 1.0, 1))
+        dl.add_quad(box[0], box[1], box[2], box[3], col, 1.5)
+        top = P(*pts['t'])
+        knob = P(*pts['rot'])
+        dl.add_line(top, knob, col, 1.0)
+        dl.add_circle_filled(knob, 5, col)
+        for k in self.XF_HANDLES:
+            p = P(*pts[k])
+            dl.add_rect_filled(imgui.ImVec2(p.x - 4, p.y - 4), imgui.ImVec2(p.x + 4, p.y + 4), _u32((1, 1, 1, 1)))
+            dl.add_rect(imgui.ImVec2(p.x - 4, p.y - 4), imgui.ImVec2(p.x + 4, p.y + 4), col)
+        pv = P(xf['x'], xf['y'])
+        dl.add_circle(pv, 4, col, 0, 1.5)
+
+    def ui_xf_mouse(self, d, st, mx, my, s, hovered):
+        xf = st['xf']
+        io = imgui.get_io()
+        g = xf['drag']
+        if g is not None:
+            if imgui.is_mouse_down(0):
+                self.ui_xf_apply_drag(xf, g, mx, my, io.key_shift, io.key_alt, max(1, st.get('snap', 1)))
+            else:
+                xf['drag'] = None
+            return
+        if not hovered or not imgui.is_mouse_clicked(0):
+            return
+        pts = self.ui_xf_points(xf, s)
+        near = lambda p: abs(p[0] - mx) * s <= 7 and abs(p[1] - my) * s <= 7  # noqa: E731
+        handle = next((k for k in ('rot',) + self.XF_HANDLES if near(pts[k])), None)
+        box = [pts[k] for k in ('tl', 'tr', 'br', 'bl')]
+        if handle is None and U.inside(box, mx, my):
+            handle = 'move'
+        if handle is None:                        # a click outside applies the transform (as Photoshop asks)
+            self.ui_command(d, st, [(d.b.find(xf['key'][0]), None,
+                                     U.elements(self.types, self.ui_read(d, d.b.find(xf['key'][0]))))], 'apply')
+            return
+        if imgui.is_mouse_double_clicked(0) and handle == 'move':
+            self.ui_command(d, st, [(d.b.find(xf['key'][0]), None,
+                                     U.elements(self.types, self.ui_read(d, d.b.find(xf['key'][0]))))], 'apply')
+            return
+        xf['drag'] = {'handle': handle, 'mx': mx, 'my': my,
+                      'start': (xf['x'], xf['y'], xf['w'], xf['h'], xf['rot'])}
+
+    def ui_xf_apply_drag(self, xf, g, mx, my, shift=False, alt=False, snap=1):
+        """Move / scale / rotate the transform box from the drag start to the mouse (layout coordinates)."""
+        x0, y0, w0, h0, r0 = g['start']
+        if g['handle'] == 'move':
+            xf['x'] = round((x0 + mx - g['mx']) / snap) * snap
+            xf['y'] = round((y0 + my - g['my']) / snap) * snap
+            return
+        if g['handle'] == 'rot':
+            a0 = math.atan2(g['my'] - y0, g['mx'] - x0)
+            a1 = math.atan2(my - y0, mx - x0)
+            rot = r0 + math.degrees(a1 - a0)
+            if shift:
+                rot = round(rot / 15.0) * 15.0
+            xf['rot'] = round(rot, 2)
+            return
+        start = dict(xf, x=x0, y=y0, w=w0, h=h0, rot=r0)
+        l, t, r, b = self.ui_xf_local(start)
+        c, s = math.cos(math.radians(r0)), math.sin(math.radians(r0))
+        dx, dy = mx - x0, my - y0
+        lx, ly = dx * c + dy * s, -dx * s + dy * c                  # the mouse in the element's own axes
+        hd = g['handle']
+        nl, nt, nr, nb = l, t, r, b
+        if 'l' in hd:
+            nl = lx
+        if 'r' in hd:
+            nr = lx
+        if hd in ('t', 'tl', 'tr'):
+            nt = ly
+        if hd in ('b', 'bl', 'br'):
+            nb = ly
+        if alt:                                                       # from the centre: the other side mirrors
+            cx, cy = (l + r) / 2, (t + b) / 2
+            if 'l' in hd:
+                nr = 2 * cx - nl
+            if 'r' in hd:
+                nl = 2 * cx - nr
+            if hd in ('t', 'tl', 'tr'):
+                nb = 2 * cy - nt
+            if hd in ('b', 'bl', 'br'):
+                nt = 2 * cy - nb
+        if shift and len(hd) == 2 and w0 > 0 and h0 > 0:            # proportional from the corner
+            k = max(abs(nr - nl) / w0, abs(nb - nt) / h0)
+            if 'l' in hd:
+                nl = nr - w0 * k if not alt else (l + r) / 2 - w0 * k / 2
+                if alt:
+                    nr = (l + r) / 2 + w0 * k / 2
+            else:
+                nr = nl + w0 * k if not alt else (l + r) / 2 + w0 * k / 2
+                if alt:
+                    nl = (l + r) / 2 - w0 * k / 2
+            if 't' in hd:
+                nt = nb - h0 * k if not alt else (t + b) / 2 - h0 * k / 2
+                if alt:
+                    nb = (t + b) / 2 + h0 * k / 2
+            else:
+                nb = nt + h0 * k if not alt else (t + b) / 2 + h0 * k / 2
+                if alt:
+                    nt = (t + b) / 2 - h0 * k / 2
+        if nr < nl:
+            nl, nr = nr, nl
+        if nb < nt:
+            nt, nb = nb, nt
+        w, h = max(1.0, round(nr - nl)), max(1.0, round(nb - nt))
+        ax, ay = U.anchor_frac(xf['anchor'])
+        px, py = nl + ax * w, nt + ay * h                              # the new anchor point, own axes
+        xf['w'], xf['h'] = w, h
+        xf['x'] = round(x0 + px * c - py * s, 2)
+        xf['y'] = round(y0 + px * s + py * c, 2)
 
     @staticmethod
     def ui_drag(hit, mode, mx, my):
@@ -773,6 +1027,12 @@ class UIEditorUI:
             return 'f' if size == 4 else 'd'
         return {1: 'b' if kind == 0 else 'B', 2: 'h' if kind == 0 else 'H', 4: 'i' if kind == 0 else 'I',
                 8: 'q' if kind == 0 else 'Q'}.get(size)
+
+    @staticmethod
+    def ui_step(d, r, desc):
+        """An undo step of its own for the value writes that follow (in this frame)."""
+        d.checkpoint(desc, [r.id])
+        d.last_edit = (r.id, time.time())
 
     def ui_set(self, d, r, node, values, desc=None):
         """Write scalar fields of a node in place: {field hash: value}."""
@@ -871,6 +1131,8 @@ class UIEditorUI:
                 imgui.same_line()
                 if imgui.button('No background'):
                     self.uied['bg'] = None
+            imgui.text_disabled('Ctrl+T transform, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+J duplicate, Delete, '
+                                'Ctrl+D deselect, Ctrl+[ ] order, arrows nudge')
             imgui.text('Play:')
             for ph, label in (('in', 'Transition in'), ('out', 'Transition out'), ('idle', 'Idle')):
                 imgui.same_line()
@@ -928,6 +1190,17 @@ class UIEditorUI:
         node = el.node
         imgui.separator()
         imgui.text(f'{el.kind}  #{el.index}  id {el.gc}')
+        xf = st['xf']
+        if xf is not None and xf['key'] == sel:
+            ox, oy, ow, oh, orot = xf['orig']
+            imgui.text_colored(imgui.ImVec4(0.3, 0.8, 1.0, 1), f'Free transform: {xf["x"]:.0f}, {xf["y"]:.0f}  '
+                               f'{xf["w"]:.0f} x {xf["h"]:.0f} ({100 * xf["w"] / max(ow, 1):.0f}% x '
+                               f'{100 * xf["h"] / max(oh, 1):.0f}%)  {xf["rot"]:.1f} deg')
+            if imgui.small_button('Apply (Enter)'):
+                self.ui_command(d, st, layouts, 'apply')
+            imgui.same_line()
+            if imgui.small_button('Cancel (Esc)'):
+                self.ui_command(d, st, layouts, 'cancel')
         if ro:
             imgui.text_disabled('(read-only bundle)')
             return

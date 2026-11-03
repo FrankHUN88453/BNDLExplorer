@@ -125,6 +125,7 @@ class Doc:
         self.undo.append((desc, full, snap, self.b.root_id, self.b.flags))
         del self.undo[:-40]
         self.redo.clear()
+        self.last_edit = (None, 0.0)          # value edits after this start their own step
 
     def edit_checkpoint(self, rid):
         """Checkpoint for value edits: consecutive edits of one resource within 1.5 s are one undo step."""

@@ -1337,6 +1337,18 @@ class ExplorerUI:
         ctrl, shift, alt = io.key_ctrl, io.key_shift, io.key_alt
         d = self.cur
         k = lambda key: imgui.is_key_pressed(key, False)  # noqa: E731
+        uied = getattr(self, 'uied', None)
+        if uied and uied.get('focus_frame', -9) >= imgui.get_frame_count() - 1:
+            # the UI editor has the keyboard (its own undo, Ctrl+T, Delete, arrows): saving and help stay
+            ed = self.doc_by_uid(uied.get('focus_doc')) or d
+            if ctrl and shift and k(imgui.Key.s):
+                self.action_save_as(ed)
+            elif ctrl and k(imgui.Key.s):
+                self.action_save(ed)
+            elif k(imgui.Key.f1):
+                from .app import HELP
+                self.modal = {'kind': 'message', 'title': 'How to use', 'text': HELP}
+            return
         if ctrl and k(imgui.Key.o):
             self.action_open()
         elif ctrl and shift and k(imgui.Key.s):
