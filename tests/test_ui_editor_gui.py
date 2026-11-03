@@ -17,6 +17,7 @@ from bndlx import app as A, genesys, roots, uiscene as U  # noqa: E402
 PC = os.environ['BNDLX_PC']
 SHOT = os.environ.get('BNDLX_SHOT')
 SHOT2 = os.environ.get('BNDLX_SHOT2')       # the panel with the new text selected
+SHOT3 = os.environ.get('BNDLX_SHOT3')       # the screen list of the game
 TMP = tempfile.mkdtemp(prefix='bndlx_uied_')
 SCREEN = 0x10000000005aba5
 failures = []
@@ -89,6 +90,18 @@ def main():
             state['quads'] = sum(1 for v in app.uied['quads'].values() if v) if st is not None else 0
             if SHOT:
                 state['shot'] = True
+        if f == 66:                          # the HUD's texts use the game's fonts; a font with ő ű made from a TTF
+            fonts = app.uied.get('gfonts', {})
+            state['game_fonts'] = sorted(k for k, v in fonts.items() if v is not None)
+            ttf = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts', 'arialbd.ttf')
+            out = os.path.join(TMP, '2113929999.BNDL')
+            ok, msg, fid = app.ui_make_font(d, 1206239, ttf, out, keep=True)
+            from bndlx import uifont
+            from bndlx.bundle import Bundle
+            nf = uifont.from_bundle(Bundle.open(out))[0] if ok else None
+            state['font_made'] = (ok and fid == 2113929999 and nf is not None
+                                  and all(uifont.drawn(nf.glyph(c)) for c in 'őűŐŰAa0'))
+            state['font_msg'] = msg
         if f == 70:                          # move + resize the first image of the first HUD layout
             st = view()
             widgets = U.screen_widgets(app.types, genesys.Reader(app.types, d.b.e).read_resource(d.b.find(SCREEN)))
@@ -183,7 +196,27 @@ def main():
                 d.do_undo()
                 app.changed(d, d.b.find(state['lid']))
             state['undo'] = bytes(d.b.find(state['lid']).data(0)) == state['old']
-        if f == 115:
+        if f == 110:                         # every screen of the game folder, HUDs first; one picked opens
+            app.open_ui_browser()
+        if f > 110 and 'picked' not in state and app.job is None:
+            br = app.uied['browser']
+            scr = br['screens'] or []
+            state['screens'] = (len(scr), sum(1 for x in scr if x['hud']))
+            pick = next((x for x in scr if x['id'] == 371621 and os.path.basename(x['path']) == '371621.BNDL'), None)
+            if pick is None:
+                state['picked'] = None
+                state['end'] = f + 5
+            else:
+                br['pending'] = pick
+                state['picked'] = pick
+        if state.get('picked') and 'opened' not in state and f > 112:
+            key = app.uied['window'].get('key')
+            od = app.doc_by_uid(key[1]) if key else None
+            state['opened'] = (od is not None and key[2] == state['picked']['root']
+                               and os.path.normcase(od.path) == os.path.normcase(state['picked']['path']))
+            state['end'] = f + 10
+            state['shot3'] = f + 6
+        if f == state.get('end') or f > 1500:
             hello_imgui.get_runner_params().app_shall_exit = True
             app.exit_ok = True
 
@@ -211,6 +244,9 @@ def main():
             screenshot(SHOT)
         if SHOT2 and state['f'] >= 93 and state.pop('shot2', False):
             screenshot(SHOT2)
+        if SHOT3 and state.get('shot3') and state['f'] >= state['shot3']:
+            state['shot3'] = None
+            screenshot(SHOT3)
 
     params.callbacks.before_swap = before_swap
     hello_imgui.run(params)
@@ -224,6 +260,8 @@ def main():
     check(m.get('additive', 0) > 0 and m.get('bound', 0) > 0 and state.get('mirror_ok') and state.get('bound_ok')
           and state.get('additive_ok'), f'images draw by their kind: {m} (mirror: game camera stand-in; bound: '
                                         'game pictures; additive: UIAdditiveShader)')
+    check(len(state.get('game_fonts', [])) >= 1, f'the HUD texts are drawn with the game fonts {state.get("game_fonts")}')
+    check(state.get('font_made'), f'a font with ő ű made from a TTF reads back ({state.get("font_msg", "")[:90]})')
     check(state.get('moved'), 'an element moved / resized in place reads back')
     check(state.get('fade') and state.get('alpha') == (0.0, 1.0),
           f'a fade in added to the element reads back and animates (alpha {state.get("alpha")})')
@@ -233,6 +271,9 @@ def main():
     check(state.get('text'), 'the new text shows the game string given by its id')
     check(state.get('material'), 'an image gets another material')
     check(state.get('undo'), 'undo restores the layout bytes')
+    n, h = state.get('screens', (0, 0))
+    check(n > 10 and h > 5 and state.get('opened'), f'all screens of the game listed ({n}, {h} HUDs); the free roam '
+                                                    'HUD picked opens in the editor')
     shutil.rmtree(TMP, ignore_errors=True)
     print(f'{len(failures)} failure(s)')
     return 1 if failures else 0

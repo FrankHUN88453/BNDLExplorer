@@ -17,7 +17,8 @@ import numpy as np
 
 from imgui_bundle import imgui, immvision
 
-from . import filedialog, genesys, gjson, mesh, ops, roots, uirender, uiscene as U
+from . import filedialog, genesys, gjson, mesh, ops, raster, roots, uifont, uirender, uiscene as U
+from .bundle import Bundle
 from .genesys import Node, Ref, STRINGBASE
 from .gnames import name_hash
 
@@ -83,19 +84,131 @@ class UIEditorUI:
             self.uied['window'] = {'key': key, 'focus': True}
             return True
         imgui.same_line()
+        if imgui.button('All screens...'):
+            self.open_ui_browser()
+            self.uied['window']['key'] = key
+            return True
+        imgui.same_line()
         imgui.text_disabled('(or edit here)')
         return False
+
+    # -- every screen of the game (the browser) --------------------------------------------------------------
+    def ui_game_roots(self):
+        out = []
+        for p in self.nav_roots() + [v for v in roots.FALLBACK.values() if v]:
+            r = ops.game_root(p) or (p if os.path.isdir(os.path.join(p, 'UI')) else None)
+            if r and os.path.normcase(r) not in [os.path.normcase(x) for x in out]:
+                out.append(r)
+        return out
+
+    def open_ui_browser(self):
+        """The UI editor with a list of every UI screen (HUDs first) of the game folders added to the app."""
+        self.uied_state(('browser',))
+        br = self.uied.setdefault('browser', {'screens': None, 'filter': '', 'huds': True, 'pending': None})
+        win = self.uied.get('window') or {}
+        self.uied['window'] = {'key': win.get('key'), 'focus': True, 'browser': True}
+        if br['screens'] is None:
+            self.ui_scan_screens()
+
+    def ui_scan_screens(self):
+        br = self.uied['browser']
+        folders = self.ui_game_roots()
+        if not folders:
+            br['screens'] = []
+            return
+        from .labels import config_dir
+        import json
+        cpath = os.path.join(config_dir(), 'ui_screens.json')
+        try:
+            with open(cpath, encoding='utf-8') as fh:
+                cache = json.load(fh)
+        except (OSError, ValueError):
+            cache = {}
+
+        def work(progress):
+            res = U.scan_screens(folders, progress, cache)
+            try:
+                with open(cpath, 'w', encoding='utf-8') as fh:
+                    json.dump(cache, fh)
+            except OSError:
+                pass
+            return res
+
+        def done(res):
+            br['screens'] = sorted(res, key=lambda s: (not s['hud'], s['platform'], s['name'].lower(), s['path']))
+
+        if self.job is None:
+            br['screens'] = []
+            self.run_job('Reading the UI screens of the game', work, done)
+
+    def ui_browser_list(self):
+        br = self.uied['browser']
+        win = self.uied['window']
+        if imgui.small_button('Rescan'):
+            self.ui_scan_screens()
+        imgui.same_line()
+        _, br['huds'] = imgui.checkbox('HUDs only', br['huds'])
+        imgui.set_next_item_width(-1)
+        _, br['filter'] = imgui.input_text_with_hint('##uibf', 'filter (name, id, file)', br['filter'])
+        q = br['filter'].strip().lower()
+        screens = br['screens'] or []
+        if not screens:
+            imgui.text_disabled('Reading the screens...' if self.job is not None else
+                                'No UI screens found: add the game folder (Add a folder in the navigation pane).')
+        cur = None
+        if win.get('key'):
+            d = self.doc_by_uid(win['key'][1])
+            cur = os.path.normcase(d.path) if d is not None and d.path else None
+        last_plat = None
+        for s in screens:
+            if br['huds'] and not s['hud']:
+                continue
+            fname = os.path.basename(s['path'])
+            if q and q not in f'{s["name"]} {s["id"]} {fname}'.lower():
+                continue
+            if s['platform'] != last_plat:
+                imgui.text_disabled(f'{s["platform"]}')
+                last_plat = s['platform']
+            label = f'{s["name"] or "?"}  {s["id"]}'
+            if s['note']:
+                label += f'  ({s["note"]})'
+            if not fname.upper().startswith(str(s['id'])):
+                label += f'  [{fname}]'
+            if imgui.selectable(f'{label}##{s["path"]}', cur == os.path.normcase(s['path']))[0]:
+                br['pending'] = s
+            if imgui.is_item_hovered():
+                imgui.set_tooltip(f'{s["path"]}\n{s["layouts"]} layouts')
+
+    def ui_browser_open(self):
+        """Open the screen picked in the list (at the start of the window, outside the frame's other panels)."""
+        br = self.uied.get('browser') or {}
+        s = br.get('pending')
+        if not s:
+            return
+        br['pending'] = None
+        d = self.open_path(s['path'])
+        if d is None:
+            return
+        r = d.b.find(s['root'])
+        if r is None:
+            self.status = f'{os.path.basename(s["path"])}: its screen object is not there any more (Rescan).'
+            return
+        self.uied['window']['key'] = ('screen', d.uid, r.id)
 
     def ui_editor_window(self):
         """The editor in its own window over the app (called every frame)."""
         win = getattr(self, 'uied', {}).get('window')
         if not win:
             return
-        kind, uid, rid = win['key']
-        d = self.doc_by_uid(uid)
-        r = d.b.find(rid) if d is not None else None
-        node = self.ui_read(d, r) if r is not None else None
-        if node is None:
+        if win.get('browser'):
+            self.ui_browser_open()
+        node = d = r = None
+        if win.get('key'):
+            kind, uid, rid = win['key']
+            d = self.doc_by_uid(uid)
+            r = d.b.find(rid) if d is not None else None
+            node = self.ui_read(d, r) if r is not None else None
+        if node is None and not win.get('browser'):
             self.uied['window'] = None
             return
         vp = imgui.get_main_viewport()
@@ -104,17 +217,28 @@ class UIEditorUI:
         if win.get('focus'):
             imgui.set_next_window_focus()
             win['focus'] = False
-        title = f'UI editor - {self.display_name(d, r)[0]}  ({rid:#x})###uieditor'
+        title = (f'UI editor - {self.display_name(d, r)[0]}  ({r.id:#x})' if node is not None else 'UI editor') \
+            + '###uieditor'
         _, keep = imgui.begin(title, True, imgui.WindowFlags_.no_collapse | imgui.WindowFlags_.no_scrollbar)
         if not keep or (imgui.is_window_focused(imgui.FocusedFlags_.root_and_child_windows)
                         and imgui.is_key_pressed(imgui.Key.escape)):
             imgui.end()
             self.uied['window'] = None
             return
-        if kind == 'layout':
+        if win.get('browser'):
+            imgui.begin_child('##uibrowser', imgui.ImVec2(300, 0), imgui.ChildFlags_.borders)
+            self.ui_browser_list()
+            imgui.end_child()
+            imgui.same_line()
+            imgui.begin_child('##uiedright', imgui.ImVec2(0, 0))
+        if node is None:
+            imgui.text_disabled('Pick a screen on the left.')
+        elif win['key'][0] == 'layout':
             self.ui_layout_preview(d, r, node, window=True)
         else:
             self.ui_screen_preview(d, r, node, window=True)
+        if win.get('browser'):
+            imgui.end_child()
         imgui.end()
 
     def ui_screen_preview(self, d, r, node, window=False):
@@ -410,6 +534,49 @@ class UIEditorUI:
             self.uied[key] = immvision.GlTexture(img)
         return self.uied[key].texture_id
 
+    def ui_game_font(self, d, fid):
+        """(Font, GL atlas) of a game font id: from an open bundle, else UI/FONTS/<id>.BNDL of the game."""
+        if not isinstance(fid, int) or not fid:
+            return None
+        cache = self.uied.setdefault('gfonts', {})
+        if fid in cache:
+            return cache[fid]
+        hit = None
+        try:
+            rid = uifont.font_resource_id(fid)
+            b = next((o.b for o in self.docs if (o.b.find(rid) is not None and o.b.find(rid).type == uifont.T_FONT)),
+                     None)
+            if b is None:
+                root = roots.root_for(d.path, d.b.platform)
+                p = os.path.join(root, 'UI', 'FONTS', f'{fid}.BNDL') if root else None
+                b = Bundle.open(p) if p and os.path.isfile(p) else None
+            if b is not None:
+                font, fr, tex = uifont.from_bundle(b)
+                atlas = raster.decode(tex, b.platform, 0)
+                hit = (font, immvision.GlTexture(np.ascontiguousarray(atlas)))
+        except Exception:
+            hit = None
+        cache[fid] = hit
+        return hit
+
+    def ui_game_text(self, ops, gf, text, size, sty, el, x, y, w, h, scale, colour):
+        """The label's text as the game's glyph quads (justified in the element, centred vertically)."""
+        font, gl = gf
+        quads, tw, th = font.layout(text, size, sty['spacing'])
+        ax, ay = U.anchor_frac(el.anchor)
+        left, top = x - ax * w * scale, y - ay * h * scale
+        tx = left + {1: (w * scale - tw) / 2, 2: w * scale - tw}.get(el.just, 0)
+        ty = top + (h * scale - th) / 2
+        slant = math.tan(math.radians(sty['italic'])) if sty['italic'] else 0.0
+        base = ty + font.ascent * size
+        for qx, qy, qw, qh, u0, v0, u1, v1, kind in quads:
+            x0, y0 = tx + qx, ty + qy
+            pts = [(x0, y0), (x0 + qw, y0), (x0 + qw, y0 + qh), (x0, y0 + qh)]
+            if slant:
+                pts = [(px + (base - py) * slant, py) for px, py in pts]
+            col = tuple(colour) if kind != 3 else (1.0, 1.0, 1.0, colour[3])
+            ops.append(('quad', gl.texture_id, pts, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)], col, 'alpha'))
+
     def ui_text_texture(self, text, px, bold=True, spacing=0.0, italic=0.0):
         cache = self.uied.setdefault('text', {})
         key = (text, int(round(px)), bold, round(spacing, 1), round(italic, 1))
@@ -493,7 +660,10 @@ class UIEditorUI:
                     if el.tint:
                         colour = [a * b for a, b in zip(colour, el.tint)]
                     colour[3] *= op
-                    if text:
+                    gf = self.ui_game_font(d, sty['font']) if text and st.get('game_fonts', True) else None
+                    if gf is not None:
+                        self.ui_game_text(ops, gf, text, size, sty, el, x, y, w, h, scale, colour)
+                    elif text:
                         tt = self.ui_text_texture(text, size * k, sty['font'] not in REGULAR_FONTS,
                                                   sty['spacing'] * k, sty['italic'])
                         tw, th = tt[1] / k, tt[2] / k
@@ -678,6 +848,10 @@ class UIEditorUI:
             if ch:
                 st['snap'] = snaps[k]
             _, st['bound_faded'] = imgui.checkbox('Game pictures faded', st['bound_faded'])
+            imgui.same_line()
+            _, st['game_fonts'] = imgui.checkbox('Game fonts', st.get('game_fonts', True))
+            if imgui.is_item_hovered():
+                imgui.set_tooltip('Text drawn with the game\'s own fonts (UI/FONTS); off: Arial')
             if imgui.is_item_hovered():
                 imgui.set_tooltip('Images whose picture the game sets at run time (ImageBinding: profile pictures, '
                                   'icons, map tiles) show their stored stand-in texture faded and outlined.\n'
@@ -902,7 +1076,16 @@ class UIEditorUI:
                 self.ui_set(d, sr, sn, {fa.name_hash: ids[k]}, 'set the font')
         for name, label in STYLE_FIELDS:
             self.ui_field_edit(d, sr, sn, name, label)
-        imgui.text_disabled('(the preview draws Arial in the style\'s size, colour, spacing and slant)')
+        gf = self.ui_game_font(d, sn.fields.get(fa.name_hash) if fa is not None else None)
+        if gf is not None:
+            font = gf[0]
+            have = sum(1 for g in font.slots if g.kind in (2, 3) and uifont.drawn(g))
+            lacks = [c for c in 'őŐűŰ' if not uifont.drawn(font.glyph(c))]
+            imgui.text_disabled(f'font "{font.name}" ({font.style}): {have} characters'
+                                + (f'; lacks {" ".join(lacks)}' if lacks else ''))
+        else:
+            imgui.text_disabled('(this font is not found: the preview uses Arial)')
+        self.ui_font_tools(d, sr, sn, fa)
 
     def ui_strings(self, d):
         return ops.game_strings(d.path, root=roots.root_for(d.path, d.b.platform))
@@ -925,6 +1108,74 @@ class UIEditorUI:
             if not hits:
                 imgui.text_disabled('no string has that text')
             imgui.end_child()
+
+    def ui_font_tools(self, d, sr, sn, fa):
+        """Make a new font from a TrueType / OpenType file (or add the missing characters to a game font)."""
+        if fa is None or not imgui.tree_node('New font from a TTF / OTF file'):
+            return
+        st = self.uied.setdefault('newfont', {'ttf': '', 'keep': True, 'em': 40, 'use': True, 'extra': uifont.EXTRA})
+        imgui.text_wrapped('Starts from this style\'s font (its button icons and characters are kept). With "keep the '
+                           'game\'s letters" only the characters it lacks (e.g. ő ű) are drawn from the TTF; '
+                           'otherwise every letter is.')
+        if imgui.button('TTF / OTF file...'):
+            p = filedialog.open_file('Font file', self.cfg.get('last_import', ''),
+                                     [('Fonts (*.ttf, *.otf, *.ttc)', '*.ttf;*.otf;*.ttc'), ('All files', '*.*')])
+            if p:
+                st['ttf'] = p
+        imgui.same_line()
+        imgui.text(os.path.basename(st['ttf']) if st['ttf'] else '(none)')
+        _, st['keep'] = imgui.checkbox("Keep the game's letters, add only the missing characters", st['keep'])
+        if not st['keep']:
+            imgui.set_next_item_width(120)
+            _, st['em'] = imgui.slider_int('Pixels per em', st['em'], 16, 96)
+        imgui.set_next_item_width(200)
+        _, st['extra'] = imgui.input_text('Extra characters', st['extra'])
+        _, st['use'] = imgui.checkbox('Use the new font for this style', st['use'])
+        if imgui.button('Make the font...') and st['ttf']:
+            base_id = sn.fields.get(fa.name_hash)
+            root = roots.root_for(d.path, d.b.platform)
+            folder = os.path.join(root, 'UI', 'FONTS') if root else ''
+            new_id = self.ui_alloc_gc(d)
+            p = filedialog.save_file('Save the font bundle (its name is the font id)',
+                                     os.path.join(folder, f'{new_id}.BNDL'), filedialog.BUNDLES
+                                     if hasattr(filedialog, 'BUNDLES') else filedialog.ANY, 'BNDL')
+            if p:
+                ok, msg, fid = self.ui_make_font(d, base_id, st['ttf'], p, st['keep'], st['em'], st['extra'])
+                self.status = msg
+                if ok and st['use'] and fid is not None:
+                    self.ui_set(d, sr, sn, {fa.name_hash: fid}, f'use font {fid}')
+                self.modal = {'kind': 'message', 'title': 'New font', 'text': msg}
+        imgui.tree_pop()
+
+    def ui_make_font(self, d, base_id, ttf, path, keep=True, em=40, extra=uifont.EXTRA):
+        """Build and save a font bundle; its font id is the file name (digits), else a new id. An existing file is
+        kept as <file>.orig first. -> (ok, message, font id)."""
+        root = roots.root_for(d.path, d.b.platform)
+        base_path = os.path.join(root, 'UI', 'FONTS', f'{base_id}.BNDL') if root else None
+        if not base_path or not os.path.isfile(base_path):
+            return False, f'The base font {base_id} is not in the game folder.', None
+        stem = os.path.splitext(os.path.basename(path))[0]
+        fid = int(stem) if stem.isdigit() else self.ui_alloc_gc(d)
+        try:
+            base_b = Bundle.open(base_path)
+            font, fr, tex = uifont.from_bundle(base_b)
+            atlas = raster.decode(tex, base_b.platform, 0)
+            data, new_atlas, drawn = uifont.build(font, atlas, ttf, str(fid), em_px=int(em), keep_base=keep,
+                                                  extra=extra)
+            raw = uifont.make_bundle(Bundle.open(base_path), fid, data, new_atlas)
+            if os.path.isfile(path) and not os.path.isfile(path + '.orig'):
+                import shutil
+                shutil.copy2(path, path + '.orig')
+            ops.write_file(path, raw)
+        except Exception as ex:
+            return False, f'The font could not be made: {ex}', None
+        self.uied.setdefault('gfonts', {}).pop(fid, None)
+        self.uied.pop('fonts', None)
+        n = len(uifont.Font(data).slots)
+        msg = (f'Font {fid} saved as {path}: {n} characters, {drawn} drawn from {os.path.basename(ttf)}. '
+               f'The game finds it by its id ({fid} = UI/FONTS/{fid}.BNDL); a font id the game never used before is '
+               f'untested in game - replacing an existing font file (its .orig is kept) is the sure way.')
+        return True, msg, fid
 
     def ui_alloc_gc(self, d, extra=()):
         """A free GameChanger id for new objects / elements (0x7E000000 and up, not used in the bundle)."""

@@ -363,3 +363,73 @@ def animate(el, phase, t):
         elif typ == 10 and nums:                               # RotateFrom
             drot += nums[0] * (1 - k)
     return alpha, dx, dy, scale, drot
+
+
+# -- the game's screens -----------------------------------------------------------------------------------------
+KNOWN_HUDS = {371621: 'free roam', 604153: 'race', 371678: 'Speed Run', 371670: 'Ambush', 371720: 'online free roam',
+              371725: 'online team', 1019407: 'online', 1019757: 'online', 1019814: 'online'}
+SCREEN_FOLDERS = (('UI', 'SCREENS2'), ('UI', 'SCREENS'))
+
+
+def screen_info(path):
+    """{path, id, name, root, layouts, hud, platform} of a UI screen bundle (None when it has no Screen2)."""
+    from .bundle import Bundle
+    from .genesys import Reader, TypeDB
+    b = Bundle.open(path)
+    types = TypeDB()
+    types.add_bundle(b)
+    cands = [b.find(b.root_id)] if b.root_id else []
+    cands += [r for r in b.resources if r.type == 0x15]
+    for r in cands:
+        if r is None or r.type != 0x15 or r.missing:
+            continue
+        imps = r.imports()
+        if not imps or types.name(imps[0].id) != 'Screen2':
+            continue
+        n = Reader(types, b.e).read_resource(r)
+        widgets = screen_widgets(types, n)
+        gc = n.fields.get(H_GC)
+        name = n.fields.get(name_hash('BundleName')) or ''
+        hud = 'hud' in name.lower() or gc in KNOWN_HUDS or any(w[0] == 'HUD' for w in widgets)
+        return {'path': path, 'id': gc, 'name': name, 'root': r.id, 'hud': bool(hud), 'platform': b.platform,
+                'layouts': sum(len(ls) for _, ls in widgets), 'note': KNOWN_HUDS.get(gc, '')}
+    return None
+
+
+def screen_files(roots):
+    import os
+    out = []
+    for root in roots:
+        for parts in SCREEN_FOLDERS:
+            folder = os.path.join(root, *parts)
+            if os.path.isdir(folder):
+                out += [os.path.join(folder, n) for n in sorted(os.listdir(folder)) if n.upper().endswith('.BNDL')]
+    return out
+
+
+def scan_screens(roots, progress=None, cache=None):
+    """screen_info of every screen bundle under the game folders; cache {path: [size, mtime, info]} is used and
+    updated (unchanged files are not read again)."""
+    import os
+    cache = cache if cache is not None else {}
+    files = screen_files(roots)
+    out = []
+    for i, p in enumerate(files):
+        if progress:
+            progress(i, len(files))
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        hit = cache.get(p)
+        if hit and hit[0] == st.st_size and hit[1] == int(st.st_mtime):
+            info = hit[2]
+        else:
+            try:
+                info = screen_info(p)
+            except Exception:
+                info = None
+            cache[p] = [st.st_size, int(st.st_mtime), info]
+        if info:
+            out.append(info)
+    return out

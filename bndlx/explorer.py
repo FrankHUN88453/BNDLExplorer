@@ -630,6 +630,8 @@ class ExplorerUI:
             self.action_import_folder(d)
         if menu_item('Export sound streams (.SPS) of a folder as WAV...', '', False, self.job is None)[0]:
             self.action_export_sps()
+        if menu_item('UI editor (all screens and HUDs of the game)...', '', False, True)[0]:
+            self.open_ui_browser()
         if menu_item('Soundtrack editor (songs and playlists)...', '', False, self.job is None)[0]:
             self.open_soundtrack()
         if menu_item('License plates (texts of the car packs, registration)...', '', False, self.job is None)[0]:

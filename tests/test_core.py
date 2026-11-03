@@ -256,6 +256,35 @@ def test_luabc(folder):
           'Lua: a changed string constant reads back and shows in the listing')
 
 
+def test_fonts(root):
+    """UI fonts (UI/FONTS/<id>.BNDL, type 0x30): every font reads and writes back byte for byte, its resource id is
+    crc32(str(id)), '61' lays out as two glyphs (edge glyphs start a pixel before 0); a font built from a TTF with
+    the game's letters kept gains ő / ű."""
+    from bndlx import raster, uifont
+    folder = os.path.join(root, 'UI', 'FONTS')
+    names = sorted(n for n in os.listdir(folder) if n.upper().endswith('.BNDL'))
+    exact = ids = 0
+    for n in names:
+        b = Bundle.open(os.path.join(folder, n))
+        font, fr, tex = uifont.from_bundle(b)
+        recs = [(g.code, g.u, g.v, g.w, g.h, g.xo, g.yo, g.adv, g.scale, g.kind) for g in font.slots]
+        exact += uifont.pack_font(font, recs, font.sx, font.sy, font.ascent, font.name, font.style) ==             bytes(fr.data(0)[:fr.import_offset])
+        ids += fr.id == uifont.font_resource_id(int(n[:-5]))
+    check(exact == ids == len(names), f'fonts: {exact}/{len(names)} written back exactly, {ids} ids = crc32(str(id))')
+    digits = uifont.from_bundle(Bundle.open(os.path.join(folder, '581007.BNDL')))[0]
+    check(len(digits.layout('61', 40)[0]) == 2, 'fonts: "61" in the digits font is two glyphs')
+    ttf = os.path.join(os.environ.get('WINDIR', 'C:/Windows'), 'Fonts', 'arialbd.ttf')
+    if os.path.isfile(ttf):
+        b = Bundle.open(os.path.join(folder, '1206239.BNDL'))
+        font, fr, tex = uifont.from_bundle(b)
+        data, atlas, drawn = uifont.build(font, raster.decode(tex, b.platform, 0), ttf, 'test', keep_base=True)
+        nf = uifont.Font(data)
+        raw = uifont.make_bundle(Bundle.open(os.path.join(folder, '1206239.BNDL')), 2113929999, data, atlas)
+        f2 = uifont.from_bundle(Bundle.from_bytes(raw))
+        check(all(uifont.drawn(nf.glyph(c)) for c in 'őűŐŰ') and f2[1].id == uifont.font_resource_id(2113929999)
+              and uifont.drawn(f2[0].glyph('A')), f'fonts: a font made from a TTF gains ő ű ({drawn} drawn)')
+
+
 def test_wave_convert(path):
     """PS3 sounds converted for PC have the PC wave layout: 0x04 and 0x1C zero (PS3 memory size / size of the
     PS3-only data after the stream) and nothing after the stream; the sound itself is unchanged."""
@@ -1068,6 +1097,7 @@ def main():
         test_gwrite(os.path.join(PC, 'UI', 'SCREENS2', '371621.BNDL'))
         test_gwrite(os.path.join(PC, 'GAMELOGIC', 'GAMEMODES.BNDL'))
         test_luabc(os.path.join(PC, 'UI', 'SCREENS2'))
+        test_fonts(PC)
         test_ginsu(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'))
         test_fbx(os.path.join(PC, 'VEHICLES', 'VEH_1085007_HI.BNDL'), PC)
         test_animations(PC)
