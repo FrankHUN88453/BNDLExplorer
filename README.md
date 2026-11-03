@@ -510,6 +510,67 @@ One resource with all of its data: `BNDLRES1`, a JSON header (id, type, platform
 position, alignment bits, sizes, debug name) and the four memory chunks as the game loads them. Importing a
 .bres from the other platform converts it.
 
+## Mod Launcher (mod packages)
+
+A separate program in the same repository: `ModLauncher.exe` (`python packaging\build_launcher.py`), or
+`python -m bndlx.launcher [game folder]`. Put it into the game folder (it opens that folder) or anywhere (choose
+the folder; any drive). BNDL Explorer itself has no mod part.
+
+**Load order tab.** Mod packages (.zip) in a list, the later ones win: add them with **Add packages...** or drop
+them on the window, tick / untick, drag rows (or Top / Up / Down / Bottom) to reorder.
+- **Apply** builds every file a ticked package touches from its original (`<file>.orig`, kept once the first time
+  the file is changed) with the packages applied in list order. Bundles are merged per resource: two packages only
+  meet where they change the same resource (or the same whole file).
+- When two packages meet, Apply lists the elements they share (file and resource) and asks which one is to win
+  (load later); the answer reorders the list and is not asked again (**Ask me again for every pair** in the
+  Conflicts tab). The Conflicts tab shows every shared element and who wins it.
+- Files no ticked package touches any more go back to their original, files the packages created are removed.
+  A file changed outside the launcher (an edit saved in BNDL Explorer that is not in a package) is not
+  overwritten unless you say so.
+- **Apply and start the game** (through Steam when `steam_appid.txt` is there, else `NFS13.exe`; keep the EA app
+  offline), **Restore the original game** (every file back, the list stays), **Export order... / Import
+  order...** (`mod_order.json`: names, file names and md5s, ticks; an import finds the packages by md5 or file
+  name next to the order file and in the folders of the listed packages).
+- The list lives in `<game>\bndlx_mods\profile.json`.
+
+**Make a package tab.** Choose a game folder with your changes, **Find the changed files** lists every file that
+differs from its `.orig` (bundles with the number of changed resources; executables unticked), give a name /
+author / version / description and **Write the package...**.
+
+**What is in a package** (an example: a moved jack spot, a changed HUD screen object, a text file):
+
+```
+My mod.zip
+  manifest.json
+  bundles/HAWAII/TRIGGERS.BNDL/00000000e4a32837_0.bres       changed resources of a bundle, one .bres each
+  bundles/UI/SCREENS2/371621.BNDL/0000000021af9147_0.bres    (only the 1 changed resource of 1297)
+  files/VERSION.TXT                                         any other file, whole
+```
+
+```json
+{
+ "format": "bndlx-mod", "version": 1,
+ "name": "My mod", "author": "Frank", "mod_version": "1.0",
+ "description": "Moves a jack spot, tweaks a HUD screen.",
+ "platform": "PC", "created": "2026-11-03T07:23:28", "tool": "Mod Launcher 0.1",
+ "files": [
+  {"path": "HAWAII/TRIGGERS.BNDL", "kind": "bundle", "size": 280972,
+   "base_md5": "eba8c9...", "result_md5": "f39ecf...",
+   "resources": [{"key": "0xe4a32837/0", "type": 514, "name": "", "md5": "6d1350..."}], "removed": []},
+  {"path": "UI/SCREENS2/371621.BNDL", "kind": "bundle", "size": 1117568,
+   "base_md5": "2eb643...", "result_md5": "aaacdf...",
+   "resources": [{"key": "0x21af9147/0", "type": 21, "name": "", "md5": "bf03f0..."}], "removed": []},
+  {"path": "VERSION.TXT", "kind": "file", "size": 4, "base_md5": "2728ab...", "result_md5": "06c9c7..."}
+ ]
+}
+```
+
+A resource key is `0x<id>/<stream>` (multi-stream bundles hold some ids once per stream); its file is
+`bundles/<path>/<16 hex digits of the id>_<stream>.bres`, a BNDL Explorer resource file (Export as .bres). A
+bundle entry also has `"order"` when the mod moves resources around. Paths are relative to the game folder, with
+`/`; a path that leaves the game folder makes the package refused. Only `format`, `name`, `platform` and each
+file's `path` and `kind` (and a bundle's `resources`) are needed, so a package can also be zipped by hand.
+
 ## File format notes
 
 - bnd2 version 5, PC little-endian / PS3 big-endian. Compressed bundles store every chunk of every resource
@@ -531,6 +592,9 @@ python tests\test_gui.py                  :: the real window: drops, copy betwee
 python tests\test_audio_gui.py            :: sound preview: jump to a position, stop when another item is selected (silent)
 python tests\test_fbx_gui.py              :: FBX export with textures, import back, an edited object, undo
 python tests\test_anim_gui.py             :: damage animations on the car, a camera path, a skeleton
+python tests\test_triggers_gui.py         :: the trigger map: move / add / delete, the grid rebuilt, undo
+python tests\test_modpack.py              :: mod packages on temporary game folders: load order, conflicts, restore
+python tests\test_launcher_gui.py         :: the Mod Launcher: make a package, the conflict question, apply, start
 python tests\roundtrip_all.py "%BNDLX_PC%" "%BNDLX_PS3%"   :: every bundle saves byte-identical
 ```
 
