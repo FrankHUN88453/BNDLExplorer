@@ -124,7 +124,7 @@ def main():
             b = back.behaviours['in'][-1] if back.behaviours['in'] else None
             state['fade'] = (len(back.behaviours['in']) == n_in + 1 and b is not None
                              and U.behaviour(b)['params'] == 'IN' and U.behaviour(b)['duration'] == 300.0)
-            state['alpha'] = (U.animate(back, 'in', 0)[0], U.animate(back, 'in', 1000)[0])
+            state['alpha'] = (U.animate(back, 'in', 0).alpha, U.animate(back, 'in', 1000).alpha)
             view()['play'] = ('in', __import__('time').time())
         if f == 85:                          # duplicate
             r = d.b.find(state['lid'])

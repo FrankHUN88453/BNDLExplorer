@@ -4463,10 +4463,12 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI):
             imgui.pop_text_wrap_pos()
         if imgui.begin_tab_bar('objviews'):
             tname = self.types.name(node.type)
-            if tname in ('UILayout', 'Screen2') and imgui.begin_tab_item('Preview')[0]:
+            if tname in ('UILayout', 'Screen2', 'Sequence') and imgui.begin_tab_item('Preview')[0]:
                 animated = self.begin_tab_content_transition('objviews', 'preview')
                 if tname == 'UILayout':
                     self.ui_layout_preview(d, r, node)
+                elif tname == 'Sequence':
+                    self.ui_sequence_preview(d, r, node)
                 else:
                     self.ui_screen_preview(d, r, node)
                 self.end_tab_content_transition(animated)

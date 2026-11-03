@@ -44,6 +44,21 @@ STYLE_FIELDS = (('Font_Size', 'Size'), ('80ea78f4', 'Colour'), ('eeddd506', 'Eff
 PROPS_FIELDS = (('unoO', 'Justification'), ('AutoEllipsis', 'Auto ellipsis'), ('WordWrap', 'Word wrap'),
                 ('WordSquash', 'Word squash'), ('ColourBinding', 'Colour binding'))
 JUSTIFY = ('Left', 'Centre', 'Right', 'Full')
+TYPE_COLOURS = {0: (0.35, 0.75, 1.0, 0.9), 18: (0.35, 0.75, 1.0, 0.9), 1: (1.0, 0.65, 0.25, 0.9),
+                5: (1.0, 0.55, 0.15, 0.9), 2: (0.95, 0.75, 0.3, 0.9), 3: (0.95, 0.75, 0.3, 0.9),
+                4: (0.55, 0.9, 0.45, 0.9), 17: (0.55, 0.9, 0.45, 0.9), 8: (0.85, 0.5, 1.0, 0.9),
+                9: (0.85, 0.5, 1.0, 0.9), 10: (0.85, 0.5, 1.0, 0.9), 13: (1.0, 0.45, 0.6, 0.9),
+                7: (0.7, 0.7, 0.7, 0.9), 11: (0.5, 0.5, 0.5, 0.9)}
+NEW_BEHAVIOURS = (('Fade in', 'in', 0, 'IN', 300), ('Fade out', 'out', 0, 'OUT', 300),
+                  ('Slide in from the left', 'in', 5, '-600,0,EASIN', 300), ('Slide out to the left', 'out', 1,
+                                                                             '-600,0,EASIN', 300),
+                  ('Pop (scale 0 -> 100%)', 'in', 4, '0,100', 250), ('Pulse (idle scale)', 'idle', 4, '100,110', 800),
+                  ('Spin (idle 360)', 'idle', 8, '360', 2000), ('Blink (idle fade)', 'idle', 0, 'OUT', 800),
+                  ('Tint to white', 'in', 13, 'TO,WHITE', 300), ('Decode text in', 'in', 7, 'RANDOM,LINEAR,IN', 500))
+LAYOUT_NEW = (('FADE', ['0', '300', 'IN']), ('APPROACH', ['0', '300', '-600', '0', 'EASEIN']),
+              ('MOVE', ['0', '200', '-600', '0']))
+TL_H = 190
+
 
 
 def _hash(name):
@@ -243,6 +258,8 @@ class UIEditorUI:
             imgui.text_disabled('Pick a screen on the left.')
         elif win['key'][0] == 'layout':
             self.ui_layout_preview(d, r, node, window=True)
+        elif win['key'][0] == 'sequence':
+            self.ui_sequence_preview(d, r, node, window=True)
         else:
             self.ui_screen_preview(d, r, node, window=True)
         if win.get('browser'):
@@ -264,6 +281,7 @@ class UIEditorUI:
         if ch:
             st['sel'] = None
         items, missing = [], 0
+        st['params'] = {lid: pid for lid, pid in widgets[st['widget']][1] if pid}
         for lid, _params in widgets[st['widget']][1]:
             lr = d.b.find(lid)
             if lr is None or lr.type != 0x15:
@@ -276,6 +294,143 @@ class UIEditorUI:
             imgui.same_line()
             imgui.text_disabled(f'({missing} layouts are in other bundles and not shown)')
         self.ui_editor(d, items, ('screen', d.uid, r.id), window)
+
+    def ui_sequence_preview(self, d, r, node, window=False):
+        """A Sequence: its items on a time line (drag start / end), the layouts it shows at the play head drawn
+        above with their transitions; binding-driven sequences run over the binding's value."""
+        key = ('sequence', d.uid, r.id)
+        if not window and self.ui_in_window(key):
+            return
+        st = self.uied_state(key)
+        sq = st.setdefault('seq', {'t': 0.0, 'play': None, 'drag': None, 'sel': None})
+        items = U.sequence_items(self.types, node)
+        binding, end = U.sequence_axis(node, items)
+        if sq['play'] is not None:
+            sq['t'] = (time.time() - sq['play']) * (1.0 if not binding else end / 3.0)
+            if sq['t'] > end:
+                sq['t'], sq['play'] = end, None
+        t = sq['t']
+        state = dict(st['state'])
+        if binding:
+            state[U.binding_path(binding) or binding] = t
+        ev = U.Evaluator(state)
+        shown, params, times = [], {}, {}
+        black = 0.0
+        for it in items:
+            if not (it.start <= t < it.end or (it.end <= it.start and abs(t - it.start) < 1e-6)):
+                continue
+            if it.enabled and not ev.visible(it.enabled, True):
+                continue
+            if it.layout:
+                lr = d.b.find(it.layout)
+                ln = self.ui_read(d, lr) if lr is not None and lr.type == 0x15 else None
+                if ln is not None and all(x[0].id != lr.id for x in shown):
+                    shown.append((lr, ln))
+                    if it.params:
+                        params[lr.id] = it.params
+                    times[lr.id] = (t - it.start) * 1000.0 if not binding else 10000.0
+            elif it.kind == 'BlackQuad':
+                span = max(it.end - it.start, 1e-6)
+                k = (t - it.start) / span
+                black = max(black, min(1.0, 2 * min(k, 1 - k) * 2))
+        st['params'] = params
+        st['layout_time'] = times
+        st['black'] = black
+        imgui.text(f'{len(items)} items; ' + (f'runs on {binding} (0 .. {end:g})' if binding else f'{end:g} s')
+                   + f'; at {t:.2f}: {len(shown)} layout(s)')
+        self.ui_editor(d, shown, key, window, bottom=lambda w: self.ui_sequence_timeline(d, r, node, st, items,
+                                                                                         binding, end, w))
+
+    def ui_sequence_timeline(self, d, r, node, st, items, binding, end, width):
+        sq = st['seq']
+        playing = sq['play'] is not None
+        if imgui.small_button('Stop' if playing else 'Play'):
+            sq['play'] = None if playing else time.time() - (0 if sq['t'] >= end else sq['t'])
+            if not playing and sq['t'] >= end:
+                sq['t'] = 0.0
+        imgui.same_line()
+        imgui.set_next_item_width(220)
+        ch, v = imgui.slider_float('##seqt', sq['t'], 0.0, end, '%.2f')
+        if ch:
+            sq['t'], sq['play'] = v, None
+        imgui.same_line()
+        imgui.text_disabled(binding if binding else 'seconds')
+        dl = imgui.get_window_draw_list()
+        o = imgui.get_cursor_screen_pos()
+        label_w, row_h, ruler = 190.0, 18.0, 16.0
+        area = max(100.0, width - label_w - 24)
+        k = area / end
+        h = ruler + row_h * max(1, len(items)) + 4
+        imgui.invisible_button('##seqhit', imgui.ImVec2(label_w + area, h))
+        hovered = imgui.is_item_hovered()
+        x0 = o.x + label_w
+        dl.add_rect_filled(imgui.ImVec2(x0, o.y), imgui.ImVec2(x0 + area, o.y + ruler), _u32((0.2, 0.2, 0.23, 1)))
+        mag = 10 ** math.floor(math.log10(max(end / 8, 1e-3)))
+        step = next(m * mag for m in (1, 2, 5, 10) if m * mag >= end / 8)     # at most ~8 labels
+        tt = 0.0
+        while tt <= end + 1e-9:
+            x = x0 + tt * k
+            dl.add_line(imgui.ImVec2(x, o.y + 6), imgui.ImVec2(x, o.y + ruler), _u32((1, 1, 1, 0.4)))
+            dl.add_text(imgui.ImVec2(x + 2, o.y), _u32((1, 1, 1, 0.5)), f'{tt:g}')
+            tt += step
+        io = imgui.get_io()
+        mx, my = io.mouse_pos.x, io.mouse_pos.y
+        drag = sq['drag']
+        hit = None
+        colours = {'Layout': (0.35, 0.75, 1.0, 0.9), 'Wave': (0.55, 0.9, 0.45, 0.9), 'Conductor': (0.85, 0.5, 1.0, 0.9),
+                   'BlackQuad': (0.45, 0.45, 0.45, 0.95), 'BusMixerChannel': (0.4, 0.7, 0.4, 0.9)}
+        for i, it in enumerate(items):
+            y = o.y + ruler + i * row_h + 2
+            s0, s1 = it.start, it.end
+            if drag is not None and drag['i'] == it.index:
+                s0, s1 = drag['b0'], drag['b1']
+            sel = sq['sel'] == it.index
+            dl.add_text(imgui.ImVec2(o.x + 2, y), _u32((1, 0.8, 0.3, 1) if sel else (1, 1, 1, 0.8)),
+                        f'{it.kind} {it.detail}'[:28])
+            bx0, bx1 = x0 + s0 * k, x0 + max(s1 * k, s0 * k + 4)
+            col = colours.get(it.kind, (0.8, 0.7, 0.4, 0.9))
+            if it.enabled:
+                col = (col[0] * 0.8, col[1] * 0.8, col[2] * 0.8, col[3])
+            dl.add_rect_filled(imgui.ImVec2(bx0, y + 1), imgui.ImVec2(bx1, y + row_h - 3), _u32(col), 2)
+            if bx1 - bx0 > 40:
+                dl.add_text(imgui.ImVec2(bx0 + 3, y), _u32((0, 0, 0, 0.85)), it.kind)
+            if hovered and drag is None and bx0 - 3 <= mx <= bx1 + 3 and y <= my <= y + row_h:
+                hit = (it, 'end' if mx >= bx1 - 5 else 'start' if mx <= bx0 + 5 else 'move')
+                imgui.set_tooltip(f'{it.kind} {it.detail}: {it.start:g} - {it.end:g}'
+                                  + (f'\nenabled: {it.enabled}' if it.enabled else '')
+                                  + '\ndrag: move, edges: start / end; double click a nested sequence opens it')
+        px = x0 + min(sq['t'], end) * k
+        dl.add_line(imgui.ImVec2(px, o.y), imgui.ImVec2(px, o.y + h), _u32((1, 0.3, 0.3, 1)), 1.5)
+        if drag is not None:
+            if imgui.is_mouse_down(0):
+                dt = (mx - drag['mx']) / k
+                q = step / 10 if not io.key_shift else step / 2
+                snap = lambda v: max(0.0, round(v / q) * q)  # noqa: E731
+                if drag['mode'] == 'move':
+                    drag['b0'] = snap(drag['s0'] + dt)
+                    drag['b1'] = drag['b0'] + (drag['s1'] - drag['s0'])
+                elif drag['mode'] == 'start':
+                    drag['b0'] = min(snap(drag['s0'] + dt), drag['s1'])
+                else:
+                    drag['b1'] = max(snap(drag['s1'] + dt), drag['s0'])
+            else:
+                sq['drag'] = None
+                if (drag['b0'], drag['b1']) != (drag['s0'], drag['s1']):
+                    it = next((x for x in items if x.index == drag['i']), None)
+                    if it is not None:
+                        self.ui_step(d, r, f'timing of sequence item {it.index}')
+                        self.ui_set(d, r, it.node, {U.H_START: drag['b0'], U.H_END: drag['b1']},
+                                    f'{it.kind} item {drag["b0"]:g} - {drag["b1"]:g}')
+            return
+        if hovered and imgui.is_mouse_down(0) and my <= o.y + ruler and mx >= x0:
+            sq['t'], sq['play'] = max(0.0, min(end, (mx - x0) / k)), None
+        elif hovered and hit is not None and imgui.is_mouse_double_clicked(0) and hit[0].sequence:
+            self.goto(hit[0].sequence, d)
+        elif hovered and imgui.is_mouse_clicked(0) and hit is not None and not d.b.truncated:
+            it, mode = hit
+            sq['sel'] = it.index
+            sq['drag'] = {'i': it.index, 'mode': mode, 'mx': mx, 's0': it.start, 's1': it.end, 'b0': it.start,
+                          'b1': it.end}
 
     def ui_read(self, d, r):
         key = ('uilayout', d.uid, r.id, id(r.data(0)), len(self.types.types))
@@ -421,7 +576,7 @@ class UIEditorUI:
         return ''
 
     # -- the editor -----------------------------------------------------------------------------------------
-    def ui_editor(self, d, items, key, window=False):
+    def ui_editor(self, d, items, key, window=False, bottom=None):
         st = self.uied_state(key)
         state = dict(st['state'])
         if st.get('live'):
@@ -430,15 +585,25 @@ class UIEditorUI:
         layouts = [(r, n, U.elements(self.types, n)) for r, n in items]
         avail = imgui.get_content_region_avail()
         panel = 420 if window else 360
+        tl_h = TL_H if st.get('timeline', True) else 26
         cw = max(320.0, avail.x - panel - 12)
         ch = cw * U.H / U.W
-        if ch > avail.y - 8:
-            ch = max(180.0, avail.y - 8)
+        if ch > avail.y - tl_h - 12:
+            ch = max(180.0, avail.y - tl_h - 12)
             cw = ch * U.W / U.H
+        imgui.begin_group()
         imgui.begin_child('##uicanvas', imgui.ImVec2(cw, ch))
         self.ui_canvas(d, st, layouts, ev, cw, ch)
         focus = imgui.is_window_focused(imgui.FocusedFlags_.child_windows)
         imgui.end_child()
+        imgui.begin_child('##uitimeline', imgui.ImVec2(cw, tl_h), imgui.ChildFlags_.borders)
+        if bottom is not None:
+            bottom(cw)
+        else:
+            self.ui_timeline(d, st, layouts, cw)
+        focus = focus or imgui.is_window_focused(imgui.FocusedFlags_.child_windows)
+        imgui.end_child()
+        imgui.end_group()
         imgui.same_line()
         imgui.begin_child('##uipanel', imgui.ImVec2(0, max(ch, avail.y - 4)))
         self.ui_panel(d, st, layouts, ev)
@@ -468,8 +633,7 @@ class UIEditorUI:
         play = st['play']
         if play is not None:
             t = (now - play[1]) * 1000.0
-            longest = max((U.phase_length(el, play[0]) for _, _, els in layouts for el in els), default=0.0)
-            if play[0] != 'idle' and t > longest + 400:
+            if play[0] != 'idle' and t > self.ui_anim_length(d, st, layouts, play[0]) + 400:
                 st['play'] = play = None
         fbs = imgui.get_io().display_framebuffer_scale.x or 1.0
         k = s * fbs                                          # layout units -> render target pixels
@@ -603,6 +767,249 @@ class UIEditorUI:
             col = tuple(colour) if kind != 3 else (1.0, 1.0, 1.0, colour[3])
             ops.append(('quad', gl.texture_id, pts, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)], col, 'alpha'))
 
+    def ui_palette(self, d):
+        root = roots.root_for(d.path, d.b.platform)
+        cache = self.uied.setdefault('palettes', {})
+        if root not in cache:
+            cache[root] = U.load_palette(root)
+        return cache[root]
+
+    def ui_layout_transitions(self, d, st, lid):
+        """{'in', 'out', 'res', 'node'} of a layout's transition texts (its instance params in the screen)."""
+        pid = (st.get('params') or {}).get(lid)
+        pr = d.b.find(pid) if pid else None
+        pn = self.ui_read(d, pr) if pr is not None and pr.type == 0x15 else None
+        tl = pn.fields.get(U.H_TIMELINE) if pn is not None else None
+        if not isinstance(tl, Node):
+            return None
+        return {'in': tl.fields.get(U.H_LAYOUT_IN) or '', 'out': tl.fields.get(U.H_LAYOUT_OUT) or '', 'res': pr,
+                'node': tl}
+
+    def ui_anim_length(self, d, st, layouts, phase):
+        end = max((U.phase_length(el, phase) for _, _, els in layouts for el in els), default=0.0)
+        for r, _n, _e in layouts:
+            tr = self.ui_layout_transitions(d, st, r.id)
+            if tr is not None and phase in ('in', 'out'):
+                end = max(end, U.layout_length(tr[phase]))
+        return end
+
+    def ui_timeline(self, d, st, layouts, width):
+        """Transitions on a time line: a row per element (or the selected one) and per layout transition; bars
+        from delay to delay + duration (drag: delay, right edge: duration); the play head scrubs the preview."""
+        tl = st.setdefault('tl', {'phase': 'in', 'only_sel': False, 'drag': None})
+        open_ = st.get('timeline', True)
+        if imgui.small_button('Timeline' if not open_ else 'Hide timeline'):
+            st['timeline'] = not open_
+        if not open_:
+            return
+        for ph, label in (('in', 'In'), ('out', 'Out'), ('idle', 'Idle')):
+            imgui.same_line()
+            if imgui.radio_button(label, tl['phase'] == ph):
+                tl['phase'] = ph
+                if st.get('scrub'):
+                    st['scrub'] = (ph, st['scrub'][1])
+        phase = tl['phase']
+        imgui.same_line()
+        playing = st['play'] is not None
+        if imgui.small_button('Stop' if playing else 'Play'):
+            st['play'] = None if playing else (phase, time.time())
+            st['scrub'] = None
+        imgui.same_line()
+        _, tl['only_sel'] = imgui.checkbox('Only the selected element', tl['only_sel'])
+        t_now = None
+        if st['play'] is not None:
+            t_now = (time.time() - st['play'][1]) * 1000.0
+        elif st.get('scrub'):
+            t_now = st['scrub'][1]
+        imgui.same_line()
+        imgui.text_disabled(f'{t_now:.0f} ms' if t_now is not None else '(click the ruler to scrub)')
+        if st.get('scrub'):
+            imgui.same_line()
+            if imgui.small_button('Rest'):
+                st['scrub'] = None
+        rows = self.ui_timeline_rows(d, st, layouts, phase, tl['only_sel'])
+        total = max([500.0] + [b[1] for _l, bars, _k in rows for b in bars]) * 1.15
+        dl = imgui.get_window_draw_list()
+        o = imgui.get_cursor_screen_pos()
+        label_w = 170.0
+        area = max(100.0, width - label_w - 24)
+        k = area / total
+        row_h = 18.0
+        ruler = 16.0
+        h = ruler + row_h * max(1, len(rows)) + 4
+        imgui.invisible_button('##tlhit', imgui.ImVec2(label_w + area, h))
+        hovered = imgui.is_item_hovered()
+        x0 = o.x + label_w
+        dl.add_rect_filled(imgui.ImVec2(x0, o.y), imgui.ImVec2(x0 + area, o.y + ruler), _u32((0.2, 0.2, 0.23, 1)))
+        step = 100 if total < 2500 else 500 if total < 10000 else 2000
+        t = 0
+        while t <= total:
+            x = x0 + t * k
+            big = t % (step * 5) == 0
+            dl.add_line(imgui.ImVec2(x, o.y + (4 if big else 9)), imgui.ImVec2(x, o.y + ruler), _u32((1, 1, 1, 0.4)))
+            if big:
+                dl.add_text(imgui.ImVec2(x + 2, o.y), _u32((1, 1, 1, 0.55)), f'{t / 1000:g}s')
+            t += step
+        io = imgui.get_io()
+        mx, my = io.mouse_pos.x, io.mouse_pos.y
+        drag = tl['drag']
+        hit = None
+        for i, (label, bars, key) in enumerate(rows):
+            y = o.y + ruler + i * row_h + 2
+            sel = key is not None and st['sel'] == key[:2]
+            dl.add_text(imgui.ImVec2(o.x + 2, y), _u32((1, 0.8, 0.3, 1) if sel else (1, 1, 1, 0.8)), label[:24])
+            lane = (row_h - 4) / max(1, len(bars))          # overlapping bars of a row share its height
+            for j, (b0, b1, colour, text, ref) in enumerate(bars):
+                if drag is not None and drag['ref'] == ref:
+                    b0, b1 = drag['b0'], drag['b1']
+                bx0, bx1 = x0 + b0 * k, x0 + max(b1 * k, b0 * k + 4)
+                by0, by1 = y + 1 + j * lane, y + 1 + (j + 1) * lane - (1 if len(bars) > 1 else 0)
+                dl.add_rect_filled(imgui.ImVec2(bx0, by0), imgui.ImVec2(bx1, by1), _u32(colour), 2)
+                if bx1 - bx0 > 30 and lane >= 12:
+                    dl.add_text(imgui.ImVec2(bx0 + 3, by0 - 1), _u32((0, 0, 0, 0.85)), text)
+                if hovered and drag is None and bx0 - 3 <= mx <= bx1 + 3 and by0 <= my <= by1:
+                    hit = (ref, 'end' if mx >= bx1 - 5 else 'move', b0, b1)
+                    imgui.set_tooltip(f'{text}: {b0:.0f} - {b1:.0f} ms (drag: delay, right edge: duration)')
+        if t_now is not None:
+            px = x0 + min(t_now, total) * k
+            dl.add_line(imgui.ImVec2(px, o.y), imgui.ImVec2(px, o.y + h), _u32((1, 0.3, 0.3, 1)), 1.5)
+        # mouse: scrub on the ruler, drag bars
+        if drag is not None:
+            if imgui.is_mouse_down(0):
+                dms = (mx - drag['mx']) / k
+                snap = 50 if io.key_shift else 10
+                if drag['mode'] == 'move':
+                    nb0 = max(0.0, round((drag['s0'] + dms) / snap) * snap)
+                    drag['b0'], drag['b1'] = nb0, nb0 + (drag['s1'] - drag['s0'])
+                else:
+                    drag['b1'] = max(drag['s0'] + 10, round((drag['s1'] + dms) / snap) * snap)
+            else:
+                tl['drag'] = None
+                if (drag['b0'], drag['b1']) != (drag['s0'], drag['s1']):
+                    self.ui_timeline_write(d, st, drag['ref'], drag['b0'], drag['b1'] - drag['b0'])
+            return
+        if hovered and imgui.is_mouse_down(0) and my <= o.y + ruler and mx >= x0:
+            st['scrub'] = (phase, max(0.0, (mx - x0) / k))
+            st['play'] = None
+        elif hovered and imgui.is_mouse_clicked(0) and hit is not None and not d.b.truncated:
+            ref, mode, b0, b1 = hit
+            if ref[0] == 'el':
+                st['sel'] = (ref[1], ref[2])
+            tl['drag'] = {'ref': ref, 'mode': mode, 'mx': mx, 's0': b0, 's1': b1, 'b0': b0, 'b1': b1}
+
+
+    def ui_timeline_rows(self, d, st, layouts, phase, only_sel):
+        """[(label, [(start ms, end ms, colour, text, ref)], (layout id, element index) or None)]."""
+        rows = []
+        for r, _n, els in layouts:
+            tr = self.ui_layout_transitions(d, st, r.id)
+            if tr is not None and phase in ('in', 'out') and tr[phase] and not only_sel:
+                bars = []
+                for i, (fn, args) in enumerate(U.parse_layout_transition(tr[phase])):
+                    try:
+                        b0, dur = float(args[0]), float(args[1])
+                    except (ValueError, IndexError):
+                        continue
+                    bars.append((b0, b0 + dur, (0.9, 0.9, 0.95, 0.85), fn.title(), ('lay', r.id, phase, i)))
+                if bars:
+                    rows.append((f'layout {r.id & 0xFFFFFFFF}', bars, None))
+            for el in els:
+                if only_sel and st['sel'] != (r.id, el.index):
+                    continue
+                bars = []
+                for i, b in enumerate(el.behaviours.get(phase, [])):
+                    p = U.behaviour(b)
+                    name = U.BEHAVIOUR_TYPES[p['type']] if p['type'] < len(U.BEHAVIOUR_TYPES) else str(p['type'])
+                    bars.append((p['delay'], p['delay'] + p['duration'], TYPE_COLOURS.get(p['type'], (0.7, 0.7, 0.7, 0.9)),
+                                 name, ('el', r.id, el.index, phase, i)))
+                if bars:
+                    rows.append((el.label, bars, (r.id, el.index)))
+        return rows
+
+    def ui_timeline_write(self, d, st, ref, delay, duration):
+        if ref[0] == 'el':
+            _k, rid, idx, phase, i = ref
+            r = d.b.find(rid)
+            n = self.ui_read(d, r)
+            el = next((e for e in U.elements(self.types, n) if e.index == idx), None)
+            bs = el.behaviours.get(phase, []) if el is not None else []
+            if i < len(bs):
+                self.ui_step(d, r, f'transition timing of element {idx}')
+                self.ui_set(d, r, bs[i], {U.H_DELAY: delay, U.H_DURATION: duration}, 'transition timing')
+        else:
+            _k, rid, phase, i = ref
+            tr = self.ui_layout_transitions(d, st, rid)
+            if tr is None:
+                return
+            parts = U.parse_layout_transition(tr[phase])
+            if i < len(parts):
+                parts[i][1][0] = U._fmt_num(round(delay))
+                if len(parts[i][1]) > 1:
+                    parts[i][1][1] = U._fmt_num(round(duration))
+                self.ui_set_layout_transition(d, tr, phase, U.format_layout_transition(parts))
+
+    def ui_set_layout_transition(self, d, tr, phase, text):
+        h = U.H_LAYOUT_IN if phase == 'in' else U.H_LAYOUT_OUT
+        loc = tr['node'].locs.get(h)
+        if loc is not None:
+            self.write_string(d, tr['res'], loc[0], text)
+            self.status = f'Layout transition ({phase}) set: {text} (Ctrl+Z to undo).'
+
+    def ui_layout_tab(self, d, st, r):
+        """The layout's own transitions (its instance params in this screen), part by part."""
+        tr = self.ui_layout_transitions(d, st, r.id)
+        if tr is None:
+            imgui.text_disabled('This layout has no instance parameters here (open the screen, not the layout).')
+            return
+        imgui.text_disabled(f'layout {r.id:#x}, parameters {tr["res"].id:#x}')
+        imgui.text_disabled('(parameter objects can be shared by several screens: this changes this bundle\'s copy)')
+        for phase, title in (('in', 'Transition in'), ('out', 'Transition out')):
+            imgui.separator()
+            imgui.text(title)
+            parts = U.parse_layout_transition(tr[phase])
+            changed = False
+            for i, (fn, args) in enumerate(parts):
+                imgui.push_id(f'{phase}{i}')
+                names = list(U.LAYOUT_FUNCS)
+                imgui.set_next_item_width(90)
+                ch, kk = imgui.combo('##fn', names.index(fn) if fn in names else 0, names)
+                if ch:
+                    parts[i] = (names[kk], parts[i][1])
+                    changed = True
+                fields = U.LAYOUT_FUNCS.get(parts[i][0], ())
+                for j, fname in enumerate(fields):
+                    if j >= len(args):
+                        break
+                    imgui.same_line()
+                    imgui.set_next_item_width(52 if fname not in ('direction', 'ease') else 80)
+                    ch, v = imgui.input_text(f'##{fname}', args[j], imgui.InputTextFlags_.enter_returns_true)
+                    if imgui.is_item_hovered():
+                        imgui.set_tooltip(fname + (' (ms)' if fname in ('delay', 'duration') else ''))
+                    if ch and v != args[j]:
+                        args[j] = v.strip()
+                        changed = True
+                imgui.same_line()
+                if imgui.small_button('x'):
+                    parts.pop(i)
+                    changed = True
+                    imgui.pop_id()
+                    break
+                imgui.pop_id()
+            for fn, args in LAYOUT_NEW:
+                if (phase == 'in' and fn == 'MOVE') or (phase == 'out' and fn == 'APPROACH'):
+                    continue
+                if imgui.small_button(f'+ {fn.title()}##{phase}'):
+                    a = list(args)
+                    if fn == 'FADE':
+                        a[2] = 'IN' if phase == 'in' else 'OUT'
+                    parts.append((fn, a))
+                    changed = True
+                imgui.same_line()
+            imgui.new_line()
+            if changed:
+                self.ui_set_layout_transition(d, tr, phase, U.format_layout_transition(parts))
+                return
+
     def ui_text_texture(self, text, px, bold=True, spacing=0.0, italic=0.0):
         cache = self.uied.setdefault('text', {})
         key = (text, int(round(px)), bold, round(spacing, 1), round(italic, 1))
@@ -619,8 +1026,26 @@ class UIEditorUI:
         ops, shapes, overlays = [], [], []
         unit = [(0, 0), (1, 0), (1, 1), (0, 1)]
         drag = st['drag']
+        anim = None
+        if play is not None:
+            anim = (play[0], (now - play[1]) * 1000.0)
+        elif st.get('scrub'):
+            anim = st['scrub']
+        palette = self.ui_palette(d) if anim is not None else None
+        base_anim = anim
         for r, _n, els in layouts:
+            anim = base_anim
             depth = 0
+            lay = None
+            own = (st.get('layout_time') or {}).get(r.id)
+            if own is not None:                       # a sequence shows this layout since `own` ms
+                anim = ('in', own)
+                palette = palette or self.ui_palette(d)
+            if anim is not None:
+                tr = self.ui_layout_transitions(d, st, r.id)
+                if tr is not None:
+                    lay = U.layout_anim(tr['in'] if anim[0] == 'in' else tr['out'] if anim[0] == 'out' else '',
+                                        anim[0], anim[1])
             for el in els:
                 x, y, w, h, rot = el.x, el.y, el.w, el.h, el.rot
                 if drag is not None and drag['key'] == (r.id, el.index):
@@ -632,10 +1057,14 @@ class UIEditorUI:
                 rb = ev.value(el.rot_bind)
                 if rb is not None:
                     rot += rb
-                alpha, dx, dy, scale, drot = 1.0, 0.0, 0.0, 1.0, 0.0
-                if play is not None:
-                    alpha, dx, dy, scale, drot = U.animate(el, play[0], (now - play[1]) * 1000.0)
-                x, y, rot = x + dx, y + dy, rot + drot
+                an = U.animate(el, anim[0], anim[1], palette) if anim is not None else U.Anim()
+                if lay is not None:
+                    an.alpha *= lay.alpha
+                    an.dx += lay.dx
+                    an.dy += lay.dy
+                alpha, scale = an.alpha, 1.0
+                x, y, rot = x + an.dx, y + an.dy, rot + an.drot
+                w, h = w * an.sx, h * an.sy
                 pts = U.corners(x, y, w, h, el.anchor, rot, scale)
                 if (r.id, el.gc) in st['hide'] and el.kind != 'Mask':
                     if st['show_hidden']:
@@ -674,7 +1103,7 @@ class UIEditorUI:
                                          el.image_bind.split('.')[-1] if mode == 'bound' else None))
                         continue
                     uv = self.ui_quad(d, el.quad) or unit
-                    tint = el.tint or [1, 1, 1, 1]
+                    tint = an.tint or el.tint or [1, 1, 1, 1]
                     faded = 0.45 if mode == 'bound' and st['bound_faded'] else 1.0
                     ops.append(('quad', tex[0].texture_id, pts, uv, (tint[0], tint[1], tint[2], tint[3] * op * faded),
                                 'add' if mode == 'additive' else 'alpha'))
@@ -682,12 +1111,14 @@ class UIEditorUI:
                         overlays.append((pts, (0.3, 0.8, 1.0, 0.45), None))
                 elif el.kind in ('Label', 'BackedLabel', 'ScrollingText', 'ScrollableLabel'):
                     text = self.ui_text(d, el, ev)
+                    if an.decode is not None and text:
+                        text = U.decoded(text, an.decode, el.gc or 0)
                     sty = self.ui_style(d, el.style)
                     size, colour = sty['size'], sty['colour']
-                    size = (size or h * 0.8) * scale
+                    size = (size or h * 0.8) * scale * an.sy
                     colour = list(colour or [1, 1, 1, 1])
-                    if el.tint:
-                        colour = [a * b for a, b in zip(colour, el.tint)]
+                    if an.tint or el.tint:
+                        colour = [a * b for a, b in zip(colour, an.tint or el.tint)]
                     colour[3] *= op
                     gf = self.ui_game_font(d, sty['font']) if text and st.get('game_fonts', True) else None
                     if gf is not None:
@@ -710,6 +1141,9 @@ class UIEditorUI:
                 if st['outlines']:
                     overlays.append((pts, (1, 1, 1, 0.25), None))
             ops.extend([('unmask',)] * depth)
+        black = st.get('black')
+        if black:
+            ops.append(('quad', None, [(0, 0), (U.W, 0), (U.W, U.H), (0, U.H)], unit, (0, 0, 0, black), 'alpha'))
         return ops, shapes, overlays
 
     @staticmethod
@@ -1491,6 +1925,9 @@ class UIEditorUI:
             if tab('All properties'):
                 self.ui_all_props(d, r, el)
                 imgui.end_tab_item()
+            if st.get('params') and tab('Layout'):
+                self.ui_layout_tab(d, st, r)
+                imgui.end_tab_item()
             imgui.end_tab_bar()
 
     # -- generic field editing ------------------------------------------------------------------------------
@@ -1962,6 +2399,8 @@ class UIEditorUI:
                 ch, prm = imgui.input_text('##prm', p['params'], imgui.InputTextFlags_.enter_returns_true)
                 if ch and prm != p['params']:
                     self.ui_set_text(d, r, b, U.H_PARAMS, prm)
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip('the parameters as text (the fields below edit them)')
                 imgui.same_line()
                 imgui.set_next_item_width(110)
                 ch, dd = imgui.drag_float2('##dd', [p['delay'], p['duration']], 5.0, 0, 60000, '%.0f')
@@ -1979,19 +2418,83 @@ class UIEditorUI:
                     self.ui_restructure(d, r, el.index,
                                         lambda root, els, h=h, i=i: els[el.index].fields[h].pop(i),
                                         f'remove a {title.lower()} behaviour')
+                    imgui.pop_id()
+                    return
+                self.ui_param_fields(d, r, b, p)
                 imgui.pop_id()
-        if imgui.small_button('+ Fade in'):
-            self.ui_add_behaviour(d, r, el, U.H_IN, 'IN', 'fade in')
+        imgui.set_next_item_width(200)
+        st = self.uied.setdefault('newbehaviour', {'k': 0})
+        _, st['k'] = imgui.combo('##newb', st['k'], [n for n, *_ in NEW_BEHAVIOURS])
         imgui.same_line()
-        if imgui.small_button('+ Fade out'):
-            self.ui_add_behaviour(d, r, el, U.H_OUT, 'OUT', 'fade out')
+        if imgui.small_button('Add'):
+            name, phase, typ, params, dur = NEW_BEHAVIOURS[st['k']]
+            h = {'in': U.H_IN, 'out': U.H_OUT, 'idle': U.H_IDLE}[phase]
+            self.ui_add_behaviour(d, r, el, h, params, name.lower(), typ, dur)
         if imgui.is_item_hovered():
-            imgui.set_tooltip('Retail fades: Type Fade, parameters IN / OUT, delay and duration in ms')
+            imgui.set_tooltip('Adds the transition with the parameters the retail data uses for it; the Timeline '
+                              'below shows and drags its timing, Play in / out / idle shows it')
 
-    def ui_add_behaviour(self, d, r, el, h, params, desc):
+    def ui_param_fields(self, d, r, b, p):
+        """The behaviour's parameters as fields of its type (numbers, IN / OUT, palette colour)."""
+        spec = U.PARAM_FIELDS.get(p['type'])
+        if not spec:
+            return
+        pend = self.uied.get('pending_param')
+        f = U.parse_params(p['type'], pend[1] if pend and pend[0] == id(b) else p['params'])
+        changed = False
+        imgui.indent(16)
+        for j, (name, kind) in enumerate(spec):
+            if j:
+                imgui.same_line()
+            if isinstance(kind, tuple):
+                imgui.set_next_item_width(70)
+                cur = kind.index(f[name]) if f[name] in kind else 0
+                ch, kk = imgui.combo(f'##{name}', cur, list(kind))
+                if ch:
+                    f[name] = kind[kk]
+                    changed = True
+            elif kind == 'text':
+                pal = sorted(self.ui_palette(d))
+                imgui.set_next_item_width(200)
+                cur = pal.index(f[name]) if f[name] in pal else -1
+                ch, kk = imgui.combo(f'##{name}', cur, pal) if pal else (False, -1)
+                if ch and kk >= 0:
+                    f[name] = pal[kk]
+                    changed = True
+                if pal and cur >= 0:
+                    c = self.ui_palette(d)[pal[cur]]
+                    imgui.same_line()
+                    imgui.color_button('##pc', imgui.ImVec4(*c))
+            else:
+                imgui.set_next_item_width(64)
+                ch, v = imgui.drag_float(f'##{name}', float(f[name]), 1.0, -10000, 10000, '%.0f')
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip(name)
+                if imgui.is_item_deactivated_after_edit() or (ch and not imgui.is_item_active()):
+                    changed = True
+                if ch:
+                    f[name] = v
+                    self.uied['pending_param'] = (id(b), U.format_params(p['type'], f))
+            if j == len(spec) - 1:
+                imgui.same_line()
+                imgui.text_disabled(', '.join(name for name, _k in spec))
+        imgui.unindent(16)
+        pend = self.uied.get('pending_param')
+        if pend and pend[0] == id(b) and not imgui.is_any_item_active():
+            self.uied['pending_param'] = None
+            if pend[1] != p['params']:
+                self.ui_set_text(d, r, b, U.H_PARAMS, pend[1])
+            return
+        if changed:
+            text = U.format_params(p['type'], f)
+            if text != p['params']:
+                self.ui_set_text(d, r, b, U.H_PARAMS, text)
+
+    def ui_add_behaviour(self, d, r, el, h, params, desc, typ=0, duration=300.0):
         def mutate(root, els):
             n = els[el.index]
-            b = self.ui_new_behaviour(n, h, params, 300.0)
+            b = self.ui_new_behaviour(n, h, params, duration)
+            b.fields[U.H_TYPE] = typ
             cur = n.fields.get(h)
             n.fields[h] = (cur if isinstance(cur, list) else []) + [b]
         self.ui_restructure(d, r, el.index, mutate, f'add a {desc} to element {el.index}')

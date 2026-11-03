@@ -363,10 +363,83 @@ def phase_length(el, phase):
     return max((behaviour(b)['delay'] + behaviour(b)['duration'] for b in el.behaviours.get(phase, [])), default=0.0)
 
 
-def animate(el, phase, t):
-    """(alpha, dx, dy, scale, drot) of the element at t ms into the transition `phase` ('in' / 'out' / 'idle').
-    Fade, Move / MoveFrom / MoveTo / Approach, Scale, Rotate / RotateFrom / RotateTo are shown; others are not."""
-    alpha, dx, dy, scale, drot = 1.0, 0.0, 0.0, 1.0, 0.0
+# behaviour parameters (the 'Parameters' text) as fields: type -> [(field, kind)], kind 'num' / 'word' / 'text'
+PARAM_FIELDS = {
+    0: [('direction', ('IN', 'OUT'))],                      # Fade IN / OUT [, EASIN]
+    1: [('dx', 'num'), ('dy', 'num')],                      # Move by (dx, dy)
+    2: [('x', 'num'), ('y', 'num')],                        # MoveTo the point
+    3: [('x', 'num'), ('y', 'num')],                        # MoveFrom the point
+    4: [('from %', 'num'), ('to %', 'num')],                # Scale
+    5: [('dx', 'num'), ('dy', 'num')],                      # Approach from (dx, dy) away
+    8: [('degrees', 'num')], 9: [('degrees', 'num')], 10: [('degrees', 'num')],
+    11: [('sound id', 'num')],                              # PlaySound
+    13: [('colour', 'text')],                               # Tint TO,<palette colour>
+    17: [('from x %', 'num'), ('from y %', 'num'), ('to x %', 'num'), ('to y %', 'num')],
+    18: [('to %', 'num')],                                  # FadeTo
+}
+EASE_WORDS = ('EASIN', 'EASEIN', 'EASEOUT', 'EASOUT', 'EASEINOUT', 'LINEAR')
+
+
+def parse_params(typ, params):
+    """{field: value} of a behaviour's parameters, plus 'extra' (the words left, e.g. EASIN)."""
+    parts = [p.strip() for p in (params or '').split(',')]
+    spec = PARAM_FIELDS.get(typ)
+    out = {'extra': []}
+    if spec is None:
+        out['extra'] = [p for p in parts if p]
+        return out
+    if typ == 13:                                            # TO,<name>
+        rest = [p for p in parts if p.upper() != 'TO']
+        out['colour'] = rest[0] if rest else ''
+        out['extra'] = rest[1:]
+        return out
+    if typ == 0:
+        out['direction'] = next((p.upper() for p in parts if p.upper() in ('IN', 'OUT')), 'IN')
+        out['extra'] = [p for p in parts if p and p.upper() not in ('IN', 'OUT')]
+        return out
+    nums = []
+    for p in parts:
+        try:
+            nums.append(float(p))
+        except ValueError:
+            if p:
+                out['extra'].append(p)
+    for i, (name, _kind) in enumerate(spec):
+        out[name] = nums[i] if i < len(nums) else 0.0
+    return out
+
+
+def _fmt_num(v):
+    return f'{int(v)}' if float(v).is_integer() else f'{v:g}'
+
+
+def format_params(typ, fields):
+    spec = PARAM_FIELDS.get(typ)
+    extra = [e for e in fields.get('extra', []) if e]
+    if spec is None:
+        return ','.join(extra)
+    if typ == 13:
+        return ','.join(['TO', fields.get('colour', '')] + extra)
+    if typ == 0:
+        return ','.join([fields.get('direction', 'IN')] + extra)
+    return ','.join([_fmt_num(fields.get(name, 0.0)) for name, _k in spec] + extra)
+
+
+class Anim:
+    """What a transition does to an element at a time: alpha, offset, scale x / y, rotation, tint, decode."""
+    __slots__ = ('alpha', 'dx', 'dy', 'sx', 'sy', 'drot', 'tint', 'decode')
+
+    def __init__(self):
+        self.alpha, self.dx, self.dy, self.sx, self.sy, self.drot = 1.0, 0.0, 0.0, 1.0, 1.0, 0.0
+        self.tint = None
+        self.decode = None
+
+
+def animate(el, phase, t, palette=None):
+    """Anim of the element at t ms into the transition `phase` ('in' / 'out' / 'idle'): Fade / FadeTo, Move,
+    MoveTo / MoveFrom (points), Approach (from an offset), Scale / ScaleXY, Rotate / RotateTo / RotateFrom, Tint (to
+    a palette colour), Decode (text appearing). Behaviours before their delay hold their start."""
+    a = Anim()
     for b in el.behaviours.get(phase, []):
         p = behaviour(b)
         dur = max(p['duration'], 1.0)
@@ -374,27 +447,200 @@ def animate(el, phase, t):
         if phase == 'idle' and dur > 1:
             raw = ((t - p['delay']) % dur) / dur if t >= p['delay'] else 0.0
         k = _ease(raw, p['ease'])
-        typ, words = p['type'], p['params'].upper().split(',')
-        nums = _floats(p['params'])
-        if typ == 0:                                            # Fade IN / OUT
+        typ = p['type']
+        f = parse_params(typ, p['params'])
+        if typ == 0:
+            out = f['direction'] == 'OUT'
+            a.alpha *= (1 - k) if out else k
+        elif typ == 18:
+            a.alpha *= 1 + (f['to %'] / 100.0 - 1) * k
+        elif typ == 1:
+            a.dx += f['dx'] * k
+            a.dy += f['dy'] * k
+        elif typ == 5:
+            a.dx += f['dx'] * (1 - k)
+            a.dy += f['dy'] * (1 - k)
+        elif typ == 2:
+            a.dx += (f['x'] - el.x) * k
+            a.dy += (f['y'] - el.y) * k
+        elif typ == 3:
+            a.dx += (f['x'] - el.x) * (1 - k)
+            a.dy += (f['y'] - el.y) * (1 - k)
+        elif typ == 4:
+            s = (f['from %'] + (f['to %'] - f['from %']) * k) / 100.0
+            a.sx *= s
+            a.sy *= s
+        elif typ == 17:
+            a.sx *= (f['from x %'] + (f['to x %'] - f['from x %']) * k) / 100.0
+            a.sy *= (f['from y %'] + (f['to y %'] - f['from y %']) * k) / 100.0
+        elif typ in (8, 9):
+            a.drot += f['degrees'] * k
+        elif typ == 10:
+            a.drot += f['degrees'] * (1 - k)
+        elif typ == 13 and palette:
+            col = palette.get(f['colour'])
+            if col is not None:
+                base = list(el.tint or [1.0, 1.0, 1.0, 1.0])
+                a.tint = [x + (y - x) * k for x, y in zip(base, col)]
+        elif typ == 7:
+            out = 'OUT' in [e.upper() for e in f['extra']]
+            a.decode = (1 - k) if out else k
+    return a
+
+
+def decoded(text, k, seed=0):
+    """Text k (0..1) of the way through the Decode effect: the first letters final, the rest scrambled."""
+    import random
+    n = int(round(len(text) * max(0.0, min(1.0, k))))
+    rnd = random.Random(seed + int(k * 20))
+    pool = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    return text[:n] + ''.join(c if c == ' ' else rnd.choice(pool) for c in text[n:])
+
+
+# -- layout transitions (UILayoutInstanceParams.TimelineParameters) ------------------------------------------------
+H_TIMELINE = 0xac3e9556
+H_LAYOUT_IN = 0xaedfbe15
+H_LAYOUT_OUT = 0x0b603df7
+LAYOUT_FUNCS = {'FADE': ('delay', 'duration', 'direction', 'ease'),
+                'APPROACH': ('delay', 'duration', 'dx', 'dy', 'ease'),
+                'MOVE': ('delay', 'duration', 'dx', 'dy', 'ease')}
+_FUNC = re.compile(r'\s*([A-Za-z_]+)\s*\(([^)]*)\)\s*,?')
+
+
+def parse_layout_transition(text):
+    """[(FUNC, [args as text])] of a layout transition, e.g. 'APPROACH (0, 200, -600, 0, EASEIN), FADE(0, 200, IN)'."""
+    out = []
+    for m in _FUNC.finditer(text or ''):
+        out.append((m.group(1).upper(), [a.strip() for a in m.group(2).split(',')]))
+    return out
+
+
+def format_layout_transition(parts):
+    return ', '.join(f'{fn}({", ".join(a for a in args)})' for fn, args in parts)
+
+
+def layout_anim(text, phase, t):
+    """Anim of a whole layout at t ms into its transition text (FADE / APPROACH / MOVE)."""
+    a = Anim()
+    for fn, args in parse_layout_transition(text):
+        nums = []
+        words = []
+        for x in args:
+            try:
+                nums.append(float(x))
+            except ValueError:
+                words.append(x.upper())
+        if len(nums) < 2:
+            continue
+        delay, dur = nums[0], max(nums[1], 1.0)
+        ease = 1 if any('IN' in w and 'OUT' not in w and w.startswith('EAS') for w in words) else \
+            3 if 'EASEINOUT' in words else 0
+        k = _ease((t - delay) / dur, ease)
+        if fn == 'FADE':
             out = 'OUT' in words or (phase == 'out' and 'IN' not in words)
-            alpha *= (1 - k) if out else k
-        elif typ == 18 and nums:                               # FadeTo percent
-            alpha *= 1 + (nums[0] / 100.0 - 1) * k
-        elif typ in (1, 3, 5) and len(nums) >= 2:              # Move / MoveFrom / Approach: from the offset to 0
-            f = (1 - k) if phase != 'out' else k
-            dx += nums[0] * f
-            dy += nums[1] * f
-        elif typ == 2 and len(nums) >= 2:                      # MoveTo
-            dx += nums[0] * k
-            dy += nums[1] * k
-        elif typ in (4, 17) and len(nums) >= 2:                # Scale from,to (percent)
-            scale *= (nums[0] + (nums[1] - nums[0]) * k) / 100.0
-        elif typ in (8, 9) and nums:                           # Rotate / RotateTo (degrees)
-            drot += nums[0] * k
-        elif typ == 10 and nums:                               # RotateFrom
-            drot += nums[0] * (1 - k)
-    return alpha, dx, dy, scale, drot
+            a.alpha *= (1 - k) if out else k
+        elif fn == 'APPROACH' and len(nums) >= 4:
+            a.dx += nums[2] * (1 - k)
+            a.dy += nums[3] * (1 - k)
+        elif fn == 'MOVE' and len(nums) >= 4:
+            a.dx += nums[2] * k
+            a.dy += nums[3] * k
+    return a
+
+
+def layout_length(text):
+    end = 0.0
+    for fn, args in parse_layout_transition(text):
+        try:
+            end = max(end, float(args[0]) + float(args[1]))
+        except (ValueError, IndexError):
+            pass
+    return end
+
+
+# -- sequences (UI timelines) -------------------------------------------------------------------------------------
+H_ITEMS = name_hash('SequenceItems')
+H_START = name_hash('StartTime')
+H_END = name_hash('EndTime')
+H_ENABLED = name_hash('EnabledBinding')
+H_SEQ_BINDING = name_hash('Binding')
+H_SEQ_MAX = name_hash('Binding_Max')
+H_ITEM_LAYOUT = name_hash('Layout')
+H_ITEM_PARAMS = name_hash('InstanceParams')
+H_ITEM_SEQUENCE = name_hash('Sequence')
+H_ITEM_WAVES = name_hash('Waves')
+H_ITEM_MOVIE = name_hash('Movie')
+
+
+class SeqItem:
+    __slots__ = ('index', 'node', 'kind', 'start', 'end', 'enabled', 'layout', 'params', 'sequence', 'detail')
+
+
+def sequence_items(types, seq):
+    """[SeqItem] of a Sequence node: kind (type name without 'SequenceItem'), start / end, enabled binding and
+    what it shows / plays (layout + instance params, nested sequence, waves, movie)."""
+    out = []
+    for i, n in enumerate(seq.fields.get(H_ITEMS) or []):
+        if not isinstance(n, Node):
+            continue
+        it = SeqItem()
+        it.index, it.node = i, n
+        name = types.name(n.type).replace('SequenceItems.', '')
+        it.kind = name[:-len('SequenceItem')] if name.endswith('SequenceItem') and name != 'SequenceItem' else name
+        f = n.fields
+        it.start, it.end = _num(f.get(H_START)), _num(f.get(H_END))
+        it.enabled = f.get(H_ENABLED) or ''
+        it.layout = _ref(f.get(H_ITEM_LAYOUT))
+        it.params = _ref(f.get(H_ITEM_PARAMS))
+        it.sequence = _ref(f.get(H_ITEM_SEQUENCE))
+        waves = f.get(H_ITEM_WAVES)
+        it.detail = ''
+        if it.layout:
+            it.detail = f'layout {it.layout & 0xFFFFFFFF}'
+        elif it.sequence:
+            it.detail = f'sequence {it.sequence & 0xFFFFFFFF}'
+        elif isinstance(waves, list) and waves:
+            it.detail = f'{len(waves)} sound(s)'
+        elif f.get(H_ITEM_MOVIE):
+            it.detail = f'movie {f.get(H_ITEM_MOVIE)}'
+        out.append(it)
+    return out
+
+
+def sequence_axis(seq, items):
+    """(binding or None, end): a binding-driven sequence runs over the binding's value 0..Binding_Max."""
+    binding = seq.fields.get(H_SEQ_BINDING) or None
+    end = max([it.end for it in items] + [0.0])
+    if binding:
+        end = max(end, _num(seq.fields.get(H_SEQ_MAX), 1.0))
+    return binding, max(end, 0.1)
+
+
+def load_palette(root):
+    """{colour name: [r, g, b, a] 0..1} of the game's UI palette (UI/UICONFIG.BNDL, UIColourPalette)."""
+    import os
+    from .bundle import Bundle
+    from .genesys import Reader, TypeDB
+    path = os.path.join(root, 'UI', 'UICONFIG.BNDL') if root else None
+    pal = {}
+    if not path or not os.path.isfile(path):
+        return pal
+    try:
+        b = Bundle.open(path)
+        types = TypeDB()
+        types.add_bundle(b)
+        for r in b.resources:
+            if r.type != 0x15 or not r.imports() or types.name(r.imports()[0].id) != 'UIColourPalette':
+                continue
+            n = Reader(types, b.e).read_resource(r)
+            for c in n.fields.get(0xd46fdc01) or []:
+                if isinstance(c, Node):
+                    name, col = c.fields.get(0x263d15bc), c.fields.get(name_hash('Colour'))
+                    if isinstance(name, str) and isinstance(col, list) and len(col) == 4:
+                        pal[name] = [x / 255.0 for x in col]
+    except Exception:
+        pass
+    return pal
 
 
 # -- the game's screens -----------------------------------------------------------------------------------------
