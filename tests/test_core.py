@@ -1048,6 +1048,44 @@ def test_ps3_animations(ps3_root):
           f'(dent up to {dent * 100:.0f} cm, damage animation moves it {moved * 100:.0f} cm)')
 
 
+def test_triggers(path):
+    """HAWAII\\TRIGGERS.BNDL: read, rebuilt byte for byte; moved / added / removed triggers land in the right grid
+    cells; CSV round trip; the bundle saves and reads back."""
+    from bndlx import triggers as TR
+    b = Bundle.open(path)
+    r = next(x for x in b.resources if x.type == TR.T_TRIGGERS)
+    raw = bytes(r.data(0))
+    td = TR.TriggerData.read(raw, b.e)
+    n = td.counts()
+    check(td.rebuilt() == raw, f'{os.path.basename(os.path.dirname(path))} triggers: {n[0]} boxes, {n[1]} spheres, '
+                               f'{n[2]} locators; written from scratch byte for byte')
+    t = next(x for x in td.triggers if x.shape == TR.BOX and x.half[0] < 50)
+    t.pos[0] += 600.0
+    td.triggers.append(TR.Trigger(TR.SPHERE, [t.pos[0], t.pos[1], t.pos[2] + 300.0], 12345, 4, 0, 0, radius=30.0))
+    gone = next(x for x in td.triggers if x.shape == TR.LOCATOR)
+    td.triggers.remove(gone)
+    data = td.to_bytes()
+    back = TR.TriggerData.read(data, b.e)
+    cells = back.cells()
+    ok = cells == back.build_cells(back.ordered())
+    i_t = back.ordered().index(next(x for x in back.triggers if x.pos == t.pos and x.shape == TR.BOX))
+    a, bb = back.cell_of(t.pos[0], t.pos[2]) or (None, None)
+    in_cell = a is not None and i_t in cells[bb * back.grid[0] + a]
+    check(ok and in_cell and len(back.triggers) == len(td.triggers),
+          f'edited triggers: grid rebuilt ({ok}), the moved box is in its new cell ({in_cell}), '
+          f'{len(back.triggers)} triggers')
+    csv = TR.to_csv(back, TR.TYPE_NAMES)
+    again = TR.TriggerData.read(data, b.e)
+    again.triggers = TR.from_csv(csv)
+    check(again.to_bytes() == data, 'CSV export / import gives the same file')
+    r.set_data(0, data)
+    out = os.path.join(TMP, 'TRIGGERS.BNDL')
+    b.save(out)
+    b2 = Bundle.open(out)
+    r2 = next(x for x in b2.resources if x.type == TR.T_TRIGGERS)
+    check(bytes(r2.data(0)) == data, 'the edited bundle saves and reads back')
+
+
 def test_vehiclelist(path):
     """The vehicle list rebuilds byte-identical, survives a CSV round trip, and a CSV edit (a changed value, a
     duplicated car) saves and reads back."""
@@ -1105,6 +1143,7 @@ def main():
         test_world(os.path.join(PC, 'HAWAII', 'TRK_UNIT1.BNDL'))
         test_sps(PC)
         test_zones(os.path.join(PC, 'HAWAII'))
+        test_triggers(os.path.join(PC, 'HAWAII', 'TRIGGERS.BNDL'))
         test_soundtrack(PC)
         test_plate(PC)
         test_plate_texts(PC)
@@ -1124,6 +1163,7 @@ def main():
         test_ginsu(os.path.join(PS3, 'VEHICLES', 'VEH_122672_EN.BNDL'))
         test_fbx(os.path.join(PS3, 'VEHICLES', 'VEH_122672_MS.BNDL'), PS3)
         test_proto_world(os.path.join(PS3, 'SEACREST'))
+        test_triggers(os.path.join(PS3, 'SEACREST', 'TRIGGERS.BNDL'))
         test_control_mesh(os.path.join(PS3, 'VEHICLES'))
         test_ps3_animations(PS3)
     if not (PC or PS3):

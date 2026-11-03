@@ -40,6 +40,8 @@ from .audioplay import Player
 from .soundtrack_ui import SoundtrackUI
 from .port_ui import PortUI
 from .ui_editor import UIEditorUI
+from .trigger_ui import TriggerUI
+from . import triggers as TR
 from .explorer import Browser, ExplorerUI
 from .thumbs import Thumbs
 from .bundle import FLAG_NAMES, Bundle, BundleError
@@ -194,7 +196,7 @@ def waveform(audio, cols=1024):
             np.array([p.max() if len(p) else 0 for p in parts]))
 
 
-class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI):
+class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI, TriggerUI):
     def __init__(self, paths=(), select=None):
         self.dashboard_icons = False
         self.tab_content_transitions = {}
@@ -1769,6 +1771,8 @@ class App(ExplorerUI, SoundtrackUI, AnimUI, PortUI, UIEditorUI):
             self.hsm_view(d, r)
         elif t == traffic.T_TRAFFIC:
             self.traffic_view(d, r)
+        elif t == TR.T_TRIGGERS:
+            self.trigger_view(d, r)
         else:
             imgui.text_wrapped(f'{type_name(t)}: no viewer for this type yet. The Imports and Hex tabs show its data; '
                                'Export / Replace work for every type (.bres or raw chunks).')

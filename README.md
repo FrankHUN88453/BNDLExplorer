@@ -304,6 +304,27 @@ The PS3 prototype's `HAWAII` track units are empty: its playable world is **`SEA
 track units in 5 districts, 1.5 GB). Its `PVS.BNDL` map, its units in 3D (with Neighbours and collision) and its
 older list layouts all work the same way.
 
+## Triggers (TRIGGERS.BNDL)
+
+`HAWAII\TRIGGERS.BNDL` holds the **TriggerData**: every trigger shape of the world (PC: 6404 boxes, 53 spheres,
+2585 locators). Its preview is a map, best opened with **Open the trigger map in a large window**: the triggers
+from above over the districts (`PVS.BNDL`) and the traffic lanes (`TRAFFIC.BNDL`) of the same folder, coloured by
+trigger type.
+
+- The list on the left shows / hides trigger types and shapes; the box finds every trigger of one owner id.
+- Click a trigger to select it, drag it to move it; the panel on the right edits its type, flags, owner id,
+  position, half size, heading (or the full rotation), radius or direction, and lists the triggers of the same
+  owner.
+- **Add box / sphere / locator** (at the centre of the view, copying the selected trigger of that shape),
+  **Duplicate**, **Delete**; **Export CSV / Import CSV** for bulk edits (`;`, decimal commas allowed).
+- Every change is one undo step. The cell grid the game searches (45 x 39 cells of 250 m) is rebuilt from the
+  shapes the way the game's own tool built it (an unchanged file is written back byte for byte).
+
+Trigger types are numbers; the names in the list come from the gameplay data that refers to the triggers'
+owners (events, jack spots, roadblocks, drift markers, safehouses, collectables, ...); hover a type for where it
+is used. Types without a name are not referred to by any data (the game looks them up by number); `?` marks a
+guess.
+
 ## Sound stream files (.SPS)
 
 Music, ambience, sequence sound tracks, video sound tracks and some speech are not in bundles but in `.SPS`

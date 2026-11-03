@@ -244,6 +244,7 @@ class ExplorerUI:
         self.texture_window()
         self.model_textures_window()
         self.ui_editor_window()
+        self.trigger_window()
         self.modals()
         self.genesys_string_window()
         self.results_window()
